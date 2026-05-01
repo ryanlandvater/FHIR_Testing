@@ -28,9 +28,24 @@ endif()
 
 # Consume FastFHIR from an installed prefix to avoid referencing checkout internals.
 set(FASTFHIR_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/local" CACHE PATH "FastFHIR install prefix (contains include/ and lib/)")
+set(FASTFHIR_BUILD_DIR "${CMAKE_SOURCE_DIR}/.external/FastFHIR-build" CACHE PATH "FastFHIR build directory (for generated headers and bundled simdjson headers)")
 
 if(NOT EXISTS "${FASTFHIR_INSTALL_PREFIX}/include/FastFHIR.hpp")
   message(FATAL_ERROR "FastFHIR public headers not found at ${FASTFHIR_INSTALL_PREFIX}/include. Run ./generate_repo.sh to build and install FastFHIR.")
+endif()
+
+set(FASTFHIR_INCLUDE_DIR "${FASTFHIR_ROOT}/include")
+set(FASTFHIR_GENERATED_INCLUDE_DIR "${FASTFHIR_ROOT}/generated_src")
+set(FASTFHIR_SIMDJSON_INCLUDE_DIR "${FASTFHIR_BUILD_DIR}/_deps/simdjson-src/include")
+
+if(NOT EXISTS "${FASTFHIR_INCLUDE_DIR}/FastFHIR.hpp")
+  message(FATAL_ERROR "FastFHIR source headers not found at ${FASTFHIR_INCLUDE_DIR}. Ensure FASTFHIR_ROOT points to the active FastFHIR checkout.")
+endif()
+if(NOT EXISTS "${FASTFHIR_GENERATED_INCLUDE_DIR}")
+  message(FATAL_ERROR "FastFHIR generated headers not found at ${FASTFHIR_GENERATED_INCLUDE_DIR}. Build FastFHIR first so generated_src is available.")
+endif()
+if(NOT EXISTS "${FASTFHIR_SIMDJSON_INCLUDE_DIR}/simdjson.h")
+  message(FATAL_ERROR "Bundled simdjson headers not found at ${FASTFHIR_SIMDJSON_INCLUDE_DIR}. Ensure FASTFHIR_BUILD_DIR points to the FastFHIR build tree.")
 endif()
 
 find_library(FASTFHIR_LIBRARY
@@ -40,10 +55,20 @@ find_library(FASTFHIR_LIBRARY
   REQUIRED
 )
 
+find_library(FASTFHIR_INGESTOR_LIBRARY
+  NAMES fastfhir_ingestor
+  PATHS "${FASTFHIR_INSTALL_PREFIX}/lib"
+  NO_DEFAULT_PATH
+  REQUIRED
+)
+
 add_library(bench_core INTERFACE)
 target_include_directories(bench_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(bench_core INTERFACE ${FASTFHIR_INSTALL_PREFIX}/include)
-target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY})
+target_include_directories(bench_core INTERFACE ${FASTFHIR_INCLUDE_DIR})
+target_include_directories(bench_core INTERFACE ${FASTFHIR_GENERATED_INCLUDE_DIR})
+target_include_directories(bench_core INTERFACE ${FASTFHIR_SIMDJSON_INCLUDE_DIR})
+target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
+target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY} ${FASTFHIR_INGESTOR_LIBRARY})
 
 if(PostgreSQL_FOUND)
   target_include_directories(bench_core INTERFACE ${PostgreSQL_INCLUDE_DIRS})

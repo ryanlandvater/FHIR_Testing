@@ -5,8 +5,7 @@ set -euo pipefail
 # 1) Resolve FastFHIR source (external URL first, local checkout fallback)
 # 2) Build/install FastFHIR to local/
 # 3) Download Synthea JSON if missing
-# 4) Convert JSON -> .ffhr with ff_ingestor (or ff_ingest fallback)
-# 5) Build this benchmark repo
+# 4) Build this benchmark repo
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTERNAL_DIR="${REPO_ROOT}/.external"
@@ -16,7 +15,7 @@ FASTFHIR_INSTALL="${REPO_ROOT}/local"
 FASTFHIR_STAMP="${FASTFHIR_INSTALL}/.fastfhir_install_stamp"
 BUILD_DIR="${REPO_ROOT}/build/bench"
 SYNTHEA_DIR="${REPO_ROOT}/datasets/synthea"
-SYNTHEA_DATA_URL="${SYNTHEA_DATA_URL:-https://github.com/synthetichealth/synthea-sample-data/archive/refs/heads/master.zip}"
+SYNTHEA_DATA_URL="${SYNTHEA_DATA_URL:-https://synthetichealth.github.io/synthea-sample-data/downloads/latest/synthea_sample_data_fhir_latest.zip}"
 THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 FASTFHIR_SYNC_REMOTE="${FASTFHIR_SYNC_REMOTE:-0}"
 FORCE_FASTFHIR_REBUILD="${FORCE_FASTFHIR_REBUILD:-0}"
@@ -98,8 +97,7 @@ if [[ "${FORCE_FASTFHIR_REBUILD}" == "1" ]]; then
 elif [[ -f "${FASTFHIR_STAMP}" && \
         -f "${FASTFHIR_INSTALL}/include/FastFHIR.hpp" && \
         -f "${FASTFHIR_INSTALL}/lib/libfastfhir.dylib" && \
-        -f "${FASTFHIR_INSTALL}/generated_src/FF_Recovery.hpp" && \
-        ( -x "${FASTFHIR_INSTALL}/bin/ff_ingestor" || -x "${FASTFHIR_INSTALL}/bin/ff_ingest" ) ]]; then
+  -f "${FASTFHIR_INSTALL}/generated_src/FF_Recovery.hpp" ]]; then
   EXISTING_STAMP="$(cat "${FASTFHIR_STAMP}")"
   if [[ "${EXISTING_STAMP}" == "${FASTFHIR_BUILD_FINGERPRINT}" ]]; then
     NEEDS_FASTFHIR_BUILD=0
@@ -164,7 +162,7 @@ if [[ "${JSON_COUNT}" == "0" ]]; then
   while IFS= read -r json_path; do
     cp "${json_path}" "${SYNTHEA_DIR}/$(basename "${json_path}")"
     COPIED=$((COPIED + 1))
-  done < <(find "${SYNTHEA_TMP}" -type f -path '*/fhir/*.json')
+  done < <(find "${SYNTHEA_TMP}" -type f -name '*.json')
 
   if [[ "${COPIED}" == "0" ]]; then
     echo -e "${RED}Failed to extract Synthea JSON from ${SYNTHEA_DATA_URL}${NC}"
@@ -173,40 +171,7 @@ if [[ "${JSON_COUNT}" == "0" ]]; then
   echo -e "${GREEN}Downloaded ${COPIED} Synthea JSON files${NC}"
 fi
 
-FF_INGESTOR="${FASTFHIR_INSTALL}/bin/ff_ingestor"
-if [[ ! -x "${FF_INGESTOR}" ]]; then
-  FF_INGESTOR="${FASTFHIR_INSTALL}/bin/ff_ingest"
-fi
-
-if [[ ! -x "${FF_INGESTOR}" ]]; then
-  echo -e "${RED}Error: ff_ingestor/ff_ingest not found under ${FASTFHIR_INSTALL}/bin${NC}"
-  exit 1
-fi
-
-echo -e "${YELLOW}Pre-converting Synthea JSON to .ffhr...${NC}"
-converted=0
-skipped=0
-failed=0
-
-for json_file in "${SYNTHEA_DIR}"/*.json; do
-  [[ -f "${json_file}" ]] || continue
-  ffhr_file="${json_file%.json}.ffhr"
-
-  if [[ -f "${ffhr_file}" ]]; then
-    ((skipped++)) || true
-    continue
-  fi
-
-  if DYLD_LIBRARY_PATH="${FASTFHIR_INSTALL}/lib" "${FF_INGESTOR}" "${json_file}" -o "${ffhr_file}" >/dev/null 2>&1; then
-    ((converted++)) || true
-  else
-    echo -e "${RED}Failed to convert $(basename "${json_file}")${NC}"
-    ((failed++)) || true
-  fi
-done
-
-total=$((converted + skipped))
-echo -e "${GREEN}Synthea preparation: ${converted} converted, ${skipped} skipped, ${failed} failed (${total} total)${NC}"
+echo -e "${GREEN}Synthea JSON is ready for runtime ingestion by bench_harness.${NC}"
 
 # ============================================================================
 # Step 4: Configure and Build Benchmark

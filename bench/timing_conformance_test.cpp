@@ -3,18 +3,31 @@
 #include <iostream>
 
 int main() {
-  // Build a minimal single-patient fixture without running the ingestor.
-  bench::SyntheaFixture sf{};
-  sf.patient_id_storage = "patient-conformance";
-  sf.patient_birthdate_storage = "1990-03-21";
-  sf.patient.id = sf.patient_id_storage;
-  sf.patient.birthdate = sf.patient_birthdate_storage;
-  sf.patient.gender = AdministrativeGender::Male;
-  sf.patient.active = 1;
+  bench::BundlePatient bp{};
+  bp.memory = FastFHIR::Memory::create(4096);
+  FastFHIR::Builder builder(bp.memory, FHIR_VERSION_R5);
+
+  PatientData patient{};
+  patient.id = "patient-conformance";
+  patient.birthdate = "1990-03-21";
+  patient.gender = AdministrativeGender::Male;
+  patient.active = 1;
+
+  auto patient_handle = builder.append_obj(patient);
+  builder.set_root(patient_handle);
+  (void)builder.finalize();
+
+  bp.patient.id = patient.id;
+  bp.patient.birthdate = patient.birthdate;
+  bp.patient.gender = patient.gender;
+  bp.patient.active = patient.active;
+  bp.patient.gender = AdministrativeGender::Male;
+  bp.patient.active = 1;
 
   bench::BundleBenchFixture fixture{};
-  fixture.patients.push_back(std::move(sf));
+  fixture.bundle.push_back(std::move(bp));
   fixture.target_size_bytes = 1024;
+  fixture.actual_ingested_bytes = 1024;
 
   const auto fastfhir = bench::run_fastfhir_bundle(fixture);
   const auto json = bench::run_json_bundle(fixture);

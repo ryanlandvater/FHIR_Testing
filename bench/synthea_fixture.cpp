@@ -1,91 +1,92 @@
 #include "harness.hpp"
 
-#include <FastFHIR.hpp>
-#include <FF_FieldKeys.hpp>
+#include <algorithm>
+#include <array>
 #include <filesystem>
-#include <fstream>
+#include <simdjson.h>
 #include <stdexcept>
+#include <string>
+
+#include <FF_Ingestor.hpp>
 
 namespace bench {
 
-namespace {
+BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path) {
+  simdjson::padded_string json_buffer;
+  try {
+    json_buffer = simdjson::padded_string::load(json_path.string());
+  } catch (const std::exception& ex) {
+    throw std::runtime_error("Failed to load JSON payload: " + std::string(ex.what()));
+  }
 
-AdministrativeGender gender_from_code(std::string_view sv) {
-  if (sv == "male")   return AdministrativeGender::Male;
-  if (sv == "female") return AdministrativeGender::Female;
-  if (sv == "other")  return AdministrativeGender::Other;
-  return AdministrativeGender::Unknown;
-}
+  if (json_buffer.size() == 0) {
+    throw std::runtime_error("Empty file: " + json_path.string());
+  }
 
-void extract_patient(const FastFHIR::Reflective::Node& node, SyntheaFixture& fixture) {
-  auto id_entry = node[FastFHIR::Fields::PATIENT::ID];
-  if (id_entry) {
-    fixture.patient_id_storage = std::string(std::string_view(id_entry));
-    fixture.patient.id = fixture.patient_id_storage;
-  }
-  auto bd_entry = node[FastFHIR::Fields::PATIENT::BIRTH_DATE];
-  if (bd_entry) {
-    fixture.patient_birthdate_storage = std::string(std::string_view(bd_entry));
-    fixture.patient.birthdate = fixture.patient_birthdate_storage;
-  }
-  auto gender_entry = node[FastFHIR::Fields::PATIENT::GENDER];
-  if (gender_entry) {
-    fixture.patient.gender = gender_from_code(std::string_view(gender_entry));
-  }
-  auto active_entry = node[FastFHIR::Fields::PATIENT::ACTIVE];
-  if (active_entry) {
-    fixture.patient.active = active_entry.as<bool>() ? 1 : 0;
-  }
-}
+  const auto file_size = static_cast<std::size_t>(json_buffer.size());
+  const std::string_view ingest_payload(json_buffer.data(), json_buffer.size());
 
-}  // namespace
+  BundlePatient item{};
+  const auto arena_size = std::max<std::size_t>(4096, file_size * static_cast<std::size_t>(2));
+  item.memory = FastFHIR::Memory::create(arena_size);
 
-SyntheaFixture make_synthea_fixture(const std::filesystem::path& ffhr_path) {
-  // Load the pre-generated .ffhr file into an owned buffer.
-  std::ifstream file(ffhr_path, std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    throw std::runtime_error("Cannot open .ffhr file: " + ffhr_path.string());
-  }
-  const auto file_size = static_cast<std::streamsize>(file.tellg());
-  if (file_size <= 0) {
-    throw std::runtime_error("Empty .ffhr file: " + ffhr_path.string());
-  }
-  file.seekg(0);
-  std::string ffhr_bytes(static_cast<std::size_t>(file_size), '\0');
-  file.read(ffhr_bytes.data(), file_size);
+  FastFHIR::Builder builder(item.memory);
+  FastFHIR::Ingest::Ingestor ingestor;
+  FastFHIR::Reflective::ObjectHandle root(&builder, FF_NULL_OFFSET);
+  size_t parsed_count = 0;
 
-  // Parse the FFHR stream.
-  FastFHIR::Parser parser(ffhr_bytes.data(), ffhr_bytes.size());
-  const auto root = parser.root();
+  FF_Result result{FF_FAILURE};
+  try {
+    FastFHIR::Ingest::IngestRequest request{
+        .builder = builder,
+        .source_type = FastFHIR::Ingest::SourceType::FHIR_JSON,
+        .json_string = ingest_payload,
+    };
+    result = ingestor.ingest(request, root, parsed_count);
+  } catch (const std::exception& ex) {
+    throw std::runtime_error("Ingestor exception for " + json_path.string() + ": " + ex.what());
+  }
+
+  if (!result) {
+    throw std::runtime_error(
+        "Ingestor failed for " + json_path.string() + ": code="
+        + std::to_string(static_cast<int>(result.code)) + ", message=" + result.message);
+  }
   if (!root) {
-    throw std::runtime_error("FFHR parse failed (no root): " + ffhr_path.string());
+    throw std::runtime_error("Ingestor returned null root for " + json_path.string());
   }
 
-  SyntheaFixture fixture{};
-  fixture.ffhr_size_bytes = static_cast<int64_t>(file_size);
+  const auto root_node = root.as_node();
+  FastFHIR::Reflective::Node patient_node;
 
-  if (root.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
-    auto entries_entry = root[FastFHIR::Fields::BUNDLE::ENTRY];
-    if (entries_entry) {
-      for (const auto& entry_node : entries_entry.entries()) {
-        auto resource_entry = entry_node[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
-        if (!resource_entry) continue;
-        auto resource_node = resource_entry.as_node();
-        if (!resource_node) continue;
+  if (root_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+    patient_node = root_node;
+  }
 
-        if (resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-          extract_patient(resource_node, fixture);
+  if (!patient_node && root_node.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
+    if (auto entries = root_node[FastFHIR::Fields::BUNDLE::ENTRY]) {
+      for (auto& entry : entries.entries()) {
+        auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
+        if (!resource) {
+          continue;
+        }
+        auto resource_node = resource.as_node();
+        if (resource_node && resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+          patient_node = resource_node;
+          break;
         }
       }
     }
-  } else if (root.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-    extract_patient(root, fixture);
   }
 
-  if (fixture.patient_id_storage.empty() && fixture.patient_birthdate_storage.empty()) {
-    throw std::runtime_error("No Patient found in: " + ffhr_path.string());
+  if (!patient_node || !patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+    throw std::runtime_error("No Patient resource in ingested root for " + json_path.string());
   }
-  return fixture;
+
+  builder.set_root(root);
+  (void)builder.finalize();
+  item.patient = patient_node.as<PatientData>();
+  return item;
 }
 
 }  // namespace bench

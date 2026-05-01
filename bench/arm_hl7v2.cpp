@@ -18,7 +18,7 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
     ArmRunResult result;
     result.metrics.reserve(2);
 
-    const std::size_t n = fixture.patients.size();
+    const std::size_t n = fixture.bundle.size();
 
     // --- Stage 1: Serialization (smoke) ---
     // TODO(hl7v2): replace busy-loop with per-patient ORU^R01 message construction:

@@ -12,8 +12,8 @@ This repository is intentionally minimal. It benchmarks only four serialization 
 - `generate_repo.sh` installs FastFHIR under `local/` from an external source first.
 - Local `.external/FastFHIR` is used only as fallback when external source is not provided.
 - Synthea JSON is downloaded automatically when missing.
-- Synthea JSON is pre-converted to `.ffhr` with `ff_ingestor` (or `ff_ingest` fallback).
-- Benchmark reads `.ffhr` files, creates in-memory patient bundles, serializes both arms, and writes results to stdout + optional PostgreSQL.
+- Benchmark ingests Synthea JSON files at runtime, creates in-memory bundle items `{Memory, PatientData}`, and writes results to stdout + optional PostgreSQL.
+- Per ingested patient, `Memory::create()` is sized at `2x` source JSON file bytes.
 - Notebook reads from PostgreSQL for analysis.
 
 ## Setup

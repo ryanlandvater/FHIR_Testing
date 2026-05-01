@@ -75,43 +75,29 @@ inline constexpr std::string_view kPatientQueryField = "birthDate";
 inline constexpr std::string_view kCholesterolLoincCode = "2085-9";
 inline constexpr std::string_view kLoincSystem = "http://loinc.org";
 
-// All string fields are owned values so SyntheaFixture is safely copyable.
-struct SyntheaFixture {
-  // Owned strings — PatientData string_views point into these.
-  std::string patient_id_storage;
-  std::string patient_birthdate_storage;
-
-  // PatientData backed by the owned strings above.
-  // NOTE: unique_ptr fields (meta, text, etc.) are left null — only
-  // id, birthdate, gender, and active are used by the benchmark arms.
+// One ingested Synthea patient item kept in RAM.
+// The FastFHIR::Memory arena contains the serialized FFHR patient binary.
+struct BundlePatient {
+  FastFHIR::Memory memory;
   PatientData patient;
-
-  int64_t ffhr_size_bytes = 0;  // Size of the .ffhr file this was read from.
 };
 
 struct BundleBenchFixture {
-  std::vector<SyntheaFixture> patients;
+  std::vector<BundlePatient> bundle;
   int64_t target_size_bytes = 0;
   int64_t actual_ingested_bytes = 0;
   int64_t fastfhir_vma_bytes = 0;
 };
 
-// Load a pre-generated .ffhr file, parse it via FastFHIR::Parser, and return
-// a SyntheaFixture with owned string copies of all extracted fields.
-// Throws if the .ffhr file is missing or does not contain a valid Patient.
-SyntheaFixture make_synthea_fixture(const std::filesystem::path& ffhr_path);
+BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path);
 
-// PatientData contains unique_ptr members (move-only). Clone only the subset
-// of fields that benchmark arms actually read.
-inline SyntheaFixture clone_fixture(const SyntheaFixture& src) {
-  SyntheaFixture dst{};
-  dst.patient_id_storage        = src.patient_id_storage;
-  dst.patient_birthdate_storage = src.patient_birthdate_storage;
-  dst.patient.id                = dst.patient_id_storage;
-  dst.patient.birthdate         = dst.patient_birthdate_storage;
-  dst.patient.gender            = src.patient.gender;
-  dst.patient.active            = src.patient.active;
-  dst.ffhr_size_bytes           = src.ffhr_size_bytes;
+inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
+  BundlePatient dst{};
+  dst.memory = src.memory;
+  dst.patient.id = src.patient.id;
+  dst.patient.birthdate = src.patient.birthdate;
+  dst.patient.gender = src.patient.gender;
+  dst.patient.active = src.patient.active;
   return dst;
 }
 

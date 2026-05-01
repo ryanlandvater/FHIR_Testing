@@ -16,7 +16,7 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture) {
     ArmRunResult result;
     result.metrics.reserve(2);
 
-    const std::size_t n = fixture.patients.size();
+    const std::size_t n = fixture.bundle.size();
 
     // --- Stage 1: Serialization (smoke) ---
     // TODO(google_fhir): replace busy-loop with per-patient proto construction:
