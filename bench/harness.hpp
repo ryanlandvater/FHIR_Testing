@@ -8,7 +8,9 @@
 #include <vector>
 
 #include <FastFHIR.hpp>
+#include <FF_Bundle.hpp>
 #include <FF_FieldKeys.hpp>
+#include <FF_Observation.hpp>
 #include <FF_Patient.hpp>
 
 namespace bench {
@@ -70,6 +72,25 @@ inline void print_metric(const MetricEvent& e) {
 }
 
 inline constexpr std::string_view kPatientQueryField = "birthDate";
+inline constexpr std::string_view kCholesterolLoincCode = "2085-9";
+inline constexpr std::string_view kLoincSystem = "http://loinc.org";
+
+struct CholesterolObservation {
+  std::string system;
+  std::string code;
+  double value = 0.0;
+  bool has_value = false;
+};
+
+struct SyntheaFixture {
+  std::vector<CholesterolObservation> cholesterol_observations;
+};
+
+struct AggregatedBundleFixture {
+  std::vector<CholesterolObservation> cholesterol_observations;
+  int64_t serialized_size_bytes = 0;  // Actual size after serialization
+  int64_t target_size_bytes = 0;      // Target size goal
+};
 
 inline PatientData make_single_patient_fixture() {
   // Canonical in-memory FHIR R5 PatientData fixture used by all arms.
@@ -87,7 +108,20 @@ inline PatientData make_single_patient_fixture() {
   return patient;
 }
 
+SyntheaFixture make_synthea_fixture(const std::string& json_payload);
+
+// Aggregated bundle functions
+AggregatedBundleFixture make_aggregated_bundle_fixture(
+    const std::vector<std::string>& json_payloads,
+    int64_t target_size_bytes);
+
+ArmRunResult run_fastfhir_aggregated_bundle(const AggregatedBundleFixture& fixture);
+ArmRunResult run_json_aggregated_bundle(const AggregatedBundleFixture& fixture);
+
 ArmRunResult run_fastfhir_smoke(const PatientData& patient);
 ArmRunResult run_json_fhir_smoke(const PatientData& patient);
+
+ArmRunResult run_fastfhir_synthea_query(const SyntheaFixture& fixture);
+ArmRunResult run_json_synthea_query(const SyntheaFixture& fixture);
 
 }  // namespace bench
