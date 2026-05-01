@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    jupyterlab==4.2.5 \
+    pandas==2.2.2 \
+    matplotlib==3.9.0 \
+    sqlalchemy==2.0.31 \
+    psycopg2-binary==2.9.9
+
+RUN useradd -m -u 10003 appuser
+USER appuser
+WORKDIR /workspace
+
+ENV JUPYTER_PORT=8888
+EXPOSE 8888
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--NotebookApp.token=", "--NotebookApp.password=", "--ServerApp.allow_origin=*", "--ServerApp.root_dir=/workspace"]

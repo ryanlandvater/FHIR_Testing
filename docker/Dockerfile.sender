@@ -1,0 +1,22 @@
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 10001 appuser
+USER appuser
+WORKDIR /app
+
+COPY services/sender/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENV SENDER_PORT=9001
+EXPOSE 9001
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=10 CMD nc -z 127.0.0.1 ${SENDER_PORT} || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]

@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Python/Jupyter
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.env
+.venv/
+
+# Build outputs
+build/
+out/
+cmake-build-*/
+
+# Artifacts and runtime data
+artifacts/*
+!artifacts/.keep
+logs/
+profiles/
+metrics/
+*.sqlite
+*.db
+
+# Terraform local state
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Docker local overrides
+docker-compose.override.yml
