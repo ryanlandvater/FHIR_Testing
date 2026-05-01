@@ -13,7 +13,10 @@ fi
 mkdir -p artifacts datasets
 [[ -f artifacts/.keep ]] || touch artifacts/.keep
 
-docker compose build
+if [[ "${1:-}" != "--no-build" ]]; then
+  docker compose build
+fi
+
 docker compose up -d
 
 echo "Waiting for database readiness..."

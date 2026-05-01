@@ -4,44 +4,44 @@ Use this as the execution tracker for building, validating, and publishing the b
 
 ## 1) Repository and Project Setup
 
-- [ ] Create and commit top-level directories:
-  - [ ] `bench/` for benchmark harness source.
-  - [ ] `services/` for sender and receiver implementations.
-  - [ ] `infra/` for Terraform and cloud scripts.
-  - [ ] `docker/` for container assets.
-  - [ ] `scripts/` for local and cloud orchestration scripts.
-  - [ ] `notebooks/` for analysis and reporting notebooks.
-  - [ ] `sql/` for schema and helper views.
+- [x] Create and commit top-level directories:
+  - [x] `bench/` for benchmark harness source.
+  - [x] `services/` for sender and receiver implementations.
+  - [x] `infra/` for Terraform and cloud scripts.
+  - [x] `docker/` for container assets.
+  - [x] `scripts/` for local and cloud orchestration scripts.
+  - [x] `notebooks/` for analysis and reporting notebooks.
+  - [x] `sql/` for schema and helper views.
 - [ ] Add a top-level `README` section documenting benchmark run order (build -> up -> run -> collect -> analyze).
 - [ ] Define a stable artifact layout for each run:
   - [ ] `artifacts/<run_id>/logs/`
   - [ ] `artifacts/<run_id>/metrics/`
   - [ ] `artifacts/<run_id>/profiles/`
   - [ ] `artifacts/<run_id>/manifest/`
-- [ ] Add `.gitignore` entries for generated artifacts, notebooks checkpoints, and temporary DB dumps.
+- [x] Add `.gitignore` entries for generated artifacts, notebooks checkpoints, and temporary DB dumps.
 
 ## 2) Database Schema and Data Contracts
 
-- [ ] Implement DDL for required tables:
-  - [ ] `raw_metrics_table`
-  - [ ] `aggregate_metrics_table`
-  - [ ] `manifest_table`
-- [ ] Add migration scripts under `sql/migrations/` with monotonic versioning.
-- [ ] Define mandatory columns and constraints:
-  - [ ] Unique run key (`test_id` / `run_id`).
-  - [ ] Benchmark arm (`fastfhir`, `json_fhir`, `google_fhir_proto`, `hl7v2`).
-  - [ ] Stage and substage identifiers.
-  - [ ] Start/end timestamps and computed duration fields.
-  - [ ] Environment metadata linkage to manifest.
-- [ ] Add indexes for expected query patterns:
-  - [ ] By run id.
-  - [ ] By stage.
-  - [ ] By format arm.
-  - [ ] By timestamp.
-- [ ] Add SQL views for notebook stability:
-  - [ ] `v_stage_latency_summary`
-  - [ ] `v_time_memory_frontier`
-  - [ ] `v_latest_run_status`
+- [x] Implement DDL for required tables:
+  - [x] `raw_metrics_table`
+  - [x] `aggregate_metrics_table`
+  - [x] `manifest_table`
+- [x] Add migration scripts under `sql/migrations/` with monotonic versioning.
+- [x] Define mandatory columns and constraints:
+  - [x] Unique run key (`test_id` / `run_id`).
+  - [x] Benchmark arm (`fastfhir`, `json_fhir`, `google_fhir_proto`, `hl7v2`).
+  - [x] Stage and substage identifiers.
+  - [x] Start/end timestamps and computed duration fields.
+  - [x] Environment metadata linkage to manifest.
+- [x] Add indexes for expected query patterns:
+  - [x] By run id.
+  - [x] By stage.
+  - [x] By format arm.
+  - [x] By timestamp.
+- [x] Add SQL views for notebook stability:
+  - [x] `v_stage_latency_summary`
+  - [x] `v_time_memory_frontier`
+  - [x] `v_latest_run_status`
 - [ ] Add high-throughput ingestion path requirements (to avoid DB round-trip bottlenecks in timed code):
   - [ ] Implement an in-process lock-free queue for metric events emitted from the benchmark runner.
   - [ ] Ensure timed execution paths only enqueue metric payloads (no synchronous SQL in timed sections).
@@ -52,74 +52,74 @@ Use this as the execution tracker for building, validating, and publishing the b
 
 ## 3) Dockerfiles (Service Images)
 
-- [ ] Create `docker/Dockerfile.sender`:
-  - [ ] Pin base image by tag.
-  - [ ] Install runtime deps only.
-  - [ ] Add non-root user.
-  - [ ] Include healthcheck endpoint command.
-- [ ] Create `docker/Dockerfile.receiver`:
-  - [ ] Pin base image by tag.
-  - [ ] Configure receiver port and env defaults.
-  - [ ] Add non-root user and healthcheck.
-- [ ] Create `docker/Dockerfile.profiler`:
-  - [ ] Include Python + Jupyter + analysis libs.
-  - [ ] Include optional profiling tools.
-  - [ ] Configure working directory and notebook startup command.
-- [ ] Database image strategy:
-  - [ ] Use official DB image for local dev.
-  - [ ] Mount `sql/init/` bootstrap scripts.
+- [x] Create `docker/Dockerfile.sender`:
+  - [x] Pin base image by tag.
+  - [x] Install runtime deps only.
+  - [x] Add non-root user.
+  - [x] Include healthcheck endpoint command.
+- [x] Create `docker/Dockerfile.receiver`:
+  - [x] Pin base image by tag.
+  - [x] Configure receiver port and env defaults.
+  - [x] Add non-root user and healthcheck.
+- [x] Create `docker/Dockerfile.profiler`:
+  - [x] Include Python + Jupyter + analysis libs.
+  - [x] Include optional profiling tools.
+  - [x] Configure working directory and notebook startup command.
+- [x] Database image strategy:
+  - [x] Use official DB image for local dev.
+  - [x] Mount `sql/init/` bootstrap scripts.
 - [ ] Add image labels for version, commit SHA, and build time.
 
 ## 4) Docker Compose (Local Integration)
 
-- [ ] Create `docker-compose.yml` with services:
-  - [ ] `db`
-  - [ ] `sender`
-  - [ ] `receiver`
-  - [ ] `profiler`
-- [ ] Configure deterministic network topology:
-  - [ ] Dedicated compose network.
-  - [ ] Explicit service DNS names.
-- [ ] Configure startup dependencies and health gates:
-  - [ ] `db` healthy before `sender` and `receiver` start.
-  - [ ] `profiler` starts after DB is reachable.
-- [ ] Define volume mounts:
-  - [ ] Dataset volume.
-  - [ ] Artifacts volume.
-  - [ ] Notebook volume.
+- [x] Create `docker-compose.yml` with services:
+  - [x] `db`
+  - [x] `sender`
+  - [x] `receiver`
+  - [x] `profiler`
+- [x] Configure deterministic network topology:
+  - [x] Dedicated compose network.
+  - [x] Explicit service DNS names.
+- [x] Configure startup dependencies and health gates:
+  - [x] `db` healthy before `sender` and `receiver` start.
+  - [x] `profiler` starts after DB is reachable.
+- [x] Define volume mounts:
+  - [x] Dataset volume.
+  - [x] Artifacts volume.
+  - [x] Notebook volume.
 - [ ] Add resource limits for local reproducibility (CPU and memory quotas).
-- [ ] Externalize credentials via `.env` and document required variables.
+- [x] Externalize credentials via `.env` and document required variables.
 
 ## 5) Local Scripts (Bring-Up, Run, Teardown)
 
-- [ ] Create `scripts/local_up.sh`:
-  - [ ] Build images.
-  - [ ] Start compose stack.
-  - [ ] Wait for health checks.
-- [ ] Create `scripts/local_down.sh`:
-  - [ ] Stop stack.
-  - [ ] Optional volume cleanup flag.
-- [ ] Create `scripts/local_reset.sh`:
-  - [ ] Truncate benchmark tables.
+- [x] Create `scripts/local_up.sh`:
+  - [x] Build images.
+  - [x] Start compose stack.
+  - [x] Wait for health checks.
+- [x] Create `scripts/local_down.sh`:
+  - [x] Stop stack.
+  - [x] Optional volume cleanup flag.
+- [x] Create `scripts/local_reset.sh`:
+  - [x] Truncate benchmark tables.
   - [ ] Reset transient artifact directories.
-- [ ] Create `scripts/local_smoke.sh`:
-  - [ ] Run minimal dataset path.
-  - [ ] Assert DB writes occurred.
-  - [ ] Assert artifacts were generated.
-- [ ] Create `scripts/local_benchmark.sh`:
+- [x] Create `scripts/local_smoke.sh`:
+  - [x] Run minimal dataset path.
+  - [x] Assert DB writes occurred.
+  - [x] Assert artifacts were generated.
+- [x] Create `scripts/local_benchmark.sh`:
   - [ ] Validate prerequisites.
   - [ ] Execute benchmark matrix.
   - [ ] Export logs/profiles/metrics with run id.
-- [ ] Add ingestion validation script `scripts/local_ingest_stress.sh`:
-  - [ ] Run high-rate metric emission without clinical workload to validate queue/batch writer throughput.
+- [x] Add ingestion validation script `scripts/local_ingest_stress.sh`:
+  - [x] Run high-rate metric emission without clinical workload to validate queue/batch writer throughput.
   - [ ] Assert no synchronous DB writes occur on timed worker threads.
   - [ ] Assert queue drains cleanly on shutdown with no metric loss beyond configured policy.
 
 ## 6) Cloud Infrastructure and Automation
 
-- [ ] Create Terraform root modules:
-  - [ ] `infra/aws/`
-  - [ ] `infra/gcp/`
+- [x] Create Terraform root modules:
+  - [x] `infra/aws/`
+  - [x] `infra/gcp/`
 - [ ] Provision parity resources for each cloud:
   - [ ] Sender instance.
   - [ ] Receiver instance.
@@ -132,15 +132,15 @@ Use this as the execution tracker for building, validating, and publishing the b
   - [ ] Prohibit benchmark-path DB traffic through public internet or NAT egress when private routing is available.
   - [ ] Add security group / firewall rules that only permit runner and analysis service access.
   - [ ] Add Terraform assertions/outputs validating DB endpoint is private and region/zone aligned with runners.
-- [ ] Create script wrappers:
-  - [ ] `scripts/cloud_plan.sh`
-  - [ ] `scripts/cloud_apply.sh`
-  - [ ] `scripts/cloud_destroy.sh`
-- [ ] Create deployment and execution scripts:
-  - [ ] `scripts/cloud_bootstrap.sh` for host preparation.
-  - [ ] `scripts/cloud_deploy_artifacts.sh` for binary and config sync.
-  - [ ] `scripts/cloud_run_benchmark.sh` for remote execution.
-  - [ ] `scripts/cloud_collect_results.sh` for artifact retrieval.
+- [x] Create script wrappers:
+  - [x] `scripts/cloud_plan.sh`
+  - [x] `scripts/cloud_apply.sh`
+  - [x] `scripts/cloud_destroy.sh`
+- [x] Create deployment and execution scripts:
+  - [x] `scripts/cloud_bootstrap.sh` for host preparation.
+  - [x] `scripts/cloud_deploy_artifacts.sh` for binary and config sync.
+  - [x] `scripts/cloud_run_benchmark.sh` for remote execution.
+  - [x] `scripts/cloud_collect_results.sh` for artifact retrieval.
 - [ ] Produce per-run cloud manifest:
   - [ ] Instance type.
   - [ ] OS image.
@@ -150,15 +150,15 @@ Use this as the execution tracker for building, validating, and publishing the b
 
 ## 7) Benchmark Harness Code
 
-- [ ] Implement shared harness structure in `bench/`:
+- [x] Implement shared harness structure in `bench/`:
   - [ ] Common scenario loader.
-  - [ ] Common timer utilities.
+  - [x] Common timer utilities.
   - [ ] Common metrics writer.
-- [ ] Implement format modules:
-  - [ ] FastFHIR arm.
-  - [ ] JSON FHIR arm.
-  - [ ] Google FHIR protobuf arm.
-  - [ ] HL7v2 arm.
+- [x] Implement format modules:
+  - [x] FastFHIR arm.
+  - [x] JSON FHIR arm.
+  - [x] Google FHIR protobuf arm.
+  - [x] HL7v2 arm.
 - [ ] Enforce Stage 1, Stage 2, Stage 3 boundaries exactly as study doc defines.
 - [ ] Implement Section 7.2 low-RAM mode pathways for all arms.
 - [ ] Implement checksum/logging configuration controls to avoid timed I/O contamination.
@@ -179,29 +179,29 @@ Use this as the execution tracker for building, validating, and publishing the b
 
 ## 8) Timing Reviewability Requirements
 
-- [ ] In each benchmark source file, place timed-section declarations near top of file.
-- [ ] Keep `start_timer` and `stop_timer` calls visible and explicit.
-- [ ] Do not hide timing boundaries behind opaque abstractions.
-- [ ] Add comments above timed sections stating included and excluded work.
+- [x] In each benchmark source file, place timed-section declarations near top of file.
+- [x] Keep `start_timer` and `stop_timer` calls visible and explicit.
+- [x] Do not hide timing boundaries behind opaque abstractions.
+- [x] Add comments above timed sections stating included and excluded work.
 - [ ] Add review checklist item in PR template: timing boundaries match study definitions.
 - [ ] Block merge unless timing-boundary reviewer signs off.
 
 ## 9) CMake and CTest
 
-- [ ] Add benchmark build targets in `CMakeLists.txt`:
-  - [ ] `bench_harness`
+- [x] Add benchmark build targets in `CMakeLists.txt`:
+  - [x] `bench_harness`
   - [ ] `bench_fastfhir`
   - [ ] `bench_json_fhir`
   - [ ] `bench_google_fhir`
   - [ ] `bench_hl7v2`
-- [ ] Add test targets:
-  - [ ] Smoke test binary.
-  - [ ] Timing conformance test binary.
-  - [ ] Schema output validation test binary.
-- [ ] Register tests with CTest:
-  - [ ] `ctest -L smoke`
-  - [ ] `ctest -L timing`
-  - [ ] `ctest -L schema`
+- [x] Add test targets:
+  - [x] Smoke test binary.
+  - [x] Timing conformance test binary.
+  - [x] Schema output validation test binary.
+- [x] Register tests with CTest:
+  - [x] `ctest -L smoke`
+  - [x] `ctest -L timing`
+  - [x] `ctest -L schema`
 - [ ] Add fixture generation target for deterministic test data.
 - [ ] Add compiler warnings and sanitizer profile for non-release CI validation.
 

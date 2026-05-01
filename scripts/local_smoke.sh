@@ -7,7 +7,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "$repo_root"
 
 # Ensure stack is running.
-"${script_dir}/local_up.sh"
+"${script_dir}/local_up.sh" --no-build
 
 run_id="smoke_$(date +%Y%m%d_%H%M%S)"
 

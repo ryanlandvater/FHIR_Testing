@@ -8,11 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 10001 appuser
-USER appuser
 WORKDIR /app
 
 COPY services/sender/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+USER appuser
 
 ENV SENDER_PORT=9001
 EXPOSE 9001

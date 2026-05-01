@@ -12,13 +12,19 @@ __pycache__/
 build/
 out/
 cmake-build-*/
+dist/
+bin/
+obj/
 
 # Artifacts and runtime data
 artifacts/*
 !artifacts/.keep
+datasets/*
+!datasets/.keep
 logs/
 profiles/
 metrics/
+*.log
 *.sqlite
 *.db
 
