@@ -12,7 +12,7 @@ Use this as the execution tracker for building, validating, and publishing the b
   - [x] `scripts/` for local and cloud orchestration scripts.
   - [x] `notebooks/` for analysis and reporting notebooks.
   - [x] `sql/` for schema and helper views.
-- [ ] Add a top-level `README` section documenting benchmark run order (build -> up -> run -> collect -> analyze).
+- [x] Add a top-level `README` section documenting benchmark run order (build -> up -> run -> collect -> analyze).
 - [ ] Define a stable artifact layout for each run:
   - [ ] `artifacts/<run_id>/logs/`
   - [ ] `artifacts/<run_id>/metrics/`
@@ -107,8 +107,8 @@ Use this as the execution tracker for building, validating, and publishing the b
   - [x] Assert DB writes occurred.
   - [x] Assert artifacts were generated.
 - [x] Create `scripts/local_benchmark.sh`:
-  - [ ] Validate prerequisites.
-  - [ ] Execute benchmark matrix.
+  - [x] Validate prerequisites.
+  - [x] Execute benchmark matrix.
   - [ ] Export logs/profiles/metrics with run id.
 - [x] Add ingestion validation script `scripts/local_ingest_stress.sh`:
   - [x] Run high-rate metric emission without clinical workload to validate queue/batch writer throughput.

@@ -1,6 +1,8 @@
 # FastFHIR vs. JSON-FHIR Benchmarking Study
 
-This repository contains the complete toolchain for a publication-ready performance benchmarking study comparing binary FastFHIR, text-based JSON FHIR, Google's protobuf-backed FHIR implementation, and legacy HL7v2.
+This repository contains the toolchain for a publication-ready performance benchmarking study comparing binary FastFHIR, text-based JSON FHIR, Google's protobuf-backed FHIR implementation, and legacy HL7v2.
+
+Current implementation phase: local execution is active for FastFHIR and JSON/FHIR arms first. Google FHIR and HL7v2 arms are deferred until the next phase.
 
 The primary objective is to quantify the **Transformation Gap**: the compute and memory cost required to move from native EHR objects to wire-ready representations and then back into clinically useful access patterns.
 
@@ -43,11 +45,18 @@ The entire benchmark suite is containerized for reproducible local development.
     ./scripts/local_smoke.sh
     ```
 
-3.  **Run a Full Benchmark:**
-    Execute the complete benchmark matrix across all defined arms and scenarios.
+3.  **Run a Full Local Benchmark:**
+    Execute the local benchmark matrix for the active arms (FastFHIR and JSON/FHIR).
 
     ```bash
     ./scripts/local_benchmark.sh
+    ```
+
+    Optional flags:
+
+    ```bash
+    ./scripts/local_benchmark.sh --iterations 50
+    ./scripts/local_benchmark.sh --run-id my_local_run_001
     ```
 
 4.  **Analyze Results:**
@@ -71,8 +80,8 @@ The entire benchmark suite is containerized for reproducible local development.
 - `scripts/local_up.sh`: Builds and starts the Docker Compose stack.
 - `scripts/local_down.sh`: Stops the Docker Compose stack.
 - `scripts/local_reset.sh`: Resets the database by truncating all metric tables.
-- `scripts/local_smoke.sh`: Runs a quick end-to-end test of the system.
-- `scripts/local_benchmark.sh`: Executes the full benchmark suite.
+- `scripts/local_smoke.sh`: Runs a quick end-to-end test and verifies FFHR/JSON stage rows are persisted.
+- `scripts/local_benchmark.sh`: Builds and runs the harness locally, then writes real raw and aggregate metrics to Postgres.
 - `scripts/local_ingest_stress.sh`: Runs a stress test on the metrics ingestion pipeline.
 
 ## Cloud Deployment

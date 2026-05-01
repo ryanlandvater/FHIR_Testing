@@ -5,8 +5,6 @@ add_executable(bench_harness
   main.cpp
   arm_fastfhir.cpp
   arm_json_fhir.cpp
-  arm_google_fhir.cpp
-  arm_hl7v2.cpp
 )
 target_link_libraries(bench_harness PRIVATE bench_core)
 

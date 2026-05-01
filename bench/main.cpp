@@ -1,5 +1,7 @@
 #include "harness.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <string_view>
 #include <vector>
@@ -7,21 +9,30 @@
 int main(int argc, char** argv) {
   const std::vector<std::string_view> args(argv, argv + argc);
   const bool smoke = std::find(args.begin(), args.end(), "--smoke") != args.end();
+  int iterations = 1;
+
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "--iterations" && i + 1 < args.size()) {
+      iterations = std::max(1, std::atoi(args[i + 1].data()));
+    }
+  }
 
   if (!smoke) {
-    std::cout << "bench_harness skeleton ready. Run with --smoke for baseline checks.\n";
+    std::cout << "bench_harness ready. Run with --smoke to emit FastFHIR and JSON/FHIR metrics.\n";
     return 0;
   }
 
-  const auto ff = bench::run_fastfhir_smoke();
-  const auto jf = bench::run_json_fhir_smoke();
-  const auto gf = bench::run_google_fhir_smoke();
-  const auto hl = bench::run_hl7v2_smoke();
+  for (int i = 0; i < iterations; ++i) {
+    const auto ff = bench::run_fastfhir_smoke();
+    const auto jf = bench::run_json_fhir_smoke();
 
-  bench::print_metric(ff);
-  bench::print_metric(jf);
-  bench::print_metric(gf);
-  bench::print_metric(hl);
+    for (const auto& metric : ff) {
+      bench::print_metric(metric);
+    }
+    for (const auto& metric : jf) {
+      bench::print_metric(metric);
+    }
+  }
 
   return 0;
 }

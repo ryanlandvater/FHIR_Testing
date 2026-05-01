@@ -56,12 +56,10 @@ inline std::string to_string(Stage s) {
 }
 
 inline void print_metric(const MetricEvent& e) {
-  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_us << "us\n";
+  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_us << "\n";
 }
 
-MetricEvent run_fastfhir_smoke();
-MetricEvent run_json_fhir_smoke();
-MetricEvent run_google_fhir_smoke();
-MetricEvent run_hl7v2_smoke();
+std::vector<MetricEvent> run_fastfhir_smoke();
+std::vector<MetricEvent> run_json_fhir_smoke();
 
 }  // namespace bench
