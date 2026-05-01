@@ -40,6 +40,18 @@ Size SIZE_FF_BUNDLE_ENTRY_REQUEST(const BundleentryrequestData& data, uint32_t _
 Offset STORE_FF_BUNDLE_ENTRY_REQUEST(BYTE* const __base, Offset start_off, const BundleentryrequestData& data, uint32_t __version = FHIR_VERSION_R5);
 BundleentryrequestData FF_DESERIALIZE_BUNDLE_ENTRY_REQUEST(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
+struct BundleentrysearchData {
+    std::string_view id;
+    std::vector<ExtensionData> extension;
+    std::vector<ExtensionData> modifierextension;
+    SearchEntryMode mode = SearchEntryMode::Unknown;
+    double score = FF_NULL_F64;
+};
+
+Size SIZE_FF_BUNDLE_ENTRY_SEARCH(const BundleentrysearchData& data, uint32_t __version = FHIR_VERSION_R5);
+Offset STORE_FF_BUNDLE_ENTRY_SEARCH(BYTE* const __base, Offset start_off, const BundleentrysearchData& data, uint32_t __version = FHIR_VERSION_R5);
+BundleentrysearchData FF_DESERIALIZE_BUNDLE_ENTRY_SEARCH(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
+
 struct BundleentryresponseData {
     std::string_view id;
     std::vector<ExtensionData> extension;
@@ -54,18 +66,6 @@ struct BundleentryresponseData {
 Size SIZE_FF_BUNDLE_ENTRY_RESPONSE(const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
 Offset STORE_FF_BUNDLE_ENTRY_RESPONSE(BYTE* const __base, Offset start_off, const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
 BundleentryresponseData FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
-
-struct BundleentrysearchData {
-    std::string_view id;
-    std::vector<ExtensionData> extension;
-    std::vector<ExtensionData> modifierextension;
-    SearchEntryMode mode = SearchEntryMode::Unknown;
-    double score = FF_NULL_F64;
-};
-
-Size SIZE_FF_BUNDLE_ENTRY_SEARCH(const BundleentrysearchData& data, uint32_t __version = FHIR_VERSION_R5);
-Offset STORE_FF_BUNDLE_ENTRY_SEARCH(BYTE* const __base, Offset start_off, const BundleentrysearchData& data, uint32_t __version = FHIR_VERSION_R5);
-BundleentrysearchData FF_DESERIALIZE_BUNDLE_ENTRY_SEARCH(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
 struct BundleentryData {
     std::string_view id;
@@ -121,20 +121,20 @@ template<> struct TypeTraits<BundleentryrequestData> {
 } // namespace FastFHIR
 
 namespace FastFHIR {
-template<> struct TypeTraits<BundleentryresponseData> {
-    static constexpr auto recovery = RECOVER_FF_BUNDLE_ENTRY_RESPONSE;
-    static Size size(const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_ENTRY_RESPONSE(d, v); }
-    static void store(BYTE* const base, Offset off, const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_ENTRY_RESPONSE(base, off, d, v); }
-    static BundleentryresponseData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(base, off, size, v); }
-};
-} // namespace FastFHIR
-
-namespace FastFHIR {
 template<> struct TypeTraits<BundleentrysearchData> {
     static constexpr auto recovery = RECOVER_FF_BUNDLE_ENTRY_SEARCH;
     static Size size(const BundleentrysearchData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_ENTRY_SEARCH(d, v); }
     static void store(BYTE* const base, Offset off, const BundleentrysearchData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_ENTRY_SEARCH(base, off, d, v); }
     static BundleentrysearchData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_ENTRY_SEARCH(base, off, size, v); }
+};
+} // namespace FastFHIR
+
+namespace FastFHIR {
+template<> struct TypeTraits<BundleentryresponseData> {
+    static constexpr auto recovery = RECOVER_FF_BUNDLE_ENTRY_RESPONSE;
+    static Size size(const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_ENTRY_RESPONSE(d, v); }
+    static void store(BYTE* const base, Offset off, const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_ENTRY_RESPONSE(base, off, d, v); }
+    static BundleentryresponseData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(base, off, size, v); }
 };
 } // namespace FastFHIR
 

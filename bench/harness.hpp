@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -10,7 +11,6 @@
 #include <FastFHIR.hpp>
 #include <FF_Bundle.hpp>
 #include <FF_FieldKeys.hpp>
-#include <FF_Observation.hpp>
 #include <FF_Patient.hpp>
 
 namespace bench {
@@ -68,60 +68,56 @@ inline std::string to_string(Stage s) {
 }
 
 inline void print_metric(const MetricEvent& e) {
-  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_us << "\n";
+  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_us << "\n" << std::flush;
 }
 
 inline constexpr std::string_view kPatientQueryField = "birthDate";
 inline constexpr std::string_view kCholesterolLoincCode = "2085-9";
 inline constexpr std::string_view kLoincSystem = "http://loinc.org";
 
-struct CholesterolObservation {
-  std::string system;
-  std::string code;
-  double value = 0.0;
-  bool has_value = false;
-};
-
+// All string fields are owned values so SyntheaFixture is safely copyable.
 struct SyntheaFixture {
-  std::vector<CholesterolObservation> cholesterol_observations;
+  // Owned strings — PatientData string_views point into these.
+  std::string patient_id_storage;
+  std::string patient_birthdate_storage;
+
+  // PatientData backed by the owned strings above.
+  // NOTE: unique_ptr fields (meta, text, etc.) are left null — only
+  // id, birthdate, gender, and active are used by the benchmark arms.
+  PatientData patient;
+
+  int64_t ffhr_size_bytes = 0;  // Size of the .ffhr file this was read from.
 };
 
-struct AggregatedBundleFixture {
-  std::vector<CholesterolObservation> cholesterol_observations;
-  int64_t serialized_size_bytes = 0;  // Actual size after serialization
-  int64_t target_size_bytes = 0;      // Target size goal
+struct BundleBenchFixture {
+  std::vector<SyntheaFixture> patients;
+  int64_t target_size_bytes = 0;
+  int64_t actual_ingested_bytes = 0;
+  int64_t fastfhir_vma_bytes = 0;
 };
 
-inline PatientData make_single_patient_fixture() {
-  // Canonical in-memory FHIR R5 PatientData fixture used by all arms.
-  PatientData patient{};
-  patient.id = "patient-1";
-  patient.active = 1;
-  patient.gender = AdministrativeGender::Male;
-  patient.birthdate = "1990-03-21";
+// Load a pre-generated .ffhr file, parse it via FastFHIR::Parser, and return
+// a SyntheaFixture with owned string copies of all extracted fields.
+// Throws if the .ffhr file is missing or does not contain a valid Patient.
+SyntheaFixture make_synthea_fixture(const std::filesystem::path& ffhr_path);
 
-  HumanNameData name{};
-  name.family = "Landvater";
-  name.given = {"Ryan", "Eric"};
-  patient.name.push_back(std::move(name));
-
-  return patient;
+// PatientData contains unique_ptr members (move-only). Clone only the subset
+// of fields that benchmark arms actually read.
+inline SyntheaFixture clone_fixture(const SyntheaFixture& src) {
+  SyntheaFixture dst{};
+  dst.patient_id_storage        = src.patient_id_storage;
+  dst.patient_birthdate_storage = src.patient_birthdate_storage;
+  dst.patient.id                = dst.patient_id_storage;
+  dst.patient.birthdate         = dst.patient_birthdate_storage;
+  dst.patient.gender            = src.patient.gender;
+  dst.patient.active            = src.patient.active;
+  dst.ffhr_size_bytes           = src.ffhr_size_bytes;
+  return dst;
 }
 
-SyntheaFixture make_synthea_fixture(const std::string& json_payload);
-
-// Aggregated bundle functions
-AggregatedBundleFixture make_aggregated_bundle_fixture(
-    const std::vector<std::string>& json_payloads,
-    int64_t target_size_bytes);
-
-ArmRunResult run_fastfhir_aggregated_bundle(const AggregatedBundleFixture& fixture);
-ArmRunResult run_json_aggregated_bundle(const AggregatedBundleFixture& fixture);
-
-ArmRunResult run_fastfhir_smoke(const PatientData& patient);
-ArmRunResult run_json_fhir_smoke(const PatientData& patient);
-
-ArmRunResult run_fastfhir_synthea_query(const SyntheaFixture& fixture);
-ArmRunResult run_json_synthea_query(const SyntheaFixture& fixture);
+ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture);
+ArmRunResult run_json_bundle(const BundleBenchFixture& fixture);
+ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture);
+ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture);
 
 }  // namespace bench

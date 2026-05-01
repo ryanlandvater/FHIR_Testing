@@ -1,6 +1,0 @@
-id,run_id,test_id,arm,stage,substage,scenario_name,start_ts,end_ts,duration_us,payload_bytes,throughput_rps,peak_rss_mb,rss_delta_mb,queue_publish_ts,queue_dequeue_ts,enqueue_count,dequeue_count,batch_id,notes
-1,smoke_20260501_094046,,fastfhir,stage3_query,,,2026-05-01 13:40:46.648303+00:00,2026-05-01 13:40:46.648303+00:00,2500,,,42.0,2.5,,,,,,
-2,smoke_20260501_100854,,fastfhir,stage1_serialize,,,2026-05-01 14:08:56.736445+00:00,2026-05-01 14:08:56.736446+00:00,1,,,,,,,,,,
-3,smoke_20260501_100854,,fastfhir,stage3_query,,,2026-05-01 14:08:56.736445+00:00,2026-05-01 14:08:56.736446+00:00,1,,,,,,,,,,
-4,smoke_20260501_100854,,json_fhir,stage1_serialize,,,2026-05-01 14:08:56.736445+00:00,2026-05-01 14:08:56.736446+00:00,1,,,,,,,,,,
-5,smoke_20260501_100854,,json_fhir,stage3_query,,,2026-05-01 14:08:56.736445+00:00,2026-05-01 14:08:56.736446+00:00,1,,,,,,,,,,

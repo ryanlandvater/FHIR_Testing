@@ -12,70 +12,11 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./sql/init:/docker-entrypoint-initdb.d
-      - ./sql/migrations:/docker-entrypoint-initdb.d/migrations
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bench} -d ${POSTGRES_DB:-benchmark}"]
       interval: 5s
       timeout: 3s
       retries: 20
-    networks:
-      - bench_net
-
-  sender:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.sender
-    container_name: fhir_bench_sender
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      SENDER_PORT: ${SENDER_PORT:-9001}
-      BENCH_DB_URL: postgresql+psycopg2://${POSTGRES_USER:-bench}:${POSTGRES_PASSWORD:-bench}@db:5432/${POSTGRES_DB:-benchmark}
-    ports:
-      - "${SENDER_PORT:-9001}:9001"
-    volumes:
-      - ./artifacts:/workspace/artifacts
-      - ./datasets:/workspace/datasets
-    networks:
-      - bench_net
-
-  receiver:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.receiver
-    container_name: fhir_bench_receiver
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      RECEIVER_PORT: ${RECEIVER_PORT:-9002}
-      BENCH_DB_URL: postgresql+psycopg2://${POSTGRES_USER:-bench}:${POSTGRES_PASSWORD:-bench}@db:5432/${POSTGRES_DB:-benchmark}
-    ports:
-      - "${RECEIVER_PORT:-9002}:9002"
-    volumes:
-      - ./artifacts:/workspace/artifacts
-      - ./datasets:/workspace/datasets
-    networks:
-      - bench_net
-
-  profiler:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.profiler
-    container_name: fhir_bench_profiler
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      BENCH_DB_URL: postgresql+psycopg2://${POSTGRES_USER:-bench}:${POSTGRES_PASSWORD:-bench}@db:5432/${POSTGRES_DB:-benchmark}
-    ports:
-      - "${JUPYTER_PORT:-8888}:8888"
-    volumes:
-      - ./:/workspace
     networks:
       - bench_net
 

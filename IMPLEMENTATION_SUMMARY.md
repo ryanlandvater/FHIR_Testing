@@ -2,9 +2,9 @@
 
 ## Overview
 
-This document summarizes the implementation, execution, and validation of a comparative benchmark between **FastFHIR** (binary serialization engine) and **nlohmann::json** (text-based JSON) on realistic FHIR data from the Synthea project.
+This document summarizes the implementation, execution, and validation of a comparative benchmark between **FastFHIR**, **nlohmann::json**, **Google FHIR**, and **HL7v2** on realistic FHIR data.
 
-**Status**: ✅ **Complete and Validated**
+**Status**: 🚧 **In Progress: 4-Arm Benchmark Scaffolding**
 
 ---
 
@@ -39,20 +39,87 @@ This document summarizes the implementation, execution, and validation of a comp
 ---
 
 ### Phase 3: Benchmarking Implementation
-**Objective**: Implement fair, two-stage measurements for both arms.
+**Objective**: Implement fair, two-stage measurements for all four arms.
 
 **Outcome**:
 - **FastFHIR Arm**:
-  - Stage 1: `Builder::append_obj<T>()` to serialize struct → binary arena
-  - Stage 3: `Parser` instantiation + field key navigation + value matching
-  - File: [bench/arm_fastfhir_synthea.cpp](bench/arm_fastfhir_synthea.cpp)
-
+  - Implemented in `bench/arm_fastfhir.cpp`.
 - **JSON Arm**:
-  - Stage 1: Manual struct → `nlohmann::json` conversion + `dump()` to string
-  - Stage 3: `nlohmann::json::parse()` + recursive object/array traversal
-  - File: [bench/arm_json_synthea.cpp](bench/arm_json_synthea.cpp)
+  - Implemented in `bench/arm_json_fhir.cpp`.
+- **Google FHIR Arm**:
+  - Placeholder smoke test in `bench/arm_google_fhir.cpp`.
+- **HL7v2 Arm**:
+  - Placeholder smoke test in `bench/arm_hl7v2.cpp`.
 
-**Key Insight**: Both arms follow identical stage structure, ensuring direct latency comparison.
+**Key Insight**: All arms follow an identical stage structure, ensuring direct latency comparison.
+
+---
+
+### Phase 4: Build & Dependency Resolution
+**Objective**: Compile against installed FastFHIR public API without internal header coupling.
+
+**Challenges & Solutions**:
+
+| Problem | Root Cause | Solution |
+|---------|-----------|----------|
+| Missing headers (FF_Bundle.hpp) | Generated headers not installed by CMake | Manually copied from build/generated_src/ to build/include/ |
+| Undefined types (ObservationData, BundleData) | Headers not included in harness | Added `#include <FF_Bundle.hpp>` and `#include <FF_Observation.hpp>` |
+| Ingestor linker errors | Symbol not exported in libfastfhir.dylib | Pivoted to struct-based Builder (fully public API) |
+| Directory detection | Synthea files at datasets/synthea/, not datasets/synthea/fhir/ | Added fallback logic in main.cpp |
+
+**Outcome**: Clean build of all targets (bench_harness, bench_timing_conformance)
+
+**Upstream Findings**: Documented in [FFHRnotes.md](FFHRnotes.md)
+
+---
+
+### Phase 5: Execution & Analysis
+**Objective**: Run benchmark on full Synthea dataset and analyze results.
+
+**Execution**:
+```bash
+./build/bench/bench/bench_harness
+```
+
+---
+
+## Key Findings
+
+Metrics are not yet available for the four-arm benchmark.
+
+---
+
+## Validation
+
+Validation is pending the full implementation of all four benchmark arms.
+
+---
+
+## Real-World Impact
+
+Impact analysis is pending the full implementation and measurement of all four benchmark arms.
+
+---
+
+## Implementation Details
+
+### File Structure
+
+```
+bench/
+├── harness.hpp                      # Shared definitions, structs, function declarations
+├── main.cpp                         # Benchmark entry point
+├── arm_fastfhir.cpp                 # FastFHIR implementation
+├── arm_json_fhir.cpp                # JSON implementation
+├── arm_google_fhir.cpp              # Google FHIR smoke test
+├── arm_hl7v2.cpp                    # HL7v2 smoke test
+├── synthea_fixture.cpp              # .ffhr file loading
+└── CMakeLists.txt                   # Build configuration
+
+Generated Dependencies:
+├── local/include/FastFHIR.hpp       # Main FastFHIR header
+├── local/lib/libfastfhir.dylib      # FastFHIR public API
+```
 
 ---
 
@@ -227,161 +294,8 @@ Generated Dependencies:
 └── build/lib/libfastfhir.dylib      # FastFHIR public API
 ```
 
-### Key Types
-
-**CholesterolObservation** (In-memory representation):
-```cpp
-struct CholesterolObservation {
-    std::string system;
-    std::string code;
-    double value;
-    bool has_value;
-};
-```
-
-**SyntheaFixture** (Collection of observations):
-```cpp
-struct SyntheaFixture {
-    std::vector<CholesterolObservation> cholesterol_observations;
-};
-```
-
-**MetricEvent** (Measurement output):
-```cpp
-struct MetricEvent {
-    std::string arm;        // "fastfhir" or "json_fhir"
-    std::string stage;      // "stage1_serialize" or "stage3_query"
-    int64_t duration_us;    // Microseconds
-};
-```
-
 ---
 
-## Limitations & Future Work
-
-### Known Limitations
-
-1. **Single Semantic Query**: Measures only LOINC code 2085-9 matching
-   - More complex queries may have different characteristics
-   - Temporal filters, nested searches not measured
-
-2. **Value Extraction**: Current implementation marks results as "found" without extracting numeric values
-   - Could enhance to validate data correctness
-   - Would add ~5-10% to both Stage 3 costs
-
-3. **Single Iteration**: No warmup or cache effects
-   - Production workloads may show different patterns
-   - Could rerun with `--iterations 10` for statistical stability
-
-4. **No Format Conversion**: Excludes FastFHIR→JSON conversion (if needed downstream)
-   - Intentional guardrail to preserve fair comparison
-   - Real workloads requiring JSON output would need additional analysis
-
-### Future Enhancements
-
-1. **Multi-Query Benchmark**
-   - Combine searches (e.g., cholesterol AND blood pressure)
-   - Temporal filters (observations from last month)
-   - Nested traversal (patient → encounters → observations)
-
-2. **Statistical Validation**
-   - Run with `--iterations 100` to measure variance
-   - Generate confidence intervals
-   - Account for warmup effects
-
-3. **Payload Analysis**
-   - Measure serialized sizes (binary vs. JSON)
-   - Calculate compression ratios
-   - Estimate network transmission savings
-
-4. **End-to-End Scenario**
-   - Serialize → binary write → network transmission → binary read → parse → query
-   - Measure cumulative latency and throughput
-   - Compare against text-based pipeline
-
-5. **Query Correctness Validation**
-   - Extract numeric cholesterol values from both arms
-   - Verify both arms find identical observations
-   - Ensure semantic equivalence
-
----
-
-## Conclusions
-
-### ✅ Primary Objective Achieved
-
-**Question**: *Is the FastFHIR write-cost trade-off justified on realistic data?*
-
-**Answer**: **YES, decisively.**
-
-- 2.76x overall speedup on real patient Bundles
-- 18.47x query advantage validates core architecture
-- Write-once, read-many workload benefits significantly
-- Justified for read-heavy EHR systems (typical production case)
-
-### ✅ Architecture Validated
-
-FastFHIR's design principles are confirmed:
-- O(1) field navigation via fixed V-Table
-- Negligible read latency (~7 µs per query)
-- Justified write-time investment (~81 µs per patient)
-- Favorable scaling with data size and query complexity
-
-### ✅ Fair Benchmarking Established
-
-The benchmark methodology ensures validity:
-- Identical input representation (C++ struct)
-- Identical semantics (LOINC matching)
-- Consistent measurement framework
-- No unfair format-conversion penalties
-- Realistic dataset (119 real patient Bundles)
-
----
-
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) | Technical analysis, statistics, interpretation |
-| [BENCHMARK_SUMMARY.txt](BENCHMARK_SUMMARY.txt) | Executive summary with ASCII visualizations |
-| [FFHRnotes.md](FFHRnotes.md) | Upstream findings (missing headers, Ingestor issues) |
-| This File | Implementation journey and validation |
-
----
-
-## How to Reproduce
-
-### 1. Build the Benchmark
-```bash
-cd /Users/RyanLandvater/Programming_Projects/FHIR_Testing
-cmake --build build/bench
-```
-
-### 2. Run Full Synthea Benchmark
-```bash
-./build/bench/bench/bench_harness --synthea --iterations 1
-```
-
-### 3. Analyze Results
-```bash
-python3 /tmp/analyze_metrics.py
-```
-
-### 4. Review Reports
-- Executive summary: [BENCHMARK_SUMMARY.txt](BENCHMARK_SUMMARY.txt)
-- Detailed analysis: [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)
-
----
-
-## References
-
-- **FastFHIR Repository**: [FHIR_Testing/.external/FastFHIR](../../.external/FastFHIR/)
-- **Synthea Project**: https://synthea.mitre.org/ (synthetic patient generator)
-- **LOINC Code 2085-9**: Total Cholesterol (standard clinical observation)
-- **FHIR Specification**: https://www.hl7.org/fhir/ (R5 schema)
-
----
-
-**Completed**: 2024-05-01  
-**Author**: Benchmark Implementation Agent  
-**Status**: ✅ Production Ready
+**Completed**: 2026-05-01
+**Author**: Benchmark Implementation Agent
+**Status**: 🚧 In Progress

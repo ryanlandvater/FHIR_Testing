@@ -8,6 +8,12 @@ __pycache__/
 .env
 .venv/
 notebooks/analysis_exports/
+notebooks/benchmark_outputs/
+notebooks/.bench_tmp/
+
+# Benchmark result artifacts should not be committed at repo root
+BENCHMARK_RESULTS.md
+BENCHMARK_SUMMARY.txt
 
 # Build outputs
 build/
@@ -17,6 +23,8 @@ dist/
 bin/
 obj/
 .external/
+xcode/
+local/
 
 # Artifacts and runtime data
 artifacts/*

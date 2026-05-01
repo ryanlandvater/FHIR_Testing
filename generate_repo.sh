@@ -1,150 +1,239 @@
 #!/bin/bash
 set -euo pipefail
 
-# FastFHIR Benchmark Repository Setup
-# This script initializes the repository by cloning FastFHIR and configuring the build.
+# Minimal benchmark bootstrap:
+# 1) Resolve FastFHIR source (external URL first, local checkout fallback)
+# 2) Build/install FastFHIR to local/
+# 3) Download Synthea JSON if missing
+# 4) Convert JSON -> .ffhr with ff_ingestor (or ff_ingest fallback)
+# 5) Build this benchmark repo
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTERNAL_DIR="${REPO_ROOT}/.external"
 FASTFHIR_DIR="${EXTERNAL_DIR}/FastFHIR"
+FASTFHIR_BUILD="${EXTERNAL_DIR}/FastFHIR-build"
+FASTFHIR_INSTALL="${REPO_ROOT}/local"
+FASTFHIR_STAMP="${FASTFHIR_INSTALL}/.fastfhir_install_stamp"
+BUILD_DIR="${REPO_ROOT}/build/bench"
+SYNTHEA_DIR="${REPO_ROOT}/datasets/synthea"
+SYNTHEA_DATA_URL="${SYNTHEA_DATA_URL:-https://github.com/synthetichealth/synthea-sample-data/archive/refs/heads/master.zip}"
+THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+FASTFHIR_SYNC_REMOTE="${FASTFHIR_SYNC_REMOTE:-0}"
+FORCE_FASTFHIR_REBUILD="${FORCE_FASTFHIR_REBUILD:-0}"
+FORCE_BENCH_REBUILD="${FORCE_BENCH_REBUILD:-0}"
 
-# Load environment variables from .env if it exists
-if [[ -f "${REPO_ROOT}/.env" ]]; then
-    set +a  # Don't auto-export
-    source "${REPO_ROOT}/.env"
-    set -a
-fi
-
-# Color codes for output
+# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${YELLOW}=== FastFHIR Benchmark Repository Setup ===${NC}"
-echo "Repository root: ${REPO_ROOT}"
+echo -e "${YELLOW}=== FastFHIR Benchmark Setup ===${NC}"
 
-# Validate that we're in the correct directory
-if [[ ! -f "${REPO_ROOT}/CMakeLists.txt" ]]; then
-    echo -e "${RED}Error: CMakeLists.txt not found. Are you in the repository root?${NC}"
-    exit 1
-fi
+# ============================================================================
+# Step 1: Resolve FastFHIR source
+# ============================================================================
+echo -e "${YELLOW}Step 1: Preparing FastFHIR...${NC}"
 
-# Create external directory
-if [[ ! -d "${EXTERNAL_DIR}" ]]; then
-    echo -e "${YELLOW}Creating .external directory...${NC}"
-    mkdir -p "${EXTERNAL_DIR}"
-fi
+mkdir -p "${EXTERNAL_DIR}" "${SYNTHEA_DIR}"
 
-# Check if FastFHIR is already cloned
-if [[ -d "${FASTFHIR_DIR}" ]]; then
-    echo -e "${YELLOW}FastFHIR already exists at ${FASTFHIR_DIR}${NC}"
-    read -p "Do you want to re-clone FastFHIR? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Removing existing FastFHIR checkout...${NC}"
-        rm -rf "${FASTFHIR_DIR}"
+if [[ -n "${FASTFHIR_REPO:-}" ]]; then
+  echo -e "${YELLOW}Using external FastFHIR source: ${FASTFHIR_REPO}${NC}"
+  if [[ -d "${FASTFHIR_DIR}/.git" ]]; then
+    git -C "${FASTFHIR_DIR}" remote set-url origin "${FASTFHIR_REPO}" || true
+    if [[ "${FASTFHIR_SYNC_REMOTE}" == "1" ]]; then
+      git -C "${FASTFHIR_DIR}" fetch --tags --prune origin
+      git -C "${FASTFHIR_DIR}" pull --ff-only origin "$(git -C "${FASTFHIR_DIR}" rev-parse --abbrev-ref HEAD)"
+      git -C "${FASTFHIR_DIR}" submodule update --init --recursive
     else
-        echo -e "${GREEN}Using existing FastFHIR checkout.${NC}"
-        SKIP_CLONE=1
+      echo -e "${YELLOW}Skipping remote sync (set FASTFHIR_SYNC_REMOTE=1 to fetch/pull).${NC}"
     fi
-else
-    SKIP_CLONE=0
-fi
-
-# Clone FastFHIR if needed
-if [[ ${SKIP_CLONE:-0} -eq 0 ]]; then
-    echo -e "${YELLOW}Cloning FastFHIR with submodules...${NC}"
-    # Replace with the actual FastFHIR repository URL
-    FASTFHIR_REPO="${FASTFHIR_REPO:-https://github.com/your-org/FastFHIR.git}"
-    
-    if [[ "${FASTFHIR_REPO}" == "https://github.com/your-org/FastFHIR.git" ]]; then
-        echo -e "${RED}Error: FASTFHIR_REPO environment variable not set or using placeholder.${NC}"
-        echo "Set the FastFHIR repository URL:"
-        echo "  export FASTFHIR_REPO=<your-fastfhir-repo-url>"
-        echo "Then run this script again."
-        exit 1
-    fi
-    
+  else
+    rm -rf "${FASTFHIR_DIR}"
     git clone --recurse-submodules "${FASTFHIR_REPO}" "${FASTFHIR_DIR}"
+  fi
+else
+  echo -e "${YELLOW}FASTFHIR_REPO not set; falling back to local checkout at ${FASTFHIR_DIR}${NC}"
 fi
 
-# Verify FastFHIR checkout
 if [[ ! -f "${FASTFHIR_DIR}/include/FastFHIR.hpp" ]]; then
-    echo -e "${RED}Error: FastFHIR.hpp not found in ${FASTFHIR_DIR}/include/${NC}"
-    echo "The FastFHIR checkout may be incomplete or invalid."
-    exit 1
+  echo -e "${RED}Error: FastFHIR source unavailable.${NC}"
+  echo "Provide FASTFHIR_REPO or place a valid checkout at ${FASTFHIR_DIR}."
+  exit 1
 fi
 
-echo -e "${GREEN}FastFHIR checkout verified.${NC}"
+echo -e "${GREEN}FastFHIR located at ${FASTFHIR_DIR}${NC}"
 
-# Build FastFHIR separately
-echo -e "${YELLOW}Building FastFHIR library...${NC}"
-FASTFHIR_BUILD="${EXTERNAL_DIR}/FastFHIR-build"
-FASTFHIR_INSTALL_PREFIX="${REPO_ROOT}/local"
+GENERATED_SENTINEL="${FASTFHIR_DIR}/generated_src/FF_Patient.hpp"
+if [[ ! -f "${GENERATED_SENTINEL}" ]]; then
+  echo -e "${YELLOW}generated_src missing; running FastFHIR generator once via tools/generator/make_lib.py...${NC}"
+  PYTHON_BIN="${PYTHON_BIN:-}"
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      PYTHON_BIN="python3"
+    elif command -v python >/dev/null 2>&1; then
+      PYTHON_BIN="python"
+    else
+      echo -e "${RED}Error: python3/python not found; cannot run make_lib.py${NC}"
+      exit 1
+    fi
+  fi
 
-if [[ -d "${FASTFHIR_BUILD}" ]]; then
-    echo -e "${YELLOW}Removing existing FastFHIR build directory...${NC}"
-    rm -rf "${FASTFHIR_BUILD}"
+  (
+    cd "${FASTFHIR_DIR}"
+    "${PYTHON_BIN}" tools/generator/make_lib.py
+  )
 fi
 
-cmake -S "${FASTFHIR_DIR}" -B "${FASTFHIR_BUILD}" \
-    -DFASTFHIR_RUN_GENERATOR=ON \
+if [[ -d "${FASTFHIR_DIR}/.git" ]]; then
+  FASTFHIR_SOURCE_REV="$(git -C "${FASTFHIR_DIR}" rev-parse HEAD)"
+else
+  FASTFHIR_SOURCE_REV="nogit-$(stat -f %m "${FASTFHIR_DIR}/include/FastFHIR.hpp")"
+fi
+FASTFHIR_BUILD_FINGERPRINT="rev=${FASTFHIR_SOURCE_REV};profile=us;shared=ON;ingestor=ON"
+NEEDS_FASTFHIR_BUILD=1
+
+if [[ "${FORCE_FASTFHIR_REBUILD}" == "1" ]]; then
+  echo -e "${YELLOW}Forced FastFHIR rebuild requested.${NC}"
+elif [[ -f "${FASTFHIR_STAMP}" && \
+        -f "${FASTFHIR_INSTALL}/include/FastFHIR.hpp" && \
+        -f "${FASTFHIR_INSTALL}/lib/libfastfhir.dylib" && \
+        -f "${FASTFHIR_INSTALL}/generated_src/FF_Recovery.hpp" && \
+        ( -x "${FASTFHIR_INSTALL}/bin/ff_ingestor" || -x "${FASTFHIR_INSTALL}/bin/ff_ingest" ) ]]; then
+  EXISTING_STAMP="$(cat "${FASTFHIR_STAMP}")"
+  if [[ "${EXISTING_STAMP}" == "${FASTFHIR_BUILD_FINGERPRINT}" ]]; then
+    NEEDS_FASTFHIR_BUILD=0
+  fi
+fi
+
+# ============================================================================
+# Step 2: Build and Install FastFHIR
+# ============================================================================
+echo -e "${YELLOW}Step 2: Building FastFHIR...${NC}"
+
+if [[ "${NEEDS_FASTFHIR_BUILD}" == "1" ]]; then
+  mkdir -p "${FASTFHIR_BUILD}" "${FASTFHIR_INSTALL}"
+
+  cmake -S "${FASTFHIR_DIR}" -B "${FASTFHIR_BUILD}" \
+    -DFASTFHIR_RUN_GENERATOR=OFF \
     -DFASTFHIR_PRODUCTION_PROFILE=us \
     -DFASTFHIR_BUILD_SHARED=ON \
-    -DCMAKE_INSTALL_PREFIX="${FASTFHIR_INSTALL_PREFIX}"
+    -DFASTFHIR_BUILD_INGESTOR=ON \
+    -DCMAKE_INSTALL_PREFIX="${FASTFHIR_INSTALL}"
 
-if ! cmake --build "${FASTFHIR_BUILD}"; then
-    echo -e "${RED}FastFHIR build failed.${NC}"
+  if ! cmake --build "${FASTFHIR_BUILD}" --parallel "${THREADS}"; then
+    echo -e "${RED}FastFHIR build failed${NC}"
     exit 1
+  fi
+
+  if ! cmake --install "${FASTFHIR_BUILD}"; then
+    echo -e "${RED}FastFHIR install failed${NC}"
+    exit 1
+  fi
+
+  echo "${FASTFHIR_BUILD_FINGERPRINT}" > "${FASTFHIR_STAMP}"
+else
+  echo -e "${GREEN}FastFHIR install is up to date; skipping rebuild/codegen.${NC}"
 fi
 
-if ! cmake --install "${FASTFHIR_BUILD}"; then
-    echo -e "${RED}FastFHIR install failed.${NC}"
-    exit 1
+# Stage generated headers to include/ for consumer use
+if [[ -d "${FASTFHIR_DIR}/generated_src" ]]; then
+  mkdir -p "${FASTFHIR_INSTALL}/generated_src"
+  cp "${FASTFHIR_DIR}/generated_src"/*.hpp "${FASTFHIR_INSTALL}/include/" 2>/dev/null || true
+  cp "${FASTFHIR_DIR}/generated_src"/*.hpp "${FASTFHIR_INSTALL}/generated_src/" 2>/dev/null || true
 fi
 
-# Temporary compatibility shim: stage generated/public headers that are required
-# by installed public headers but are not yet installed by FastFHIR CMake.
-mkdir -p "${FASTFHIR_INSTALL_PREFIX}/include"
-mkdir -p "${FASTFHIR_INSTALL_PREFIX}/generated_src"
+echo -e "${GREEN}FastFHIR built and installed to ${FASTFHIR_INSTALL}${NC}"
 
-# Stage full public include tree to satisfy transitive header includes.
-find "${FASTFHIR_DIR}/include" -maxdepth 1 -name "*.hpp" -exec cp {} "${FASTFHIR_INSTALL_PREFIX}/include/" \;
+# ============================================================================
+# Step 3: Download and Prepare Synthea Data
+# ============================================================================
+echo -e "${YELLOW}Step 3: Preparing Synthea data...${NC}"
 
-# Preserve generated header relative-include layout expected by FF_Primitives.hpp
-find "${FASTFHIR_DIR}/generated_src" -maxdepth 1 -name "*.hpp" -exec cp {} "${FASTFHIR_INSTALL_PREFIX}/generated_src/" \;
+JSON_COUNT=$(find "${SYNTHEA_DIR}" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+if [[ "${JSON_COUNT}" == "0" ]]; then
+  echo -e "${YELLOW}No Synthea JSON found. Downloading sample dataset...${NC}"
+  SYNTHEA_TMP="${EXTERNAL_DIR}/synthea-download"
+  rm -rf "${SYNTHEA_TMP}"
+  mkdir -p "${SYNTHEA_TMP}"
 
-# Expose selected generated API headers at include root for consumers.
-for hdr in FF_Dictionary.hpp FF_R4_Dictionary.hpp FF_R5_Dictionary.hpp FF_CodeSystems.hpp FF_DataTypes.hpp FF_Patient.hpp; do
-    if [[ -f "${FASTFHIR_DIR}/generated_src/${hdr}" ]]; then
-        cp "${FASTFHIR_DIR}/generated_src/${hdr}" "${FASTFHIR_INSTALL_PREFIX}/include/${hdr}"
-    fi
+  curl -L "${SYNTHEA_DATA_URL}" -o "${SYNTHEA_TMP}/synthea.zip"
+  unzip -q "${SYNTHEA_TMP}/synthea.zip" -d "${SYNTHEA_TMP}"
+
+  COPIED=0
+  while IFS= read -r json_path; do
+    cp "${json_path}" "${SYNTHEA_DIR}/$(basename "${json_path}")"
+    COPIED=$((COPIED + 1))
+  done < <(find "${SYNTHEA_TMP}" -type f -path '*/fhir/*.json')
+
+  if [[ "${COPIED}" == "0" ]]; then
+    echo -e "${RED}Failed to extract Synthea JSON from ${SYNTHEA_DATA_URL}${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}Downloaded ${COPIED} Synthea JSON files${NC}"
+fi
+
+FF_INGESTOR="${FASTFHIR_INSTALL}/bin/ff_ingestor"
+if [[ ! -x "${FF_INGESTOR}" ]]; then
+  FF_INGESTOR="${FASTFHIR_INSTALL}/bin/ff_ingest"
+fi
+
+if [[ ! -x "${FF_INGESTOR}" ]]; then
+  echo -e "${RED}Error: ff_ingestor/ff_ingest not found under ${FASTFHIR_INSTALL}/bin${NC}"
+  exit 1
+fi
+
+echo -e "${YELLOW}Pre-converting Synthea JSON to .ffhr...${NC}"
+converted=0
+skipped=0
+failed=0
+
+for json_file in "${SYNTHEA_DIR}"/*.json; do
+  [[ -f "${json_file}" ]] || continue
+  ffhr_file="${json_file%.json}.ffhr"
+
+  if [[ -f "${ffhr_file}" ]]; then
+    ((skipped++)) || true
+    continue
+  fi
+
+  if DYLD_LIBRARY_PATH="${FASTFHIR_INSTALL}/lib" "${FF_INGESTOR}" "${json_file}" -o "${ffhr_file}" >/dev/null 2>&1; then
+    ((converted++)) || true
+  else
+    echo -e "${RED}Failed to convert $(basename "${json_file}")${NC}"
+    ((failed++)) || true
+  fi
 done
 
-echo -e "${GREEN}FastFHIR built and installed to ${FASTFHIR_INSTALL_PREFIX}.${NC}"
+total=$((converted + skipped))
+echo -e "${GREEN}Synthea preparation: ${converted} converted, ${skipped} skipped, ${failed} failed (${total} total)${NC}"
 
-# Configure CMake
-echo -e "${YELLOW}Configuring CMake...${NC}"
-BUILD_DIR="${REPO_ROOT}/build/bench"
+# ============================================================================
+# Step 4: Configure and Build Benchmark
+# ============================================================================
+echo -e "${YELLOW}Step 4: Building benchmark harness...${NC}"
 
-if [[ -d "${BUILD_DIR}" ]]; then
-    echo -e "${YELLOW}Removing existing build directory...${NC}"
-    rm -rf "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}"
+
+if [[ "${FORCE_BENCH_REBUILD}" == "1" ]]; then
+  rm -rf "${BUILD_DIR}"
+  mkdir -p "${BUILD_DIR}"
 fi
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
-    -DFASTFHIR_ROOT="${FASTFHIR_DIR}" \
-    -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL_PREFIX}"
+  -DFASTFHIR_ROOT="${FASTFHIR_DIR}" \
+  -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL}"
 
-# Build the project
-echo -e "${YELLOW}Building benchmark harness...${NC}"
-cmake --build "${BUILD_DIR}"
+if ! cmake --build "${BUILD_DIR}" --parallel "${THREADS}"; then
+  echo -e "${RED}Benchmark build failed${NC}"
+  exit 1
+fi
 
 echo -e "${GREEN}=== Setup Complete ===${NC}"
-echo "The benchmark harness is ready to run:"
-echo "  ./build/bench/bench/bench_harness --smoke --iterations 1"
 echo ""
-echo "To run the full local benchmark stack:"
-echo "  ./scripts/local_up.sh"
-echo "  ./scripts/local_benchmark.sh"
+echo "Run the benchmark:"
+echo "  cd ${REPO_ROOT}"
+echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./build/bench/bench/bench_harness"
+echo ""
+echo "Run validation test:"
+echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./build/bench/bench/bench_timing_conformance"
