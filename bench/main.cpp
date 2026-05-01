@@ -18,18 +18,20 @@ int main(int argc, char** argv) {
   }
 
   if (!smoke) {
-    std::cout << "bench_harness ready. Run with --smoke to emit FastFHIR and JSON/FHIR metrics.\n";
+    std::cout << "bench_harness ready. Run with --smoke to emit single-patient FastFHIR and JSON/FHIR metrics.\n";
     return 0;
   }
 
-  for (int i = 0; i < iterations; ++i) {
-    const auto ff = bench::run_fastfhir_smoke();
-    const auto jf = bench::run_json_fhir_smoke();
+  const auto patient = bench::make_single_patient_fixture();
 
-    for (const auto& metric : ff) {
+  for (int i = 0; i < iterations; ++i) {
+    const auto ff = bench::run_fastfhir_smoke(patient);
+    const auto jf = bench::run_json_fhir_smoke(patient);
+
+    for (const auto& metric : ff.metrics) {
       bench::print_metric(metric);
     }
-    for (const auto& metric : jf) {
+    for (const auto& metric : jf.metrics) {
       bench::print_metric(metric);
     }
   }

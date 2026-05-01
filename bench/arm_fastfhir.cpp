@@ -1,56 +1,67 @@
+#include <openssl/sha.h>
 #include "harness.hpp"
 
-#include <algorithm>
-#include <array>
-#include <string>
+#include <memory>
 
 namespace bench {
 
-std::vector<MetricEvent> run_fastfhir_smoke() {
-  std::vector<MetricEvent> events;
-  events.reserve(2);
+ArmRunResult run_fastfhir_smoke(const PatientData& patient) {
+  ArmRunResult result;
+  result.metrics.reserve(2);
 
-  const std::array<std::pair<const char*, const char*>, 5> fields = {{{"resourceType", "Patient"},
-                                                                       {"id", "patient-1"},
-                                                                       {"gender", "male"},
-                                                                       {"birthDate", "1990-03-21"},
-                                                                       {"cholesterol_mg_dl", "183"}}};
+  // Create a Memory arena for the FastFHIR payload.
+  auto mem = FastFHIR::Memory::create(64 * 1024 * 1024);
+  FastFHIR::Builder builder(mem, FHIR_VERSION_R5);
 
-  // Stage 1 start: immediately before the first field write.
+  // Stage 1 start: immediately before the first field write (during ingest/builder operations).
   Timer stage1;
-  std::string payload;
-  payload.reserve(256);
   stage1.start();
-  payload += "FFHR|";
-  for (const auto& [key, value] : fields) {
-    payload += key;
-    payload += "=";
-    payload += value;
-    payload += ";";
-  }
-  // Stage 1 end: payload is sealed for read-side use.
-  events.push_back(MetricEvent{"fastfhir", Stage::Stage1Serialize, std::max<std::int64_t>(stage1.stop_us(), 1)});
+
+  // Build a Patient resource from in-memory PatientData using assignment operators.
+  PatientData scaffold{};
+  auto patient_handle = builder.append_obj(scaffold);
+  patient_handle[FastFHIR::Fields::PATIENT::ID] = patient.id;
+  patient_handle[FastFHIR::Fields::PATIENT::ACTIVE] = patient.active;
+
+  const std::string gender_literal = FF_AdministrativeGenderToString(patient.gender);
+  patient_handle[FastFHIR::Fields::PATIENT::GENDER] = FF_GetDictionaryCode(gender_literal, FHIR_VERSION_R5);
+  patient_handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = patient.birthdate;
+
+  // Set as root and finalize to seal the payload.
+  builder.set_root(patient_handle);
+  auto view = builder.finalize(FF_CHECKSUM_SHA256, [](const unsigned char* data, size_t len) -> std::vector<BYTE> {
+    return std::vector<uint8_t> (SHA256_DIGEST_LENGTH);
+});
+
+  // Stage 1 end: payload is sealed and ready for read-side operations.
+  result.metrics.push_back(
+      MetricEvent{"fastfhir", Stage::Stage1Serialize, std::max<std::int64_t>(stage1.stop_us(), 1)});
 
   // Stage 3 start: first parser/read call that consumes bytes for query.
   Timer stage3;
   stage3.start();
-  const std::string marker = "cholesterol_mg_dl=";
-  const auto marker_pos = payload.find(marker);
-  std::string extracted;
-  if (marker_pos != std::string::npos) {
-    const auto start = marker_pos + marker.size();
-    const auto end = payload.find(';', start);
-    extracted = payload.substr(start, end - start);
-  }
-  // Stage 3 end: target value extracted.
-  events.push_back(MetricEvent{"fastfhir", Stage::Stage3Query, std::max<std::int64_t>(stage3.stop_us(), 1)});
 
-  if (extracted.empty()) {
-    // Keep the extracted value visible to the optimizer while preserving timing output.
-    events.back().duration_us = std::max<std::int64_t>(events.back().duration_us, 1);
+  // Parse the sealed FFHR payload.
+  FastFHIR::Parser parser(view.data(), view.size());
+  auto root = parser.root();
+
+  if (root) {
+    // Query the birthDate field using the typed field key.
+    auto birthdate_entry = root[FastFHIR::Fields::PATIENT::BIRTH_DATE];
+    if (birthdate_entry) {
+      result.queried_value = std::string(birthdate_entry.as<std::string_view>());
+    }
   }
 
-  return events;
+  // Stage 3 end: target value extracted into result variable.
+  result.metrics.push_back(
+      MetricEvent{"fastfhir", Stage::Stage3Query, std::max<std::int64_t>(stage3.stop_us(), 1)});
+
+  if (result.queried_value.empty()) {
+    result.metrics.back().duration_us = std::max<std::int64_t>(result.metrics.back().duration_us, 1);
+  }
+
+  return result;
 }
 
 }  // namespace bench

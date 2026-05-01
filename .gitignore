@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 .env
 .venv/
+notebooks/analysis_exports/
 
 # Build outputs
 build/
@@ -15,6 +16,7 @@ cmake-build-*/
 dist/
 bin/
 obj/
+.external/
 
 # Artifacts and runtime data
 artifacts/*
@@ -27,6 +29,7 @@ metrics/
 *.log
 *.sqlite
 *.db
+
 
 # Terraform local state
 *.tfstate

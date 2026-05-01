@@ -3,6 +3,29 @@
 
 ---
 
+## Repository Benchmark Policy (Reviewer Notes)
+
+This repository uses FastFHIR generated `PatientData` and nested `*Data` types as the canonical C++ in-memory ground truth for benchmark inputs.
+
+How this is applied:
+
+- Build one canonical `PatientData` fixture in memory.
+- Feed that same object into every benchmark arm.
+- JSON/FHIR arm serializes from `PatientData` to JSON text.
+- FastFHIR arm serializes from `PatientData` using assignment operators and generated field keys.
+
+Why this matters:
+
+- Ensures all arms start from the same in-memory data.
+- Reduces benchmark bias from divergent fixture construction.
+- Improves auditability for reviewers by making data provenance explicit.
+
+Note:
+
+- FastFHIR also supports direct struct serialization pathways, but assignment-operator serialization is intentionally used in the benchmark path for cross-system parity.
+
+---
+
 ## 1. Loading FFHR Files — Memory::createFromFile vs. Memory::create
 
 ### File-Backed Arena (Persistent Storage)
