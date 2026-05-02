@@ -1,5 +1,21 @@
 include(FetchContent)
 
+find_package(TBB QUIET CONFIG)
+if(TBB_FOUND)
+  message(STATUS "TBB found via package config")
+  set(BENCH_TBB_TARGET TBB::tbb)
+else()
+  find_library(TBB_LIBRARY NAMES tbb)
+  if(TBB_LIBRARY)
+    add_library(bench_tbb UNKNOWN IMPORTED)
+    set_target_properties(bench_tbb PROPERTIES IMPORTED_LOCATION "${TBB_LIBRARY}")
+    set(BENCH_TBB_TARGET bench_tbb)
+    message(STATUS "TBB found via find_library: ${TBB_LIBRARY}")
+  else()
+    message(WARNING "TBB not found. Parallel STL backend may fall back to implementation defaults.")
+  endif()
+endif()
+
 find_package(nlohmann_json CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(
@@ -69,6 +85,9 @@ target_include_directories(bench_core INTERFACE ${FASTFHIR_GENERATED_INCLUDE_DIR
 target_include_directories(bench_core INTERFACE ${FASTFHIR_SIMDJSON_INCLUDE_DIR})
 target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
 target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY} ${FASTFHIR_INGESTOR_LIBRARY})
+if(BENCH_TBB_TARGET)
+  target_link_libraries(bench_core INTERFACE ${BENCH_TBB_TARGET})
+endif()
 
 if(PostgreSQL_FOUND)
   target_include_directories(bench_core INTERFACE ${PostgreSQL_INCLUDE_DIRS})

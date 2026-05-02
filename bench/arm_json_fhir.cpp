@@ -3,8 +3,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <execution>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace bench {
 
@@ -423,19 +427,64 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   Timer stage1;
   stage1.start();
 
+  // Phase 1: Build each entry's JSON AST in parallel.
+  std::vector<nlohmann::json> patient_entries(fixture.bundle.size());
+#if defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
+  std::transform(
+      std::execution::par_unseq,
+      fixture.bundle.begin(),
+      fixture.bundle.end(),
+      patient_entries.begin(),
+      [](const BundlePatient& p) -> nlohmann::json {
+        nlohmann::json patient_resource = to_json_patient(p);
+        nlohmann::json patient_entry;
+        patient_entry["resource"] = std::move(patient_resource);
+        return patient_entry;
+      });
+#else
+  {
+    std::atomic_size_t next_idx{0};
+    const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t worker_count = std::min<size_t>(hw_threads, fixture.bundle.size() == 0 ? 1 : fixture.bundle.size());
+
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+
+    for (size_t worker = 0; worker < worker_count; ++worker) {
+      workers.emplace_back([&]() {
+        while (true) {
+          const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+          if (idx >= fixture.bundle.size()) {
+            break;
+          }
+
+          nlohmann::json patient_resource = to_json_patient(fixture.bundle[idx]);
+          nlohmann::json patient_entry;
+          patient_entry["resource"] = std::move(patient_resource);
+          patient_entries[idx] = std::move(patient_entry);
+        }
+      });
+    }
+
+    for (auto& worker : workers) {
+      worker.join();
+    }
+  }
+#endif
+
   nlohmann::json bundle;
   bundle["resourceType"] = "Bundle";
   bundle["type"] = "collection";
   bundle["entry"] = nlohmann::json::array();
 
-  for (const auto& p : fixture.bundle) {
-    nlohmann::json patient_resource = to_json_patient(p);
-
-    nlohmann::json patient_entry;
-    patient_entry["resource"] = std::move(patient_resource);
-    bundle["entry"].push_back(std::move(patient_entry));
+  // Phase 2: Assemble bundle entry array sequentially.
+  for (auto& entry : patient_entries) {
+    if (!entry.is_null()) {
+      bundle["entry"].push_back(std::move(entry));
+    }
   }
 
+  // Phase 3: Final stringification remains the serialization bottleneck.
   const std::string payload = bundle.dump();
 
   result.metrics.push_back(
