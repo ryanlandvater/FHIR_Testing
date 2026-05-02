@@ -48,7 +48,6 @@ void put_string_array_if(Json& out, const char* key, const std::vector<std::stri
   }
 
   Json arr = Json::array();
-  arr.reserve(values.size());
   for (const auto& value : values) {
     if (!value.empty()) {
       arr.push_back(value);
@@ -66,7 +65,6 @@ void put_object_array_if(Json& out, const char* key, const std::vector<T>& value
   }
 
   Json arr = Json::array();
-  arr.reserve(values.size());
   for (const auto& value : values) {
     arr.push_back(convert(value));
   }

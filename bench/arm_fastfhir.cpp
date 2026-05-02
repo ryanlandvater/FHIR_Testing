@@ -9,7 +9,28 @@
 
 namespace bench {
 
-namespace {}  // namespace
+namespace {
+
+template <typename T>
+void assign_offset_array_if_present(
+    FastFHIR::Builder& builder,
+    const FastFHIR::Reflective::ObjectHandle& parent,
+    FF_FieldKey field,
+    const std::vector<T>& values) {
+  if (values.empty()) {
+    return;
+  }
+
+  std::vector<Offset> offsets;
+  offsets.reserve(values.size());
+  for (const auto& value : values) {
+    offsets.push_back(builder.append(value));
+  }
+
+  parent[field] = offsets;
+}
+
+}  // namespace
 
 ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   ArmRunResult result;
@@ -57,28 +78,43 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
     if (!patient.contained.empty()) {
       patient_handle[FastFHIR::Fields::PATIENT::CONTAINED] = patient.contained;
     }
-    if (!patient.extension.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::EXTENSION] = patient.extension;
-    }
-    if (!patient.modifierextension.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::MODIFIER_EXTENSION] = patient.modifierextension;
-    }
-    if (!patient.identifier.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::IDENTIFIER] = patient.identifier;
-    }
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::EXTENSION,
+        patient.extension);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::MODIFIER_EXTENSION,
+        patient.modifierextension);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::IDENTIFIER,
+        patient.identifier);
+
     if (patient.active != FF_NULL_UINT8) {
       patient_handle[FastFHIR::Fields::PATIENT::ACTIVE] = (patient.active != 0);
     }
-    if (!patient.name.empty()) patient_handle[FastFHIR::Fields::PATIENT::NAME] = patient.name;
-    if (!patient.telecom.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::TELECOM] = patient.telecom;
-    }
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::NAME,
+        patient.name);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::TELECOM,
+        patient.telecom);
     if (patient.gender == AdministrativeGender::Male) {
       patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"male"};
     } else if (patient.gender == AdministrativeGender::Female) {
       patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"female"};
     } else if (patient.gender == AdministrativeGender::Other) {
       patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"other"};
+    } else if (patient.gender == AdministrativeGender::Unknown) {
+      patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"unknown"};
     }
     if (!patient.birthdate.empty()) {
       patient_handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = patient.birthdate;
@@ -96,13 +132,11 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
         patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *u64;
       } else if (const auto* f64 = std::get_if<double>(&patient.deceased.value)) {
         patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *f64;
+      } else if (const auto* s = std::get_if<std::string_view>(&patient.deceased.value)) {
+        if (!s->empty()) {
+          patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *s;
+        }
       }
-    }
-    if (!patient.address.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::ADDRESS] = patient.address;
-    }
-    if (patient.maritalstatus) {
-      patient_handle[FastFHIR::Fields::PATIENT::MARITAL_STATUS] = *patient.maritalstatus;
     }
     if (!patient.multiplebirth.is_empty()) {
       if (const auto* b = std::get_if<bool>(&patient.multiplebirth.value)) {
@@ -119,18 +153,43 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
         patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *f64;
       }
     }
-    if (!patient.photo.empty()) patient_handle[FastFHIR::Fields::PATIENT::PHOTO] = patient.photo;
-    if (!patient.contact.empty()) patient_handle[FastFHIR::Fields::PATIENT::CONTACT] = patient.contact;
-    if (!patient.communication.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::COMMUNICATION] = patient.communication;
+
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::ADDRESS,
+        patient.address);
+    if (patient.maritalstatus) {
+      patient_handle[FastFHIR::Fields::PATIENT::MARITAL_STATUS] = *patient.maritalstatus;
     }
-    if (!patient.generalpractitioner.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::GENERAL_PRACTITIONER] = patient.generalpractitioner;
-    }
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::PHOTO,
+        patient.photo);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::CONTACT,
+        patient.contact);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::COMMUNICATION,
+        patient.communication);
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::GENERAL_PRACTITIONER,
+        patient.generalpractitioner);
     if (patient.managingorganization) {
       patient_handle[FastFHIR::Fields::PATIENT::MANAGING_ORGANIZATION] = *patient.managingorganization;
     }
-    if (!patient.link.empty()) patient_handle[FastFHIR::Fields::PATIENT::LINK] = patient.link;
+    assign_offset_array_if_present(
+        builder,
+        patient_handle,
+        FastFHIR::Fields::PATIENT::LINK,
+        patient.link);
 
     // Add to bundle entries
     BundleentryData patient_entry{};
