@@ -84,7 +84,10 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
   }
 
   builder.set_root(root);
-  (void)builder.finalize();
+  (void)builder.finalize(FF_CHECKSUM_SHA256, [](const unsigned char* data, size_t size) -> std::vector<BYTE> {
+    // No-op checksum callback for benchmarking; real implementation would hash the data.
+    return std::vector<BYTE>(32);
+  });
   item.patient = patient_node.as<PatientData>();
   return item;
 }

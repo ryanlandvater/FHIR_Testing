@@ -13,6 +13,8 @@ FASTFHIR_DIR="${EXTERNAL_DIR}/FastFHIR"
 FASTFHIR_BUILD="${EXTERNAL_DIR}/FastFHIR-build"
 FASTFHIR_INSTALL="${REPO_ROOT}/local"
 FASTFHIR_STAMP="${FASTFHIR_INSTALL}/.fastfhir_install_stamp"
+FASTFHIR_DEFAULT_REPO="${FASTFHIR_DEFAULT_REPO:-https://github.com/ryanlandvater/FastFHIR.git}"
+FASTFHIR_SIMDJSON_HEADER="${FASTFHIR_BUILD}/_deps/simdjson-src/include/simdjson.h"
 BUILD_DIR="${REPO_ROOT}/build/bench"
 SYNTHEA_DIR="${REPO_ROOT}/datasets/synthea"
 SYNTHEA_DATA_URL="${SYNTHEA_DATA_URL:-https://synthetichealth.github.io/synthea-sample-data/downloads/latest/synthea_sample_data_fhir_latest.zip}"
@@ -37,9 +39,19 @@ echo -e "${YELLOW}Step 1: Preparing FastFHIR...${NC}"
 mkdir -p "${EXTERNAL_DIR}" "${SYNTHEA_DIR}"
 
 if [[ -n "${FASTFHIR_REPO:-}" ]]; then
-  echo -e "${YELLOW}Using external FastFHIR source: ${FASTFHIR_REPO}${NC}"
+  FASTFHIR_REPO_URL="${FASTFHIR_REPO}"
+  echo -e "${YELLOW}Using configured FastFHIR source: ${FASTFHIR_REPO_URL}${NC}"
+elif [[ -d "${FASTFHIR_DIR}/.git" ]]; then
+  FASTFHIR_REPO_URL=""
+  echo -e "${YELLOW}FASTFHIR_REPO not set; using existing local checkout at ${FASTFHIR_DIR}${NC}"
+else
+  FASTFHIR_REPO_URL="${FASTFHIR_DEFAULT_REPO}"
+  echo -e "${YELLOW}FASTFHIR_REPO not set; defaulting to ${FASTFHIR_REPO_URL}${NC}"
+fi
+
+if [[ -n "${FASTFHIR_REPO_URL}" ]]; then
   if [[ -d "${FASTFHIR_DIR}/.git" ]]; then
-    git -C "${FASTFHIR_DIR}" remote set-url origin "${FASTFHIR_REPO}" || true
+    git -C "${FASTFHIR_DIR}" remote set-url origin "${FASTFHIR_REPO_URL}" || true
     if [[ "${FASTFHIR_SYNC_REMOTE}" == "1" ]]; then
       git -C "${FASTFHIR_DIR}" fetch --tags --prune origin
       git -C "${FASTFHIR_DIR}" pull --ff-only origin "$(git -C "${FASTFHIR_DIR}" rev-parse --abbrev-ref HEAD)"
@@ -49,10 +61,10 @@ if [[ -n "${FASTFHIR_REPO:-}" ]]; then
     fi
   else
     rm -rf "${FASTFHIR_DIR}"
-    git clone --recurse-submodules "${FASTFHIR_REPO}" "${FASTFHIR_DIR}"
+    git clone --recurse-submodules "${FASTFHIR_REPO_URL}" "${FASTFHIR_DIR}"
   fi
 else
-  echo -e "${YELLOW}FASTFHIR_REPO not set; falling back to local checkout at ${FASTFHIR_DIR}${NC}"
+  echo -e "${YELLOW}Using existing local checkout at ${FASTFHIR_DIR}${NC}"
 fi
 
 if [[ ! -f "${FASTFHIR_DIR}/include/FastFHIR.hpp" ]]; then
@@ -104,6 +116,11 @@ elif [[ -f "${FASTFHIR_STAMP}" && \
   fi
 fi
 
+if [[ "${NEEDS_FASTFHIR_BUILD}" == "0" && ! -f "${FASTFHIR_SIMDJSON_HEADER}" ]]; then
+  echo -e "${YELLOW}FastFHIR build tree is missing bundled simdjson headers; rebuilding FastFHIR to restore build artifacts.${NC}"
+  NEEDS_FASTFHIR_BUILD=1
+fi
+
 # ============================================================================
 # Step 2: Build and Install FastFHIR
 # ============================================================================
@@ -113,6 +130,8 @@ if [[ "${NEEDS_FASTFHIR_BUILD}" == "1" ]]; then
   mkdir -p "${FASTFHIR_BUILD}" "${FASTFHIR_INSTALL}"
 
   cmake -S "${FASTFHIR_DIR}" -B "${FASTFHIR_BUILD}" \
+    -G "Ninja" \
+    -DCMAKE_BUILD_TYPE=Release \
     -DFASTFHIR_RUN_GENERATOR=OFF \
     -DFASTFHIR_PRODUCTION_PROFILE=us \
     -DFASTFHIR_BUILD_SHARED=ON \
@@ -187,7 +206,8 @@ fi
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
   -DFASTFHIR_ROOT="${FASTFHIR_DIR}" \
-  -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL}"
+  -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL}" \
+  -DFASTFHIR_BUILD_DIR="${FASTFHIR_BUILD}"
 
 if ! cmake --build "${BUILD_DIR}" --parallel "${THREADS}"; then
   echo -e "${RED}Benchmark build failed${NC}"

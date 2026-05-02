@@ -22,6 +22,7 @@ cmake-build-*/
 dist/
 bin/
 obj/
+local/
 .external/
 xcode/
 local/
