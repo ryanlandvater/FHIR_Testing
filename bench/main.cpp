@@ -24,7 +24,8 @@ int main(int argc, char** argv) {
   int iterations = 1;
   int warmup_iterations = 1;
   int num_runs = 10;
-  int64_t bundle_max_mb = 256;
+  int64_t bundle_max_mb = 0;
+  bool bundle_max_mb_explicit = false;
   int64_t fastfhir_vma_mb = 0;
   std::string db_connstr;  // PostgreSQL connection string
   std::vector<int64_t> target_sizes_bytes = {
@@ -47,6 +48,7 @@ int main(int argc, char** argv) {
       num_runs = std::max(1, std::atoi(args[i + 1].data()));
     } else if (args[i] == "--bundle-max-mb" && i + 1 < args.size()) {
       bundle_max_mb = std::max<int64_t>(1, std::atoll(args[i + 1].data()));
+      bundle_max_mb_explicit = true;
     } else if (args[i] == "--ff-vma-mb" && i + 1 < args.size()) {
       fastfhir_vma_mb = std::max<int64_t>(0, std::atoll(args[i + 1].data()));
     } else if (args[i] == "--db" && i + 1 < args.size()) {
@@ -62,18 +64,24 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Apply --bundle-max-mb cap, sort, deduplicate
-  target_sizes_bytes.erase(
-      std::remove_if(target_sizes_bytes.begin(), target_sizes_bytes.end(),
-                     [bundle_max_mb](int64_t b) { return b > bundle_max_mb * 1024 * 1024; }),
-      target_sizes_bytes.end());
+  // Apply explicit --bundle-max-mb cap, then sort and deduplicate.
+  if (bundle_max_mb_explicit) {
+    target_sizes_bytes.erase(
+        std::remove_if(target_sizes_bytes.begin(), target_sizes_bytes.end(),
+                       [bundle_max_mb](int64_t b) { return b > bundle_max_mb * 1024 * 1024; }),
+        target_sizes_bytes.end());
+  }
   std::sort(target_sizes_bytes.begin(), target_sizes_bytes.end());
   target_sizes_bytes.erase(
       std::unique(target_sizes_bytes.begin(), target_sizes_bytes.end()),
       target_sizes_bytes.end());
 
   if (target_sizes_bytes.empty()) {
-    std::cerr << "No target sizes remain after applying --bundle-max-mb " << bundle_max_mb << "\n";
+    if (bundle_max_mb_explicit) {
+      std::cerr << "No target sizes remain after applying --bundle-max-mb " << bundle_max_mb << "\n";
+    } else {
+      std::cerr << "No target sizes were configured.\n";
+    }
     return 1;
   }
 

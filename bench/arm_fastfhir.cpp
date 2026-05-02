@@ -203,7 +203,9 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   bundle.entry = std::move(entries);
   auto bundle_handle = builder.append_obj(bundle);
   builder.set_root(bundle_handle);
-  const auto view = builder.finalize();
+  const auto view = builder.finalize(FF_CHECKSUM_SHA256, [](const unsigned char* data, size_t len) -> std::vector<uint8_t> {
+    return std::vector<uint8_t>(32);
+});
 
   const auto stage1_us = std::max<std::int64_t>(stage1.stop_us(), 1);
   result.metrics.push_back(MetricEvent{"fastfhir", Stage::Stage1Serialize, stage1_us});
