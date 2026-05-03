@@ -23,6 +23,33 @@ export FASTFHIR_REPO=https://github.com/<org>/FastFHIR.git
 ./generate_repo.sh
 ```
 
+Google FHIR routine is enabled by default and runs as a separate build flow in `.external/google-fhir`.
+The script builds Google FHIR C++ components with Bazel, validates targets individually,
+and fails fast if any target check fails.
+
+Useful environment overrides:
+
+```bash
+# Google FHIR source and build controls
+export GOOGLE_FHIR_ENABLE=1
+export GOOGLE_FHIR_REPO=https://github.com/google/fhir.git
+export GOOGLE_FHIR_SYNC_REMOTE=0
+export FORCE_GOOGLE_FHIR_REBUILD=0
+
+# Pin Bazel behavior for Google FHIR
+export GOOGLE_FHIR_BAZEL_VERSION=7.7.1
+export GOOGLE_FHIR_BAZELISK_VERSION=v1.22.1
+
+# Component checks
+export TEST_GOOGLE_FHIR_COMPONENTS=1
+export TEST_BENCH_COMPONENTS=1
+
+# Aggressive cleanup of Google build artifacts after successful checks
+export GOOGLE_FHIR_CLEAN_ARTIFACTS=1
+```
+
+Set `GOOGLE_FHIR_ENABLE=0` only when you intentionally want to skip the Google FHIR routine.
+
 Optional:
 
 ```bash

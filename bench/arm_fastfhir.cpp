@@ -36,18 +36,29 @@ static inline BundleentryData make_patient_bundle_entry(
     FastFHIR::Builder& builder,
     const BundlePatient& p) {
   BundleentryData empty_entry{};
-  if (!p.memory) {
-    return empty_entry;
-  }
+  PatientData parsed_patient{};
+  const PatientData* patient_ptr = nullptr;
 
   try {
-    FastFHIR::Parser patient_parser(p.memory);
-    auto patient_node = patient_parser.root();
-    if (!patient_node || !patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+    if (p.memory) {
+      FastFHIR::Parser patient_parser(p.memory);
+      auto patient_node = patient_parser.root();
+      if (patient_node && patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+        parsed_patient = patient_node.as<PatientData>();
+        patient_ptr = &parsed_patient;
+      }
+    }
+
+    if (patient_ptr == nullptr && (!p.patient.id.empty() || !p.patient.birthdate.empty())) {
+      patient_ptr = &p.patient;
+    }
+
+    if (patient_ptr == nullptr) {
       return empty_entry;
     }
 
-    const PatientData patient = patient_node.as<PatientData>();
+    const PatientData& patient = *patient_ptr;
+
     auto patient_handle = builder.append_obj(PatientData{});
 
     if (!patient.id.empty()) patient_handle[FastFHIR::Fields::PATIENT::ID] = patient.id;
@@ -91,14 +102,13 @@ static inline BundleentryData make_patient_bundle_entry(
         patient_handle,
         FastFHIR::Fields::PATIENT::TELECOM,
         patient.telecom);
-    if (patient.gender == AdministrativeGender::Male) {
-      patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"male"};
-    } else if (patient.gender == AdministrativeGender::Female) {
-      patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"female"};
-    } else if (patient.gender == AdministrativeGender::Other) {
-      patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"other"};
-    } else if (patient.gender == AdministrativeGender::Unknown) {
-      patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{"unknown"};
+    if (const char* gender_code = FF_AdministrativeGenderToString(patient.gender);
+        gender_code != nullptr && gender_code[0] != '\0') {
+      try {
+        patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{gender_code};
+      } catch (...) {
+        // Keep entry creation robust if this generated profile treats gender differently.
+      }
     }
     if (!patient.birthdate.empty()) {
       patient_handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = patient.birthdate;

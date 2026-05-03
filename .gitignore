@@ -26,6 +26,7 @@ local/
 .external/
 xcode/
 local/
+docs/
 
 # Artifacts and runtime data
 artifacts/*

@@ -22,14 +22,272 @@ THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 FASTFHIR_SYNC_REMOTE="${FASTFHIR_SYNC_REMOTE:-0}"
 FORCE_FASTFHIR_REBUILD="${FORCE_FASTFHIR_REBUILD:-0}"
 FORCE_BENCH_REBUILD="${FORCE_BENCH_REBUILD:-0}"
+GOOGLE_FHIR_ENABLE="${GOOGLE_FHIR_ENABLE:-1}"
+GOOGLE_FHIR_DIR="${EXTERNAL_DIR}/google-fhir"
+GOOGLE_FHIR_BUILD="${EXTERNAL_DIR}/google-fhir-build"
+GOOGLE_FHIR_STAMP="${FASTFHIR_INSTALL}/.google_fhir_build_stamp"
+GOOGLE_FHIR_DEFAULT_REPO="${GOOGLE_FHIR_DEFAULT_REPO:-https://github.com/google/fhir.git}"
+GOOGLE_FHIR_SYNC_REMOTE="${GOOGLE_FHIR_SYNC_REMOTE:-0}"
+FORCE_GOOGLE_FHIR_REBUILD="${FORCE_GOOGLE_FHIR_REBUILD:-0}"
+GOOGLE_FHIR_BAZEL_VERSION="${GOOGLE_FHIR_BAZEL_VERSION:-7.7.1}"
+GOOGLE_FHIR_BAZELISK_VERSION="${GOOGLE_FHIR_BAZELISK_VERSION:-v1.22.1}"
+GOOGLE_FHIR_OUTPUT_BASE="${GOOGLE_FHIR_BUILD}/output-base"
+GOOGLE_FHIR_REPOSITORY_CACHE="${GOOGLE_FHIR_BUILD}/repository-cache"
+GOOGLE_FHIR_CLEAN_ARTIFACTS="${GOOGLE_FHIR_CLEAN_ARTIFACTS:-1}"
+TEST_GOOGLE_FHIR_COMPONENTS="${TEST_GOOGLE_FHIR_COMPONENTS:-1}"
+TEST_BENCH_COMPONENTS="${TEST_BENCH_COMPONENTS:-1}"
+GOOGLE_FHIR_USE_SYSTEM_ZLIB="${GOOGLE_FHIR_USE_SYSTEM_ZLIB:-1}"
+HL7PARSER_ENABLE="${HL7PARSER_ENABLE:-1}"
+HL7PARSER_DIR="${EXTERNAL_DIR}/hl7parser"
+HL7PARSER_DEFAULT_REPO="${HL7PARSER_DEFAULT_REPO:-https://github.com/jcomellas/hl7parser.git}"
+HL7PARSER_SYNC_REMOTE="${HL7PARSER_SYNC_REMOTE:-0}"
 
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+GOOGLE_FHIR_CLEANUP_ON_EXIT=0
+GOOGLE_FHIR_JAVA_HOME="${GOOGLE_FHIR_JAVA_HOME:-}"
+GOOGLE_FHIR_JDK_VERSION="${GOOGLE_FHIR_JDK_VERSION:-17}"
+GOOGLE_FHIR_JDK_AUTO_DOWNLOAD="${GOOGLE_FHIR_JDK_AUTO_DOWNLOAD:-1}"
+GOOGLE_FHIR_JDK_CACHE_DIR="${EXTERNAL_DIR}/jdk"
+GOOGLE_FHIR_SYSTEM_ZLIB_REPO="${GOOGLE_FHIR_BUILD}/system-zlib-repo"
 
 echo -e "${YELLOW}=== FastFHIR Benchmark Setup ===${NC}"
+
+cleanup_google_fhir_artifacts() {
+  if [[ "${GOOGLE_FHIR_ENABLE}" != "1" || "${GOOGLE_FHIR_CLEAN_ARTIFACTS}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${GOOGLE_FHIR_CLEANUP_ON_EXIT}" != "1" ]]; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}Cleanup-on-exit: removing Google FHIR build artifacts...${NC}" >&2
+  rm -rf "${GOOGLE_FHIR_OUTPUT_BASE}" "${GOOGLE_FHIR_REPOSITORY_CACHE}"
+  rm -rf "${GOOGLE_FHIR_DIR}/bazel-bin" "${GOOGLE_FHIR_DIR}/bazel-out" "${GOOGLE_FHIR_DIR}/bazel-testlogs"
+  find "${GOOGLE_FHIR_DIR}" -maxdepth 1 -type l -name 'bazel-*' -delete 2>/dev/null || true
+  rm -rf "${GOOGLE_FHIR_BUILD}"
+}
+
+trap cleanup_google_fhir_artifacts EXIT
+
+ensure_bazelisk() {
+  local bin_dir="${EXTERNAL_DIR}/bin"
+  local bazelisk_bin="${bin_dir}/bazelisk"
+  local os arch asset url
+
+  if [[ -x "${bazelisk_bin}" ]]; then
+    echo "${bazelisk_bin}"
+    return 0
+  fi
+
+  if command -v bazelisk >/dev/null 2>&1; then
+    command -v bazelisk
+    return 0
+  fi
+
+  mkdir -p "${bin_dir}"
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "${os}" in
+    Darwin)
+      case "${arch}" in
+        arm64) asset="bazelisk-darwin-arm64" ;;
+        x86_64) asset="bazelisk-darwin-amd64" ;;
+        *)
+          echo -e "${RED}Unsupported macOS arch for Bazelisk: ${arch}${NC}" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    Linux)
+      case "${arch}" in
+        aarch64|arm64) asset="bazelisk-linux-arm64" ;;
+        x86_64|amd64) asset="bazelisk-linux-amd64" ;;
+        *)
+          echo -e "${RED}Unsupported Linux arch for Bazelisk: ${arch}${NC}" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      echo -e "${RED}Unsupported OS for Bazelisk: ${os}${NC}" >&2
+      return 1
+      ;;
+  esac
+
+  url="https://github.com/bazelbuild/bazelisk/releases/download/${GOOGLE_FHIR_BAZELISK_VERSION}/${asset}"
+  echo -e "${YELLOW}Downloading Bazelisk ${GOOGLE_FHIR_BAZELISK_VERSION} (${asset})...${NC}" >&2
+  curl -L "${url}" -o "${bazelisk_bin}"
+  chmod +x "${bazelisk_bin}"
+
+  echo "${bazelisk_bin}"
+}
+
+ensure_google_fhir_java() {
+  local candidate=""
+  local version_output=""
+  local local_jdk_home=""
+
+  detect_local_jdk_home() {
+    local root="$1"
+    local found=""
+    if [[ ! -d "${root}" ]]; then
+      echo ""
+      return 0
+    fi
+
+    found="$(find "${root}" -type f -path '*/bin/java' | head -n 1 || true)"
+    if [[ -n "${found}" ]]; then
+      dirname "$(dirname "${found}")"
+      return 0
+    fi
+
+    echo ""
+    return 0
+  }
+
+  ensure_repo_local_jdk() {
+    local os=""
+    local arch=""
+    local api_arch=""
+    local api_os=""
+    local download_url=""
+    local tmp_archive=""
+    local target_root="${GOOGLE_FHIR_JDK_CACHE_DIR}/temurin-${GOOGLE_FHIR_JDK_VERSION}"
+    local detected_home=""
+
+    mkdir -p "${GOOGLE_FHIR_JDK_CACHE_DIR}"
+
+    detected_home="$(detect_local_jdk_home "${target_root}")"
+    if [[ -n "${detected_home}" ]] && is_modern_java_home "${detected_home}"; then
+      echo "${detected_home}"
+      return 0
+    fi
+
+    if [[ "${GOOGLE_FHIR_JDK_AUTO_DOWNLOAD}" != "1" ]]; then
+      echo ""
+      return 0
+    fi
+
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "${os}" in
+      Darwin) api_os="mac" ;;
+      Linux) api_os="linux" ;;
+      *)
+        echo ""
+        return 0
+        ;;
+    esac
+
+    case "${arch}" in
+      arm64|aarch64) api_arch="aarch64" ;;
+      x86_64|amd64) api_arch="x64" ;;
+      *)
+        echo ""
+        return 0
+        ;;
+    esac
+
+    download_url="https://api.adoptium.net/v3/binary/latest/${GOOGLE_FHIR_JDK_VERSION}/ga/${api_os}/${api_arch}/jdk/hotspot/normal/eclipse?project=jdk"
+    tmp_archive="${GOOGLE_FHIR_JDK_CACHE_DIR}/temurin-${GOOGLE_FHIR_JDK_VERSION}-${api_os}-${api_arch}.tar.gz"
+
+    echo -e "${YELLOW}Downloading repo-local Temurin JDK ${GOOGLE_FHIR_JDK_VERSION} (${api_os}/${api_arch})...${NC}" >&2
+    rm -rf "${target_root}"
+    mkdir -p "${target_root}"
+    curl -fsSL "${download_url}" -o "${tmp_archive}"
+    tar -xzf "${tmp_archive}" -C "${target_root}" --strip-components=1
+    rm -f "${tmp_archive}"
+
+    detected_home="$(detect_local_jdk_home "${target_root}")"
+    if [[ -n "${detected_home}" ]] && is_modern_java_home "${detected_home}"; then
+      echo "${detected_home}"
+      return 0
+    fi
+
+    echo ""
+    return 0
+  }
+
+  java_major_version() {
+    local java_bin="$1"
+    local first_line=""
+    first_line="$(${java_bin} -version 2>&1 | head -n 1 || true)"
+    if [[ "${first_line}" =~ \"([0-9]+)(\.[0-9]+)? ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    echo ""
+    return 0
+  }
+
+  is_modern_java_home() {
+    local home="$1"
+    local major_version=""
+    if [[ ! -x "${home}/bin/java" ]]; then
+      return 1
+    fi
+    major_version="$(java_major_version "${home}/bin/java")"
+    [[ -n "${major_version}" && "${major_version}" -ge 17 ]]
+  }
+
+  # Allow explicit override first.
+  if [[ -n "${GOOGLE_FHIR_JAVA_HOME}" ]] && is_modern_java_home "${GOOGLE_FHIR_JAVA_HOME}"; then
+    echo "${GOOGLE_FHIR_JAVA_HOME}"
+    return 0
+  fi
+
+  # Prefer a repo-local JDK cache for self-contained builds.
+  local_jdk_home="$(ensure_repo_local_jdk)"
+  if [[ -n "${local_jdk_home}" ]] && is_modern_java_home "${local_jdk_home}"; then
+    echo "${local_jdk_home}"
+    return 0
+  fi
+
+  # Prefer system-discovered JDK 21/17 on macOS.
+  if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+    candidate="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
+    if [[ -n "${candidate}" ]] && is_modern_java_home "${candidate}"; then
+      echo "${candidate}"
+      return 0
+    fi
+
+    candidate="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+    if [[ -n "${candidate}" ]] && is_modern_java_home "${candidate}"; then
+      echo "${candidate}"
+      return 0
+    fi
+  fi
+
+  # Fall back to common Homebrew locations.
+  for candidate in \
+    "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
+    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" \
+    "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
+    "/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"; do
+    if is_modern_java_home "${candidate}"; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+
+  echo -e "${RED}Error: Google FHIR build requires JDK 17+ (legacy JDK 8/11 causes Maven TLS handshake failures).${NC}" >&2
+  if [[ -n "${GOOGLE_FHIR_JAVA_HOME}" ]]; then
+    version_output="$(${GOOGLE_FHIR_JAVA_HOME}/bin/java -version 2>&1 | head -n 1 || true)"
+    echo "Current GOOGLE_FHIR_JAVA_HOME is not Java 17+: ${GOOGLE_FHIR_JAVA_HOME} (${version_output})" >&2
+  fi
+  echo "Repo-local JDK auto-download is controlled by GOOGLE_FHIR_JDK_AUTO_DOWNLOAD=${GOOGLE_FHIR_JDK_AUTO_DOWNLOAD}." >&2
+  echo "(Default is 1 and stores JDK under ${GOOGLE_FHIR_JDK_CACHE_DIR}/)" >&2
+  echo "Set GOOGLE_FHIR_JAVA_HOME to a JDK 17+ home, e.g.:" >&2
+  echo "  export GOOGLE_FHIR_JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" >&2
+  return 1
+}
 
 # ============================================================================
 # Step 1: Resolve FastFHIR source
@@ -61,7 +319,7 @@ if [[ -n "${FASTFHIR_REPO_URL}" ]]; then
     fi
   else
     rm -rf "${FASTFHIR_DIR}"
-    git clone --recurse-submodules "${FASTFHIR_REPO_URL}" "${FASTFHIR_DIR}"
+    git clone --depth 1 --recurse-submodules --shallow-submodules "${FASTFHIR_REPO_URL}" "${FASTFHIR_DIR}"
   fi
 else
   echo -e "${YELLOW}Using existing local checkout at ${FASTFHIR_DIR}${NC}"
@@ -101,6 +359,92 @@ if [[ -d "${FASTFHIR_DIR}/.git" ]]; then
 else
   FASTFHIR_SOURCE_REV="nogit-$(stat -f %m "${FASTFHIR_DIR}/include/FastFHIR.hpp")"
 fi
+
+# ============================================================================
+# Step 1B: Resolve Google FHIR source
+# ============================================================================
+if [[ "${GOOGLE_FHIR_ENABLE}" == "1" ]]; then
+  echo -e "${YELLOW}Step 1B: Preparing Google FHIR source...${NC}"
+
+  if [[ -n "${GOOGLE_FHIR_REPO:-}" ]]; then
+    GOOGLE_FHIR_REPO_URL="${GOOGLE_FHIR_REPO}"
+  else
+    GOOGLE_FHIR_REPO_URL="${GOOGLE_FHIR_DEFAULT_REPO}"
+  fi
+
+  if [[ -d "${GOOGLE_FHIR_DIR}/.git" ]]; then
+    git -C "${GOOGLE_FHIR_DIR}" remote set-url origin "${GOOGLE_FHIR_REPO_URL}" || true
+    if [[ "${GOOGLE_FHIR_SYNC_REMOTE}" == "1" ]]; then
+      git -C "${GOOGLE_FHIR_DIR}" fetch --tags --prune origin
+      git -C "${GOOGLE_FHIR_DIR}" pull --ff-only origin "$(git -C "${GOOGLE_FHIR_DIR}" rev-parse --abbrev-ref HEAD)"
+    else
+      echo -e "${YELLOW}Skipping Google FHIR remote sync (set GOOGLE_FHIR_SYNC_REMOTE=1 to fetch/pull).${NC}"
+    fi
+  else
+    rm -rf "${GOOGLE_FHIR_DIR}"
+    git clone --depth 1 "${GOOGLE_FHIR_REPO_URL}" "${GOOGLE_FHIR_DIR}"
+  fi
+
+  if [[ ! -f "${GOOGLE_FHIR_DIR}/WORKSPACE" && ! -f "${GOOGLE_FHIR_DIR}/WORKSPACE.bazel" ]]; then
+    echo -e "${RED}Error: Google FHIR workspace not found at ${GOOGLE_FHIR_DIR}${NC}"
+    exit 1
+  fi
+
+  if [[ -d "${GOOGLE_FHIR_DIR}/.git" ]]; then
+    GOOGLE_FHIR_SOURCE_REV="$(git -C "${GOOGLE_FHIR_DIR}" rev-parse HEAD)"
+  else
+    GOOGLE_FHIR_SOURCE_REV="nogit-$(stat -f %m "${GOOGLE_FHIR_DIR}")"
+  fi
+
+  GOOGLE_FHIR_TARGET_FINGERPRINT="//cc/google/fhir:json_format //cc/google/fhir/r4:json_format //proto/google/fhir/proto/r4/core/resources:patient_cc_proto"
+  GOOGLE_FHIR_BUILD_FINGERPRINT="rev=${GOOGLE_FHIR_SOURCE_REV};bazel=${GOOGLE_FHIR_BAZEL_VERSION};targets=${GOOGLE_FHIR_TARGET_FINGERPRINT}"
+
+  NEEDS_GOOGLE_FHIR_BUILD=1
+  if [[ "${FORCE_GOOGLE_FHIR_REBUILD}" == "1" ]]; then
+    echo -e "${YELLOW}Forced Google FHIR rebuild requested.${NC}"
+  elif [[ -f "${GOOGLE_FHIR_STAMP}" ]]; then
+    EXISTING_GOOGLE_FHIR_STAMP="$(cat "${GOOGLE_FHIR_STAMP}")"
+    if [[ "${EXISTING_GOOGLE_FHIR_STAMP}" == "${GOOGLE_FHIR_BUILD_FINGERPRINT}" ]]; then
+      NEEDS_GOOGLE_FHIR_BUILD=0
+    fi
+  fi
+else
+  NEEDS_GOOGLE_FHIR_BUILD=0
+fi
+
+# ============================================================================
+# Step 1C: Resolve HL7 parser source
+# ============================================================================
+if [[ "${HL7PARSER_ENABLE}" == "1" ]]; then
+  echo -e "${YELLOW}Step 1C: Preparing HL7 parser source...${NC}"
+
+  if [[ -n "${HL7PARSER_REPO:-}" ]]; then
+    HL7PARSER_REPO_URL="${HL7PARSER_REPO}"
+  else
+    HL7PARSER_REPO_URL="${HL7PARSER_DEFAULT_REPO}"
+  fi
+
+  if [[ -d "${HL7PARSER_DIR}/.git" ]]; then
+    git -C "${HL7PARSER_DIR}" remote set-url origin "${HL7PARSER_REPO_URL}" || true
+    if [[ "${HL7PARSER_SYNC_REMOTE}" == "1" ]]; then
+      git -C "${HL7PARSER_DIR}" fetch --tags --prune origin
+      git -C "${HL7PARSER_DIR}" pull --ff-only origin "$(git -C "${HL7PARSER_DIR}" rev-parse --abbrev-ref HEAD)"
+    else
+      echo -e "${YELLOW}Skipping HL7 parser remote sync (set HL7PARSER_SYNC_REMOTE=1 to fetch/pull).${NC}"
+    fi
+  else
+    rm -rf "${HL7PARSER_DIR}"
+    git clone --depth 1 "${HL7PARSER_REPO_URL}" "${HL7PARSER_DIR}"
+  fi
+
+  if [[ ! -f "${HL7PARSER_DIR}/include/hl7parser/parser.h" ]]; then
+    echo -e "${RED}Error: HL7 parser headers not found at ${HL7PARSER_DIR}${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}Step 1C: HL7 parser routine disabled (set HL7PARSER_ENABLE=1 to enable).${NC}"
+fi
+
 FASTFHIR_BUILD_FINGERPRINT="rev=${FASTFHIR_SOURCE_REV};profile=us;shared=ON;ingestor=ON"
 NEEDS_FASTFHIR_BUILD=1
 
@@ -163,6 +507,107 @@ fi
 echo -e "${GREEN}FastFHIR built and installed to ${FASTFHIR_INSTALL}${NC}"
 
 # ============================================================================
+# Step 2B: Build Google FHIR components in .external
+# ============================================================================
+if [[ "${GOOGLE_FHIR_ENABLE}" == "1" ]]; then
+  echo -e "${YELLOW}Step 2B: Building Google FHIR components...${NC}"
+  BAZELISK_BIN="$(ensure_bazelisk)"
+  GOOGLE_FHIR_JAVA_HOME="$(ensure_google_fhir_java)"
+  echo -e "${YELLOW}Using Google FHIR JDK: ${GOOGLE_FHIR_JAVA_HOME}${NC}"
+  GOOGLE_FHIR_CLEANUP_ON_EXIT=1
+
+  GOOGLE_FHIR_TARGETS=(
+    "//cc/google/fhir:json_format"
+    "//cc/google/fhir/r4:json_format"
+    "//proto/google/fhir/proto/r4/core/resources:patient_cc_proto"
+  )
+
+  if [[ "${NEEDS_GOOGLE_FHIR_BUILD}" == "1" ]]; then
+    mkdir -p "${GOOGLE_FHIR_BUILD}" "${GOOGLE_FHIR_OUTPUT_BASE}" "${GOOGLE_FHIR_REPOSITORY_CACHE}"
+
+    GOOGLE_FHIR_BAZEL_FLAGS=(
+      "--enable_bzlmod=false"
+      "--repository_cache=${GOOGLE_FHIR_REPOSITORY_CACHE}"
+      "--noshow_progress"
+      "--announce_rc"
+    )
+
+    if [[ "${GOOGLE_FHIR_USE_SYSTEM_ZLIB}" == "1" ]]; then
+      mkdir -p "${GOOGLE_FHIR_SYSTEM_ZLIB_REPO}"
+      cat > "${GOOGLE_FHIR_SYSTEM_ZLIB_REPO}/WORKSPACE" <<'EOF'
+workspace(name = "zlib")
+EOF
+      cat > "${GOOGLE_FHIR_SYSTEM_ZLIB_REPO}/BUILD.bazel" <<'EOF'
+cc_library(
+    name = "zlib",
+    linkopts = ["-lz"],
+    visibility = ["//visibility:public"],
+)
+EOF
+      GOOGLE_FHIR_BAZEL_FLAGS+=("--override_repository=zlib=${GOOGLE_FHIR_SYSTEM_ZLIB_REPO}")
+      echo -e "${YELLOW}Google FHIR: using system zlib via override_repository (${GOOGLE_FHIR_SYSTEM_ZLIB_REPO})${NC}"
+    fi
+
+    pushd "${GOOGLE_FHIR_DIR}" >/dev/null
+    export USE_BAZEL_VERSION="${GOOGLE_FHIR_BAZEL_VERSION}"
+    export JAVA_HOME="${GOOGLE_FHIR_JAVA_HOME}"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+
+    for target in "${GOOGLE_FHIR_TARGETS[@]}"; do
+      echo -e "${YELLOW}Building Google FHIR target: ${target}${NC}"
+      "${BAZELISK_BIN}" \
+        --output_base="${GOOGLE_FHIR_OUTPUT_BASE}" \
+        build "${target}" \
+        "${GOOGLE_FHIR_BAZEL_FLAGS[@]}" \
+        --jobs="${THREADS}"
+    done
+
+    popd >/dev/null
+    echo "${GOOGLE_FHIR_BUILD_FINGERPRINT}" > "${GOOGLE_FHIR_STAMP}"
+  else
+    echo -e "${GREEN}Google FHIR build is up to date; skipping rebuild.${NC}"
+  fi
+
+  if [[ "${TEST_GOOGLE_FHIR_COMPONENTS}" == "1" ]]; then
+    echo -e "${YELLOW}Step 2C: Testing Google FHIR components individually...${NC}"
+    pushd "${GOOGLE_FHIR_DIR}" >/dev/null
+    export USE_BAZEL_VERSION="${GOOGLE_FHIR_BAZEL_VERSION}"
+    export JAVA_HOME="${GOOGLE_FHIR_JAVA_HOME}"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+
+    for target in "${GOOGLE_FHIR_TARGETS[@]}"; do
+      echo -e "${YELLOW}Verifying Google FHIR target: ${target}${NC}"
+      "${BAZELISK_BIN}" \
+        --output_base="${GOOGLE_FHIR_OUTPUT_BASE}" \
+        cquery "${target}" \
+        --enable_bzlmod=false \
+        --repository_cache="${GOOGLE_FHIR_REPOSITORY_CACHE}" \
+        --noshow_progress >/dev/null
+    done
+
+    popd >/dev/null
+  fi
+
+  if [[ "${GOOGLE_FHIR_CLEAN_ARTIFACTS}" == "1" ]]; then
+    echo -e "${YELLOW}Step 2D: Aggressive Google FHIR artifact cleanup...${NC}"
+    if [[ -d "${GOOGLE_FHIR_BUILD}" ]]; then
+      du -sh "${GOOGLE_FHIR_BUILD}" || true
+    fi
+
+    rm -rf "${GOOGLE_FHIR_OUTPUT_BASE}" "${GOOGLE_FHIR_REPOSITORY_CACHE}"
+    rm -rf "${GOOGLE_FHIR_DIR}/bazel-bin" "${GOOGLE_FHIR_DIR}/bazel-out" "${GOOGLE_FHIR_DIR}/bazel-testlogs"
+    find "${GOOGLE_FHIR_DIR}" -maxdepth 1 -type l -name 'bazel-*' -delete 2>/dev/null || true
+    rm -rf "${GOOGLE_FHIR_BUILD}"
+
+    echo -e "${GREEN}Google FHIR cleanup complete. Retained source checkout + stamp only.${NC}"
+  fi
+
+  GOOGLE_FHIR_CLEANUP_ON_EXIT=0
+else
+  echo -e "${YELLOW}Step 2B: Google FHIR routine disabled (set GOOGLE_FHIR_ENABLE=1 to enable).${NC}"
+fi
+
+# ============================================================================
 # Step 3: Download and Prepare Synthea Data
 # ============================================================================
 echo -e "${YELLOW}Step 3: Preparing Synthea data...${NC}"
@@ -207,11 +652,19 @@ fi
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
   -DFASTFHIR_ROOT="${FASTFHIR_DIR}" \
   -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL}" \
-  -DFASTFHIR_BUILD_DIR="${FASTFHIR_BUILD}"
+  -DFASTFHIR_BUILD_DIR="${FASTFHIR_BUILD}" \
+  -DBENCH_ENABLE_HL7PARSER="${HL7PARSER_ENABLE}" \
+  -DHL7PARSER_ROOT="${HL7PARSER_DIR}"
 
 if ! cmake --build "${BUILD_DIR}" --parallel "${THREADS}"; then
   echo -e "${RED}Benchmark build failed${NC}"
   exit 1
+fi
+
+if [[ "${TEST_BENCH_COMPONENTS}" == "1" ]]; then
+  echo -e "${YELLOW}Step 4B: Testing benchmark components individually...${NC}"
+  cmake --build "${BUILD_DIR}" --target bench_harness --parallel "${THREADS}"
+  cmake --build "${BUILD_DIR}" --target bench_timing_conformance --parallel "${THREADS}"
 fi
 
 echo -e "${GREEN}=== Setup Complete ===${NC}"

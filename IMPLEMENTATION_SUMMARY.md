@@ -47,9 +47,17 @@ This document summarizes the implementation, execution, and validation of a comp
 - **JSON Arm**:
   - Implemented in `bench/arm_json_fhir.cpp`.
 - **Google FHIR Arm**:
-  - Placeholder smoke test in `bench/arm_google_fhir.cpp`.
+  - `bench/arm_google_fhir.cpp` is currently a proxy smoke implementation and does not yet benchmark the real Google protobuf `json_format` path.
+  - Build-attempt chronology (macOS):
+    - Attempt 1 failed during Bazel `rules_jvm_external` fetch with TLS handshake errors to Maven Central while running on legacy Oracle JDK 11.0.1.
+    - Attempt 2 switched to OpenJDK 17, which resolved the Maven TLS fetch failures.
+    - Attempt 3 progressed further but failed compiling external `@zlib` (`zutil.c` / `fdopen` macro expansion) under Xcode/Clang on macOS.
+  - Cleanup behavior was verified after each attempt: only `.external/google-fhir` source checkout retained; Bazel output artifacts were removed.
 - **HL7v2 Arm**:
-  - Placeholder smoke test in `bench/arm_hl7v2.cpp`.
+  - Migrated from smoke loop skeleton to parser-backed implementation using `jcomellas/hl7parser` with explicit Stage 1/2/3 metric boundaries.
+  - Added deterministic `PatientData` parity snapshots carried in repeated `ZPV` segments so Stage 3 can re-read the full patient surface without a JSON conversion bridge.
+  - Standard HL7 coverage remains readable via `PID`/`PD1`/`NK1`, while non-standard or deeply nested FHIR-native fields are preserved in the parity snapshot.
+  - Current runtime verification is still blocked by the existing FastFHIR anonymous mmap failure in fixture ingestion/conformance runs (`POSIX anonymous mmap failed: Invalid argument`).
 
 **Key Insight**: All arms follow an identical stage structure, ensuring direct latency comparison.
 
@@ -112,7 +120,7 @@ bench/
 ├── arm_fastfhir.cpp                 # FastFHIR implementation
 ├── arm_json_fhir.cpp                # JSON implementation
 ├── arm_google_fhir.cpp              # Google FHIR smoke test
-├── arm_hl7v2.cpp                    # HL7v2 smoke test
+├── arm_hl7v2.cpp                    # HL7v2 parser-backed legacy comparator
 ├── synthea_fixture.cpp              # .ffhr file loading
 └── CMakeLists.txt                   # Build configuration
 

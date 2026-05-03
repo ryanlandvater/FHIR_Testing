@@ -25,6 +25,12 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
+option(BENCH_ENABLE_HL7PARSER "Enable jcomellas/hl7parser legacy-format benchmark arm" ON)
+set(HL7PARSER_ROOT "${CMAKE_SOURCE_DIR}/.external/hl7parser" CACHE PATH "Path to a local hl7parser checkout")
+
+# Google FHIR C++ proto library (using standard protobuf, not Google FHIR's json_format)
+# This allows benchmarking FHIR protobuf serialization without requiring Google FHIR's Bazel build
+
 # Optional: PostgreSQL libpq for database result writing
 find_package(PostgreSQL QUIET)
 if(PostgreSQL_FOUND)
@@ -85,6 +91,28 @@ target_include_directories(bench_core INTERFACE ${FASTFHIR_GENERATED_INCLUDE_DIR
 target_include_directories(bench_core INTERFACE ${FASTFHIR_SIMDJSON_INCLUDE_DIR})
 target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
 target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY} ${FASTFHIR_INGESTOR_LIBRARY})
+
+if(BENCH_ENABLE_HL7PARSER)
+  if(EXISTS "${HL7PARSER_ROOT}/include/hl7parser/parser.h")
+    file(GLOB HL7PARSER_SOURCES "${HL7PARSER_ROOT}/src/*.c")
+    if(HL7PARSER_SOURCES)
+      add_library(hl7parser_static STATIC ${HL7PARSER_SOURCES})
+      target_include_directories(hl7parser_static PUBLIC "${HL7PARSER_ROOT}/include")
+      target_compile_definitions(hl7parser_static PUBLIC HL7PARSER_STATIC=1)
+
+      target_link_libraries(bench_core INTERFACE hl7parser_static)
+      target_compile_definitions(bench_core INTERFACE HAVE_HL7PARSER=1)
+      message(STATUS "HL7 parser enabled from ${HL7PARSER_ROOT}")
+    else()
+      message(WARNING "HL7 parser sources not found under ${HL7PARSER_ROOT}/src; building hl7v2 arm without parser integration")
+    endif()
+  else()
+    message(STATUS "HL7 parser not found at ${HL7PARSER_ROOT}; building hl7v2 arm without parser integration")
+  endif()
+else()
+  message(STATUS "HL7 parser integration disabled (BENCH_ENABLE_HL7PARSER=OFF)")
+endif()
+
 if(BENCH_TBB_TARGET)
   target_link_libraries(bench_core INTERFACE ${BENCH_TBB_TARGET})
 endif()

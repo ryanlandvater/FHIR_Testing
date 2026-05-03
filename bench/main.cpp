@@ -230,6 +230,13 @@ int main(int argc, char** argv) {
         const auto gf = bench::run_google_fhir_bundle(bundle);
         const auto h2 = bench::run_hl7v2_bundle(bundle);
 
+        if (!bench::validate_results(ff, jf, gf, h2)) {
+          std::cerr << "  [validate] values: fastfhir=[" << ff.queried_value << "]"
+                    << " json=["     << jf.queried_value << "]"
+                    << " google=["   << gf.queried_value << "]"
+                    << " hl7v2=["    << h2.queried_value << "]\n";
+        }
+
         for (const bench::ArmRunResult* r : {&ff, &jf, &gf, &h2}) {
           for (const auto& m : r->metrics) {
             std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_us
