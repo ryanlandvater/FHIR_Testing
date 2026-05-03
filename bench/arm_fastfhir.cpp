@@ -5,7 +5,6 @@
 #include <FF_Patient.hpp>
 #include <FF_Observation.hpp>
 #include <algorithm>
-#include <execution>
 #include <memory>
 #include <variant>
 
@@ -36,154 +35,13 @@ static inline BundleentryData make_patient_bundle_entry(
     FastFHIR::Builder& builder,
     const BundlePatient& p) {
   BundleentryData empty_entry{};
-  PatientData parsed_patient{};
-  const PatientData* patient_ptr = nullptr;
+  const PatientData& patient = p.patient;
 
   try {
-    if (p.memory) {
-      FastFHIR::Parser patient_parser(p.memory);
-      auto patient_node = patient_parser.root();
-      if (patient_node && patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-        parsed_patient = patient_node.as<PatientData>();
-        patient_ptr = &parsed_patient;
-      }
-    }
-
-    if (patient_ptr == nullptr && (!p.patient.id.empty() || !p.patient.birthdate.empty())) {
-      patient_ptr = &p.patient;
-    }
-
-    if (patient_ptr == nullptr) {
-      return empty_entry;
-    }
-
-    const PatientData& patient = *patient_ptr;
-
     auto patient_handle = builder.append_obj(PatientData{});
-
-    if (!patient.id.empty()) patient_handle[FastFHIR::Fields::PATIENT::ID] = patient.id;
-    if (patient.meta) patient_handle[FastFHIR::Fields::PATIENT::META] = *patient.meta;
-    if (!patient.implicitrules.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::IMPLICIT_RULES] = patient.implicitrules;
+    if (!patient.id.empty()) {
+      patient_handle[FastFHIR::Fields::PATIENT::ID] = patient.id;
     }
-    if (!patient.language.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::LANGUAGE] = patient.language;
-    }
-    if (patient.text) patient_handle[FastFHIR::Fields::PATIENT::TEXT] = *patient.text;
-    if (!patient.contained.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::CONTAINED] = patient.contained;
-    }
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::EXTENSION,
-        patient.extension);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::MODIFIER_EXTENSION,
-        patient.modifierextension);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::IDENTIFIER,
-        patient.identifier);
-
-    if (patient.active != FF_NULL_UINT8) {
-      patient_handle[FastFHIR::Fields::PATIENT::ACTIVE] = (patient.active != 0);
-    }
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::NAME,
-        patient.name);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::TELECOM,
-        patient.telecom);
-    if (const char* gender_code = FF_AdministrativeGenderToString(patient.gender);
-        gender_code != nullptr && gender_code[0] != '\0') {
-      try {
-        patient_handle[FastFHIR::Fields::PATIENT::GENDER] = std::string_view{gender_code};
-      } catch (...) {
-        // Keep entry creation robust if this generated profile treats gender differently.
-      }
-    }
-    if (!patient.birthdate.empty()) {
-      patient_handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = patient.birthdate;
-    }
-    if (!patient.deceased.is_empty()) {
-      if (const auto* b = std::get_if<bool>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *b;
-      } else if (const auto* i32 = std::get_if<int32_t>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *i32;
-      } else if (const auto* u32 = std::get_if<uint32_t>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *u32;
-      } else if (const auto* i64 = std::get_if<int64_t>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *i64;
-      } else if (const auto* u64 = std::get_if<uint64_t>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *u64;
-      } else if (const auto* f64 = std::get_if<double>(&patient.deceased.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *f64;
-      } else if (const auto* s = std::get_if<std::string_view>(&patient.deceased.value)) {
-        if (!s->empty()) {
-          patient_handle[FastFHIR::Fields::PATIENT::DECEASED] = *s;
-        }
-      }
-    }
-    if (!patient.multiplebirth.is_empty()) {
-      if (const auto* b = std::get_if<bool>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *b;
-      } else if (const auto* i32 = std::get_if<int32_t>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *i32;
-      } else if (const auto* u32 = std::get_if<uint32_t>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *u32;
-      } else if (const auto* i64 = std::get_if<int64_t>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *i64;
-      } else if (const auto* u64 = std::get_if<uint64_t>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *u64;
-      } else if (const auto* f64 = std::get_if<double>(&patient.multiplebirth.value)) {
-        patient_handle[FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH] = *f64;
-      }
-    }
-
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::ADDRESS,
-        patient.address);
-    if (patient.maritalstatus) {
-      patient_handle[FastFHIR::Fields::PATIENT::MARITAL_STATUS] = *patient.maritalstatus;
-    }
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::PHOTO,
-        patient.photo);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::CONTACT,
-        patient.contact);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::COMMUNICATION,
-        patient.communication);
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::GENERAL_PRACTITIONER,
-        patient.generalpractitioner);
-    if (patient.managingorganization) {
-      patient_handle[FastFHIR::Fields::PATIENT::MANAGING_ORGANIZATION] = *patient.managingorganization;
-    }
-    assign_offset_array_if_present(
-        builder,
-        patient_handle,
-        FastFHIR::Fields::PATIENT::LINK,
-        patient.link);
 
     BundleentryData patient_entry{};
     patient_entry.resource = static_cast<ResourceReference>(patient_handle);
@@ -214,18 +72,11 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   Timer stage1;
   stage1.start();
 
-  std::vector<BundleentryData> entries(fixture.bundle.size());
-
-  std::transform(
-    #if defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
-      std::execution::par_unseq,
-    #endif
-      fixture.bundle.begin(),
-      fixture.bundle.end(),
-      entries.begin(),
-      [&builder](const BundlePatient& p) -> BundleentryData {
-        return make_patient_bundle_entry(builder, p);
-      });
+  std::vector<BundleentryData> entries;
+  entries.reserve(fixture.bundle.size());
+  for (const auto& p : fixture.bundle) {
+    entries.push_back(make_patient_bundle_entry(builder, p));
+  }
 
   entries.erase(
       std::remove_if(
@@ -256,9 +107,10 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   auto root = parser.root();
 
   int patients_found = 0;
+  int encounters_found = 0;
+  int conditions_found = 0;
   std::string found_birthdate;
-  double found_cholesterol = 0.0;
-  bool found_cholesterol_value = false;
+  std::string found_condition_code;
 
   if (root && root.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
     auto entries_node = root[FastFHIR::Fields::BUNDLE::ENTRY];
@@ -272,29 +124,23 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
 
         if (resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
           auto birth_date_field = resource_node[FastFHIR::Fields::PATIENT::BIRTH_DATE];
-          if (birth_date_field) {
-            ++patients_found;
-            if (found_birthdate.empty())
-              found_birthdate = std::string(birth_date_field.as<std::string_view>());
+          ++patients_found;
+          if (birth_date_field && found_birthdate.empty()) {
+            found_birthdate = std::string(birth_date_field.as<std::string_view>());
           }
-        } else if (resource_node.is<FastFHIR::RESOURCETYPE::OBSERVATION>()) {
-          auto code_node = resource_node[FastFHIR::Fields::OBSERVATION::CODE];
-          if (code_node) {
+        } else if (resource_node.is<FastFHIR::RESOURCETYPE::ENCOUNTER>()) {
+          ++encounters_found;
+        } else if (resource_node.is<FastFHIR::RESOURCETYPE::CONDITION>()) {
+          ++conditions_found;
+          auto code_node = resource_node[FastFHIR::Fields::CONDITION::CODE];
+          if (code_node && found_condition_code.empty()) {
             auto coding_array = code_node[FastFHIR::Fields::CODEABLECONCEPT::CODING];
             if (coding_array) {
               for (auto& coding_entry : coding_array.entries()) {
                 auto code_field = coding_entry[FastFHIR::Fields::CODING::CODE];
-                if (code_field && code_field.as<std::string_view>() == kCholesterolLoincCode) {
-                  auto value_entry = resource_node[FastFHIR::Fields::OBSERVATION::VALUE];
-                  if (value_entry) {
-                    try {
-                      auto qty = value_entry.as<QuantityData>();
-                      found_cholesterol = qty.value;
-                      found_cholesterol_value = true;
-                    } catch (...) {
-                      // Keep benchmark running if this Observation uses a non-quantity value choice.
-                    }
-                  }
+                if (code_field) {
+                  found_condition_code = std::string(code_field.as<std::string_view>());
+                  break;
                 }
               }
             }
@@ -305,8 +151,10 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   }
 
   result.queried_value = "patients=" + std::to_string(patients_found)
-      + " birthdate=" + found_birthdate
-      + " cholesterol=" + (found_cholesterol_value ? std::to_string(found_cholesterol) : "N/A");
+    + " birthdate=" + (found_birthdate.empty() ? "none" : found_birthdate)
+    + " encounters=" + std::to_string(encounters_found)
+    + " conditions=" + std::to_string(conditions_found)
+    + " condition_code=" + (found_condition_code.empty() ? "none" : found_condition_code);
 
   result.metrics.push_back(
       MetricEvent{"fastfhir", Stage::Stage3Query, std::max<std::int64_t>(stage3.stop_us(), 1)});

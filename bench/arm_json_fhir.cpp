@@ -2,6 +2,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <FF_Condition.hpp>
+#include <FF_Encounter.hpp>
+#include <FF_Observation.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <execution>
@@ -364,6 +368,329 @@ Json to_json_patient_link(const PatientlinkData& data) {
   return out;
 }
 
+Json to_json_annotation(const AnnotationData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  write_choice_if(out, "author", data.author);
+  put_string_if(out, "time", data.time);
+  put_string_if(out, "text", data.text);
+  return out;
+}
+
+Json to_json_range(const RangeData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_if(out, "low", data.low, to_json_quantity);
+  put_object_if(out, "high", data.high, to_json_quantity);
+  return out;
+}
+
+Json to_json_duration(const DurationData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_f64_if(out, "value", data.value);
+  put_enum_if(out, "comparator", FF_QuantityComparatorToString(data.comparator));
+  put_string_if(out, "unit", data.unit);
+  put_string_if(out, "system", data.system);
+  put_string_if(out, "code", data.code);
+  return out;
+}
+
+Json to_json_codeable_reference(const CodeableReferenceData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_if(out, "concept", data.concept_, to_json_codeable_concept);
+  put_object_if(out, "reference", data.reference, to_json_reference);
+  return out;
+}
+
+Json to_json_encounter_status_history(const EncounterstatusHistoryData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_enum_if(out, "status", FF_EncounterStatusToString(data.status));
+  put_object_if(out, "period", data.period, to_json_period);
+  return out;
+}
+
+Json to_json_encounter_class_history(const EncounterclassHistoryData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "class", data.class_, to_json_coding);
+  put_object_if(out, "period", data.period, to_json_period);
+  return out;
+}
+
+Json to_json_encounter_participant(const EncounterparticipantData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "type", data.type, to_json_codeable_concept);
+  put_object_if(out, "period", data.period, to_json_period);
+  put_object_if(out, "individual", data.individual, to_json_reference);
+  put_object_if(out, "actor", data.actor, to_json_reference);
+  return out;
+}
+
+Json to_json_encounter_diagnosis(const EncounterdiagnosisData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "condition", data.condition, to_json_reference);
+  put_object_if(out, "use", data.use, to_json_codeable_concept);
+  put_u32_if(out, "rank", data.rank);
+  return out;
+}
+
+Json to_json_encounter_hospitalization(const EncounterhospitalizationData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "preAdmissionIdentifier", data.preadmissionidentifier, to_json_identifier);
+  put_object_if(out, "origin", data.origin, to_json_reference);
+  put_object_if(out, "admitSource", data.admitsource, to_json_codeable_concept);
+  put_object_if(out, "readmission", data.readmission, to_json_codeable_concept);
+  put_object_array_if(out, "dietPreference", data.dietpreference, to_json_codeable_concept);
+  put_object_array_if(out, "specialCourtesy", data.specialcourtesy, to_json_codeable_concept);
+  put_object_array_if(out, "specialArrangement", data.specialarrangement, to_json_codeable_concept);
+  put_object_if(out, "destination", data.destination, to_json_reference);
+  put_object_if(out, "dischargeDisposition", data.dischargedisposition, to_json_codeable_concept);
+  return out;
+}
+
+Json to_json_encounter_location(const EncounterlocationData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "location", data.location, to_json_reference);
+  put_enum_if(out, "status", FF_EncounterLocationStatusToString(data.status));
+  put_object_if(out, "physicalType", data.physicaltype, to_json_codeable_concept);
+  put_object_if(out, "period", data.period, to_json_period);
+  put_object_if(out, "form", data.form, to_json_codeable_concept);
+  return out;
+}
+
+Json to_json_encounter_reason(const EncounterreasonData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "use", data.use, to_json_codeable_concept);
+  put_object_array_if(out, "value", data.value, to_json_codeable_reference);
+  return out;
+}
+
+Json to_json_encounter_admission(const EncounteradmissionData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "preAdmissionIdentifier", data.preadmissionidentifier, to_json_identifier);
+  put_object_if(out, "origin", data.origin, to_json_reference);
+  put_object_if(out, "admitSource", data.admitsource, to_json_codeable_concept);
+  put_object_if(out, "readmission", data.readmission, to_json_codeable_concept);
+  put_object_if(out, "destination", data.destination, to_json_reference);
+  put_object_if(out, "dischargeDisposition", data.dischargedisposition, to_json_codeable_concept);
+  return out;
+}
+
+Json to_json_encounter(const EncounterData& data) {
+  Json out = Json::object();
+  out["resourceType"] = "Encounter";
+  put_string_if(out, "id", data.id);
+  put_object_if(out, "meta", data.meta, to_json_meta);
+  put_string_if(out, "implicitRules", data.implicitrules);
+  put_string_if(out, "language", data.language);
+  put_object_if(out, "text", data.text, to_json_narrative);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "identifier", data.identifier, to_json_identifier);
+  put_enum_if(out, "status", FF_EncounterStatusToString(data.status));
+  put_object_array_if(out, "statusHistory", data.statushistory, to_json_encounter_status_history);
+  put_object_if(out, "class", data.class_, to_json_coding);
+  put_object_array_if(out, "classHistory", data.classhistory, to_json_encounter_class_history);
+  put_object_array_if(out, "type", data.type, to_json_codeable_concept);
+  put_object_if(out, "serviceType", data.servicetype, to_json_codeable_concept);
+  put_object_if(out, "priority", data.priority, to_json_codeable_concept);
+  put_object_if(out, "subject", data.subject, to_json_reference);
+  put_object_array_if(out, "episodeOfCare", data.episodeofcare, to_json_reference);
+  put_object_array_if(out, "basedOn", data.basedon, to_json_reference);
+  put_object_array_if(out, "participant", data.participant, to_json_encounter_participant);
+  put_object_array_if(out, "appointment", data.appointment, to_json_reference);
+  put_object_if(out, "period", data.period, to_json_period);
+  put_object_if(out, "length", data.length, to_json_duration);
+  put_object_array_if(out, "reasonCode", data.reasoncode, to_json_codeable_concept);
+  put_object_array_if(out, "reasonReference", data.reasonreference, to_json_reference);
+  put_object_array_if(out, "diagnosis", data.diagnosis, to_json_encounter_diagnosis);
+  put_object_array_if(out, "account", data.account, to_json_reference);
+  put_object_if(out, "hospitalization", data.hospitalization, to_json_encounter_hospitalization);
+  put_object_array_if(out, "location", data.location, to_json_encounter_location);
+  put_object_if(out, "serviceProvider", data.serviceprovider, to_json_reference);
+  put_object_if(out, "partOf", data.partof, to_json_reference);
+  put_object_if(out, "subjectStatus", data.subjectstatus, to_json_codeable_concept);
+  put_object_array_if(out, "careTeam", data.careteam, to_json_reference);
+  put_string_if(out, "plannedStartDate", data.plannedstartdate);
+  put_string_if(out, "plannedEndDate", data.plannedenddate);
+  put_object_array_if(out, "reason", data.reason, to_json_encounter_reason);
+  put_object_array_if(out, "dietPreference", data.dietpreference, to_json_codeable_concept);
+  put_object_array_if(out, "specialArrangement", data.specialarrangement, to_json_codeable_concept);
+  put_object_array_if(out, "specialCourtesy", data.specialcourtesy, to_json_codeable_concept);
+  put_object_if(out, "admission", data.admission, to_json_encounter_admission);
+  return out;
+}
+
+Json to_json_condition_stage(const ConditionstageData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "summary", data.summary, to_json_codeable_concept);
+  put_object_array_if(out, "assessment", data.assessment, to_json_reference);
+  put_object_if(out, "type", data.type, to_json_codeable_concept);
+  return out;
+}
+
+Json to_json_condition_evidence(const ConditionevidenceData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "code", data.code, to_json_codeable_concept);
+  put_object_array_if(out, "detail", data.detail, to_json_reference);
+  return out;
+}
+
+Json to_json_condition_participant(const ConditionparticipantData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "function", data.function, to_json_codeable_concept);
+  put_object_if(out, "actor", data.actor, to_json_reference);
+  return out;
+}
+
+Json to_json_condition(const ConditionData& data) {
+  Json out = Json::object();
+  out["resourceType"] = "Condition";
+  put_string_if(out, "id", data.id);
+  put_object_if(out, "meta", data.meta, to_json_meta);
+  put_string_if(out, "implicitRules", data.implicitrules);
+  put_string_if(out, "language", data.language);
+  put_object_if(out, "text", data.text, to_json_narrative);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "identifier", data.identifier, to_json_identifier);
+  put_object_if(out, "clinicalStatus", data.clinicalstatus, to_json_codeable_concept);
+  put_object_if(out, "verificationStatus", data.verificationstatus, to_json_codeable_concept);
+  put_object_array_if(out, "category", data.category, to_json_codeable_concept);
+  put_object_if(out, "severity", data.severity, to_json_codeable_concept);
+  put_object_if(out, "code", data.code, to_json_codeable_concept);
+  put_object_array_if(out, "bodySite", data.bodysite, to_json_codeable_concept);
+  put_object_if(out, "subject", data.subject, to_json_reference);
+  put_object_if(out, "encounter", data.encounter, to_json_reference);
+  write_choice_if(out, "onset", data.onset);
+  write_choice_if(out, "abatement", data.abatement);
+  put_string_if(out, "recordedDate", data.recordeddate);
+  put_object_if(out, "recorder", data.recorder, to_json_reference);
+  put_object_if(out, "asserter", data.asserter, to_json_reference);
+  put_object_array_if(out, "stage", data.stage, to_json_condition_stage);
+  put_object_array_if(out, "evidence", data.evidence, to_json_condition_evidence);
+  put_object_array_if(out, "note", data.note, to_json_annotation);
+  put_object_array_if(out, "participant", data.participant, to_json_condition_participant);
+  return out;
+}
+
+Json to_json_observation_reference_range(const ObservationreferenceRangeData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "low", data.low, to_json_quantity);
+  put_object_if(out, "high", data.high, to_json_quantity);
+  put_object_if(out, "type", data.type, to_json_codeable_concept);
+  put_object_array_if(out, "appliesTo", data.appliesto, to_json_codeable_concept);
+  put_object_if(out, "age", data.age, to_json_range);
+  put_string_if(out, "text", data.text);
+  put_object_if(out, "normalValue", data.normalvalue, to_json_codeable_concept);
+  return out;
+}
+
+Json to_json_observation_component(const ObservationcomponentData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "code", data.code, to_json_codeable_concept);
+  write_choice_if(out, "value", data.value);
+  put_object_if(out, "dataAbsentReason", data.dataabsentreason, to_json_codeable_concept);
+  put_object_array_if(out, "interpretation", data.interpretation, to_json_codeable_concept);
+  put_object_array_if(out, "referenceRange", data.referencerange, to_json_observation_reference_range);
+  return out;
+}
+
+Json to_json_observation_triggered_by(const ObservationtriggeredByData& data) {
+  Json out = Json::object();
+  put_string_if(out, "id", data.id);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_if(out, "observation", data.observation, to_json_reference);
+  put_enum_if(out, "type", FF_TriggeredBytypeToString(data.type));
+  put_string_if(out, "reason", data.reason);
+  return out;
+}
+
+Json to_json_observation(const ObservationData& data) {
+  Json out = Json::object();
+  out["resourceType"] = "Observation";
+  put_string_if(out, "id", data.id);
+  put_object_if(out, "meta", data.meta, to_json_meta);
+  put_string_if(out, "implicitRules", data.implicitrules);
+  put_string_if(out, "language", data.language);
+  put_object_if(out, "text", data.text, to_json_narrative);
+  put_object_array_if(out, "extension", data.extension, to_json_extension);
+  put_object_array_if(out, "modifierExtension", data.modifierextension, to_json_extension);
+  put_object_array_if(out, "identifier", data.identifier, to_json_identifier);
+  put_object_array_if(out, "basedOn", data.basedon, to_json_reference);
+  put_object_array_if(out, "partOf", data.partof, to_json_reference);
+  put_enum_if(out, "status", FF_ObservationStatusToString(data.status));
+  put_object_array_if(out, "category", data.category, to_json_codeable_concept);
+  put_object_if(out, "code", data.code, to_json_codeable_concept);
+  put_object_if(out, "subject", data.subject, to_json_reference);
+  put_object_array_if(out, "focus", data.focus, to_json_reference);
+  put_object_if(out, "encounter", data.encounter, to_json_reference);
+  write_choice_if(out, "effective", data.effective);
+  put_string_if(out, "issued", data.issued);
+  put_object_array_if(out, "performer", data.performer, to_json_reference);
+  write_choice_if(out, "value", data.value);
+  put_object_if(out, "dataAbsentReason", data.dataabsentreason, to_json_codeable_concept);
+  put_object_array_if(out, "interpretation", data.interpretation, to_json_codeable_concept);
+  put_object_array_if(out, "note", data.note, to_json_annotation);
+  put_object_if(out, "bodySite", data.bodysite, to_json_codeable_concept);
+  put_object_if(out, "method", data.method, to_json_codeable_concept);
+  put_object_if(out, "specimen", data.specimen, to_json_reference);
+  put_object_if(out, "device", data.device, to_json_reference);
+  put_object_array_if(out, "referenceRange", data.referencerange, to_json_observation_reference_range);
+  put_object_array_if(out, "hasMember", data.hasmember, to_json_reference);
+  put_object_array_if(out, "derivedFrom", data.derivedfrom, to_json_reference);
+  put_object_array_if(out, "component", data.component, to_json_observation_component);
+  write_choice_if(out, "instantiates", data.instantiates);
+  put_object_array_if(out, "triggeredBy", data.triggeredby, to_json_observation_triggered_by);
+  put_object_if(out, "bodyStructure", data.bodystructure, to_json_reference);
+  return out;
+}
+
 Json to_json_patient(const BundlePatient& bundle_patient) {
   const auto& patient = bundle_patient.patient;
   Json out = Json::object();
@@ -374,26 +701,6 @@ Json to_json_patient(const BundlePatient& bundle_patient) {
   put_string_if(out, "implicitRules", patient.implicitrules);
   put_string_if(out, "language", patient.language);
   put_object_if(out, "text", patient.text, to_json_narrative);
-
-  if (!patient.contained.empty()) {
-    FastFHIR::Parser parser(bundle_patient.memory);
-    auto root = parser.root();
-    auto contained_node = root[FastFHIR::Fields::PATIENT::CONTAINED];
-    if (contained_node && contained_node.is_array()) {
-      Json contained = Json::array();
-      for (const auto& entry : contained_node.entries()) {
-        std::ostringstream raw;
-        entry.print_json(raw);
-        Json parsed = Json::parse(raw.str(), nullptr, false);
-        if (!parsed.is_discarded() && parsed.is_object()) {
-          contained.push_back(std::move(parsed));
-        }
-      }
-      if (!contained.empty()) {
-        out["contained"] = std::move(contained);
-      }
-    }
-  }
 
   put_object_array_if(out, "extension", patient.extension, to_json_extension);
   put_object_array_if(out, "modifierExtension", patient.modifierextension, to_json_extension);
@@ -427,50 +734,15 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   Timer stage1;
   stage1.start();
 
-  // Phase 1: Build each entry's JSON AST in parallel.
-  std::vector<nlohmann::json> patient_entries(fixture.bundle.size());
-#if defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
-  std::transform(
-      std::execution::par_unseq,
-      fixture.bundle.begin(),
-      fixture.bundle.end(),
-      patient_entries.begin(),
-      [](const BundlePatient& p) -> nlohmann::json {
-        nlohmann::json patient_resource = to_json_patient(p);
-        nlohmann::json patient_entry;
-        patient_entry["resource"] = std::move(patient_resource);
-        return patient_entry;
-      });
-#else
-  {
-    std::atomic_size_t next_idx{0};
-    const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
-    const size_t worker_count = std::min<size_t>(hw_threads, fixture.bundle.size() == 0 ? 1 : fixture.bundle.size());
+  // Phase 1: Serialize directly from in-memory PatientData values.
+  std::vector<nlohmann::json> merged_entries;
+  merged_entries.reserve(fixture.bundle.size());
 
-    std::vector<std::thread> workers;
-    workers.reserve(worker_count);
-
-    for (size_t worker = 0; worker < worker_count; ++worker) {
-      workers.emplace_back([&]() {
-        while (true) {
-          const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
-          if (idx >= fixture.bundle.size()) {
-            break;
-          }
-
-          nlohmann::json patient_resource = to_json_patient(fixture.bundle[idx]);
-          nlohmann::json patient_entry;
-          patient_entry["resource"] = std::move(patient_resource);
-          patient_entries[idx] = std::move(patient_entry);
-        }
-      });
-    }
-
-    for (auto& worker : workers) {
-      worker.join();
-    }
+  for (const auto& p : fixture.bundle) {
+    nlohmann::json patient_entry;
+    patient_entry["resource"] = to_json_patient(p);
+    merged_entries.push_back(std::move(patient_entry));
   }
-#endif
 
   nlohmann::json bundle;
   bundle["resourceType"] = "Bundle";
@@ -478,7 +750,7 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   bundle["entry"] = nlohmann::json::array();
 
   // Phase 2: Assemble bundle entry array sequentially.
-  for (auto& entry : patient_entries) {
+  for (auto& entry : merged_entries) {
     if (!entry.is_null()) {
       bundle["entry"].push_back(std::move(entry));
     }
@@ -495,9 +767,10 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
 
   const auto parsed = nlohmann::json::parse(payload);
   int patients_found = 0;
+  int encounters_found = 0;
+  int conditions_found = 0;
   std::string found_birthdate;
-  double found_cholesterol = 0.0;
-  bool found_cholesterol_value = false;
+  std::string found_condition_code;
 
   if (parsed.contains("entry") && parsed["entry"].is_array()) {
     for (const auto& json_entry : parsed["entry"]) {
@@ -506,21 +779,19 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
       const auto resource_type = resource.value("resourceType", "");
 
       if (resource_type == "Patient") {
-        if (resource.contains("birthDate")) {
-          ++patients_found;
-          if (found_birthdate.empty())
-            found_birthdate = resource["birthDate"].get<std::string>();
+        ++patients_found;
+        if (resource.contains("birthDate") && found_birthdate.empty()) {
+          found_birthdate = resource["birthDate"].get<std::string>();
         }
-      } else if (resource_type == "Observation") {
+      } else if (resource_type == "Encounter") {
+        ++encounters_found;
+      } else if (resource_type == "Condition") {
+        ++conditions_found;
         if (resource.contains("code") && resource["code"].contains("coding")
             && resource["code"]["coding"].is_array()) {
           for (const auto& coding : resource["code"]["coding"]) {
-            if (coding.value("code", "") == std::string(kCholesterolLoincCode)) {
-              if (resource.contains("valueQuantity")
-                  && resource["valueQuantity"].contains("value")) {
-                found_cholesterol = resource["valueQuantity"]["value"].get<double>();
-                found_cholesterol_value = true;
-              }
+            if (found_condition_code.empty() && coding.contains("code")) {
+              found_condition_code = coding["code"].get<std::string>();
               break;
             }
           }
@@ -530,8 +801,10 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   }
 
   result.queried_value = "patients=" + std::to_string(patients_found)
-      + " birthdate=" + found_birthdate
-      + " cholesterol=" + (found_cholesterol_value ? std::to_string(found_cholesterol) : "N/A");
+      + " birthdate=" + (found_birthdate.empty() ? "none" : found_birthdate)
+      + " encounters=" + std::to_string(encounters_found)
+      + " conditions=" + std::to_string(conditions_found)
+      + " condition_code=" + (found_condition_code.empty() ? "none" : found_condition_code);
 
   result.metrics.push_back(
       MetricEvent{"json_fhir", Stage::Stage3Query, std::max<std::int64_t>(stage3.stop_us(), 1)});

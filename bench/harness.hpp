@@ -101,8 +101,44 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
 inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
   BundlePatient dst{};
   dst.memory = src.memory;
-  dst.patient.id = src.patient.id;
-  dst.patient.birthdate = src.patient.birthdate;
+
+  // Re-hydrate PatientData from the copied FFHR memory so cloned fixtures keep
+  // all patient fields (including nested vectors/objects), not just scalar stubs.
+  if (dst.memory) {
+    FastFHIR::Parser parser(dst.memory);
+    auto root = parser.root();
+    FastFHIR::Reflective::Node patient_node;
+
+    if (root && root.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+      patient_node = root;
+    } else if (root && root.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
+      if (auto entries = root[FastFHIR::Fields::BUNDLE::ENTRY]) {
+        for (auto& entry : entries.entries()) {
+          auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
+          if (!resource) {
+            continue;
+          }
+          auto resource_node = resource.as_node();
+          if (resource_node && resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+            patient_node = resource_node;
+            break;
+          }
+        }
+      }
+    }
+
+    if (patient_node && patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+      dst.patient = patient_node.as<PatientData>();
+    }
+  }
+
+  // Fallback for defensive compatibility if re-hydration cannot locate a patient.
+  if (dst.patient.id.empty() && !src.patient.id.empty()) {
+    dst.patient.id = src.patient.id;
+  }
+  if (dst.patient.birthdate.empty() && !src.patient.birthdate.empty()) {
+    dst.patient.birthdate = src.patient.birthdate;
+  }
   dst.patient.gender = src.patient.gender;
   dst.patient.active = src.patient.active;
   return dst;
@@ -145,9 +181,9 @@ inline std::string digits_only(const std::string& s) {
 // Checks performed:
 //   1. patients=N   — all four arms must agree
 //   2. birthdate    — normalized to digits; all four arms must agree
-//   3. cholesterol  — the three FHIR arms (fastfhir / json / google) must agree
-//                     (hl7v2 does not encode Observation resources)
-//   4. hl7v2 parity — numerator must equal denominator (all ZPV snapshots matched)
+//   3. encounters   — when present in all arms, values must agree
+//   4. conditions   — when present in all arms, values must agree
+//   5. hl7v2 parity — numerator must equal denominator (all ZPV snapshots matched)
 inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf,
                               const ArmRunResult& gf, const ArmRunResult& h2) {
   using detail::qv_field;
@@ -182,19 +218,39 @@ inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf,
     ok = false;
   }
 
-  // 3. Cholesterol — FHIR arms only
-  const auto ff_cho = qv_field(ff.queried_value, "cholesterol");
-  const auto jf_cho = qv_field(jf.queried_value, "cholesterol");
-  const auto gf_cho = qv_field(gf.queried_value, "cholesterol");
-  if (ff_cho != jf_cho || ff_cho != gf_cho) {
-    std::cerr << "[validate] MISMATCH cholesterol (FHIR arms):"
-              << " fastfhir=" << ff_cho
-              << " json="     << jf_cho
-              << " google="   << gf_cho << "\n";
-    ok = false;
+  // 3. Encounter count (optional until all arms emit it)
+  const auto ff_enc = qv_field(ff.queried_value, "encounters");
+  const auto jf_enc = qv_field(jf.queried_value, "encounters");
+  const auto gf_enc = qv_field(gf.queried_value, "encounters");
+  const auto h2_enc = qv_field(h2.queried_value, "encounters");
+  if (!ff_enc.empty() && !jf_enc.empty() && !gf_enc.empty() && !h2_enc.empty()) {
+    if (ff_enc != jf_enc || ff_enc != gf_enc || ff_enc != h2_enc) {
+      std::cerr << "[validate] MISMATCH encounters:"
+                << " fastfhir=" << ff_enc
+                << " json="     << jf_enc
+                << " google="   << gf_enc
+                << " hl7v2="    << h2_enc << "\n";
+      ok = false;
+    }
   }
 
-  // 4. HL7v2 ZPV parity — numerator must equal denominator
+  // 4. Condition count (optional until all arms emit it)
+  const auto ff_cond = qv_field(ff.queried_value, "conditions");
+  const auto jf_cond = qv_field(jf.queried_value, "conditions");
+  const auto gf_cond = qv_field(gf.queried_value, "conditions");
+  const auto h2_cond = qv_field(h2.queried_value, "conditions");
+  if (!ff_cond.empty() && !jf_cond.empty() && !gf_cond.empty() && !h2_cond.empty()) {
+    if (ff_cond != jf_cond || ff_cond != gf_cond || ff_cond != h2_cond) {
+      std::cerr << "[validate] MISMATCH conditions:"
+                << " fastfhir=" << ff_cond
+                << " json="     << jf_cond
+                << " google="   << gf_cond
+                << " hl7v2="    << h2_cond << "\n";
+      ok = false;
+    }
+  }
+
+  // 5. HL7v2 ZPV parity — numerator must equal denominator
   const auto parity = qv_field(h2.queried_value, "parity");
   if (!parity.empty()) {
     const auto slash = parity.find('/');

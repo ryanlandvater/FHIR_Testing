@@ -447,8 +447,14 @@ void add_snapshot_enum(std::vector<PathValue>& snapshot, const std::string& path
     }
 }
 
+void append_identifier_snapshot(const std::string& path, const IdentifierData& identifier, std::vector<PathValue>& snapshot);
+void append_extension_snapshot(const std::string& path, const ExtensionData& extension, std::vector<PathValue>& snapshot);
+
 void append_period_snapshot(const std::string& path, const PeriodData& period, std::vector<PathValue>& snapshot) {
     add_snapshot_if_not_empty(snapshot, path + ".id", period.id);
+    for (std::size_t i = 0; i < period.extension.size(); ++i) {
+        append_extension_snapshot(path + ".extension[" + std::to_string(i) + "]", period.extension[i], snapshot);
+    }
     add_snapshot_if_not_empty(snapshot, path + ".start", period.start);
     add_snapshot_if_not_empty(snapshot, path + ".end", period.end);
 }
@@ -472,6 +478,9 @@ void append_extension_snapshot(const std::string& path, const ExtensionData& ext
 
 void append_meta_snapshot(const std::string& path, const MetaData& meta, std::vector<PathValue>& snapshot) {
     add_snapshot_if_not_empty(snapshot, path + ".id", meta.id);
+    for (std::size_t i = 0; i < meta.extension.size(); ++i) {
+        append_extension_snapshot(path + ".extension[" + std::to_string(i) + "]", meta.extension[i], snapshot);
+    }
     add_snapshot_if_not_empty(snapshot, path + ".versionid", meta.versionid);
     add_snapshot_if_not_empty(snapshot, path + ".lastupdated", meta.lastupdated);
     add_snapshot_if_not_empty(snapshot, path + ".source", meta.source);
@@ -488,6 +497,9 @@ void append_meta_snapshot(const std::string& path, const MetaData& meta, std::ve
 
 void append_narrative_snapshot(const std::string& path, const NarrativeData& narrative, std::vector<PathValue>& snapshot) {
     add_snapshot_if_not_empty(snapshot, path + ".id", narrative.id);
+    for (std::size_t i = 0; i < narrative.extension.size(); ++i) {
+        append_extension_snapshot(path + ".extension[" + std::to_string(i) + "]", narrative.extension[i], snapshot);
+    }
     add_snapshot_if_not_empty(snapshot, path + ".div", narrative.div);
     add_snapshot_value(snapshot, path + ".status", std::to_string(static_cast<uint32_t>(narrative.status)));
 }
@@ -524,10 +536,7 @@ void append_reference_snapshot(const std::string& path, const ReferenceData& ref
         append_extension_snapshot(path + ".extension[" + std::to_string(i) + "]", reference.extension[i], snapshot);
     }
     if (reference.identifier) {
-        const IdentifierData& identifier = *reference.identifier;
-        add_snapshot_if_not_empty(snapshot, path + ".identifier.id", identifier.id);
-        add_snapshot_if_not_empty(snapshot, path + ".identifier.system", identifier.system);
-        add_snapshot_if_not_empty(snapshot, path + ".identifier.value", identifier.value);
+        append_identifier_snapshot(path + ".identifier", *reference.identifier, snapshot);
     }
 }
 
