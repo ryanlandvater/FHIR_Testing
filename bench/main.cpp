@@ -221,30 +221,27 @@ int main(int argc, char** argv) {
         for (int warm = 0; warm < warmup_iterations; ++warm) {
           (void)bench::run_fastfhir_bundle(bundle);
           (void)bench::run_json_bundle(bundle);
-          (void)bench::run_google_fhir_bundle(bundle);
-          (void)bench::run_hl7v2_bundle(bundle);
         }
 
         const auto ff = bench::run_fastfhir_bundle(bundle);
         const auto jf = bench::run_json_bundle(bundle);
-        const auto gf = bench::run_google_fhir_bundle(bundle);
-        const auto h2 = bench::run_hl7v2_bundle(bundle);
 
-        if (!bench::validate_results(ff, jf, gf, h2)) {
+        if (!bench::validate_results(ff, jf)) {
           std::cerr << "  [validate] values: fastfhir=[" << ff.queried_value << "]"
-                    << " json=["     << jf.queried_value << "]"
-                    << " google=["   << gf.queried_value << "]"
-                    << " hl7v2=["    << h2.queried_value << "]\n";
+                    << " json=["     << jf.queried_value << "]\n";
         }
 
-        for (const bench::ArmRunResult* r : {&ff, &jf, &gf, &h2}) {
-          for (const auto& m : r->metrics) {
-            std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_us
-                      << "," << target_mb << "," << n_patients << "\n";
+        std::vector<bench::MetricEvent> run_metrics;
+        run_metrics.reserve(ff.metrics.size() + jf.metrics.size());
+        run_metrics.insert(run_metrics.end(), ff.metrics.begin(), ff.metrics.end());
+        run_metrics.insert(run_metrics.end(), jf.metrics.begin(), jf.metrics.end());
+
+        for (const auto& m : run_metrics) {
+          std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_us
+                    << "," << target_mb << "," << n_patients << "\n";
 #ifdef HAVE_LIBPQ
-            maybe_insert_metric(m);
+          maybe_insert_metric(m);
 #endif
-          }
         }
         std::cout << std::flush;
       }  // Close iterations loop

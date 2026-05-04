@@ -2,6 +2,16 @@
 
 Purpose: This document records public API and documentation issues discovered while integrating FastFHIR as an external dependency from installed artifacts only (no internal include/build path coupling).
 
+Primary goal: This file is a maintainer-facing improvement guide for FastFHIR itself. Every entry should help improve one or more of:
+- FastFHIR public API ergonomics,
+- FastFHIR public documentation clarity,
+- FastFHIR installed-artifact reliability for external consumers.
+
+How to use this file upstream:
+- Treat each issue as actionable product feedback, not local benchmark-only noise.
+- Prioritize items that cause external consumer breakage or ambiguous API behavior.
+- Convert resolved items into README/API docs, tests, and install-surface CI checks.
+
 Scope: The benchmark harness in this repo intentionally consumes only FastFHIR public API surfaces and uses this integration as an ergonomics test bed.
 
 ## Integration Context
@@ -224,3 +234,89 @@ Whenever integration is blocked by unclear docs, ambiguous behavior, or missing 
 3. Keep this file current as the primary ergonomics feedback log for FastFHIR.
 
 This rule is mandatory for this repository.
+
+## Current Status, Resolutions, and Open Questions (2026-05-04)
+
+Consumer direction received:
+- FFHR arm should be a thin caller only.
+- CODE assignment semantics are confirmed as:
+  - dictionary lookup first,
+  - custom-string fallback with `FF_CUSTOM_STRING_FLAG` and relative pointer,
+  - empty string => `FF_CODE_NULL`.
+
+README confirmation received:
+- The above CODE semantics are formally documented in FastFHIR README (Code Assignment Semantics section).
+- Choice write/read model is also documented in README (10-byte variant slot + tag; scalar inline, complex via offset).
+
+Resolved in consumer implementation (now guidance for upstream docs/tests):
+- Unified assignment architecture is now enforced in consumer harness:
+  - FFHR arm is thin caller.
+  - stream-first patient assignment helper lives in shared assignment layer.
+- CODE custom-string relative-offset math was aligned to object-header base semantics.
+- CHOICE assignment path now uses `Builder::amend_variant(...)` for scalar and string-backed variants.
+
+Upstream documentation improvements implied by these resolutions:
+- Add a direct reflective-assignment recipe for CODE fields (dictionary/custom/null path).
+- Add a direct reflective-assignment recipe for CHOICE fields (`amend_variant` mental model, scalar vs offset payload examples).
+- Add explicit guidance on parity-friendly architecture (thin arm callers, centralized assignment path).
+
+These were observed while implementing the requested stream-first patient assignment pattern:
+
+1) CODE field assignment via `MutableEntry` remains ergonomically confusing
+
+- `MutableEntry` validation for CODE fields expects `RECOVER_FF_CODE`.
+- `TypeTraits<std::string_view>` is `RECOVER_FF_STRING`, so direct string assignment to CODE fields fails schema validation.
+- `MutableEntry` arithmetic assignment writes raw scalar bytes and does not appear to perform dictionary encoding for CODE values.
+- Public API does not provide an obvious `amend_code(...)` equivalent.
+
+Resulting confusion:
+- What is the intended public assignment-operator path for CODE fields in reflective mutation?
+
+2) CHOICE field assignment behavior remains under-specified at the `MutableEntry` level
+
+- Patient `deceased[x]` / `multipleBirth[x]` use CHOICE layout.
+- `MutableEntry` arithmetic assignment can set scalar CHOICE values and tag.
+- Non-arithmetic assignment route does not clearly provide CHOICE tag patching behavior for string/date-like variants.
+- Key metadata for these CHOICE fields currently advertises `RECOVER_FF_BOOL`, which is ambiguous for string/date variants.
+
+Resulting confusion:
+- What is the canonical reflective assignment workflow for CHOICE values that are string/date/dateTime (not numeric/bool)?
+
+3) Nested object append safety from parsed source structs is under-specified
+
+- Directly appending nested objects copied from parsed fixtures can preserve internal references in ways that may require explicit deep-clone assignment logic.
+- Existing `bench_assign.hpp` already has deep-clone routines for parity.
+
+Resulting confusion:
+- Is appending nested structs taken from parser output guaranteed safe, or is deep-clone assignment required before append in reflective workflows?
+
+4) Unified assignment location expectation (resolved in consumer)
+
+- Benchmark design intent is unified assignment semantics in `bench_assign.hpp`.
+- Initial refactor introduced patient stream assignment logic directly inside `bench/arm_fastfhir.cpp`, which conflicts with that design intent.
+
+Resulting confusion:
+- Should stream-style FFHR assignment helpers be moved into `bench_assign.hpp` under `#if defined(ARM_FASTFHIR)` so both FFHR and JSON arms stay structurally unified?
+
+Status update:
+- This has now been implemented: patient stream-assignment helper moved to `bench/bench_assign.hpp`, and `bench/arm_fastfhir.cpp` now calls it as a thin delegator.
+
+5) Runtime crash still present with broad patient stream assignment (active blocker)
+
+Observed:
+- Build succeeds.
+- `bench_timing_conformance` passes.
+- Minimal `bench_harness` run still segfaults during 1 MB case.
+
+Resulting confusion:
+- Which specific patient field family is currently causing invalid memory state in this reflective assignment path?
+- Candidate risk areas remain: CHOICE non-scalar handling, contained/resource-reference semantics, or one/more deep object array assignment paths.
+
+Post-README implementation update:
+- `bench_assign.hpp` now aligns CODE custom-string relative-offset math to object header base.
+- `bench_assign.hpp` now uses `Builder::amend_variant(...)` for scalar and string-backed CHOICE variants.
+- Build still succeeds, but `bench_harness --iterations 1 --warmup-iterations 0 --runs 1` still segfaults in 1 MB case.
+
+Upstream value of this blocker:
+- This is now a concrete candidate for FastFHIR reflective-assignment robustness hardening and/or documentation of unsupported mutation combinations.
+- Recommended upstream follow-through: add a reproducer test that exercises stream-first reflective patient assignment with mixed scalar, code, block, array, and choice fields.

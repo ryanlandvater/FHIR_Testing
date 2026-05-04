@@ -1,5 +1,7 @@
 include(FetchContent)
 
+option(BENCH_ASSIGN_FORCE_FULL_CAST "Force full parsed PatientData cast in stage3 for crash forensics" OFF)
+
 find_package(TBB QUIET CONFIG)
 if(TBB_FOUND)
   message(STATUS "TBB found via package config")
@@ -25,19 +27,29 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-option(BENCH_ENABLE_HL7PARSER "Enable jcomellas/hl7parser legacy-format benchmark arm" ON)
-set(HL7PARSER_ROOT "${CMAKE_SOURCE_DIR}/.external/hl7parser" CACHE PATH "Path to a local hl7parser checkout")
-
-# Google FHIR C++ proto library (using standard protobuf, not Google FHIR's json_format)
-# This allows benchmarking FHIR protobuf serialization without requiring Google FHIR's Bazel build
+message(STATUS "Benchmark configured for FFHR + JSON arms only (protobuf/HL7v2 disabled in this phase).")
 
 # Optional: PostgreSQL libpq for database result writing
 find_package(PostgreSQL QUIET)
+set(BENCH_LIBPQ_FOUND OFF)
 if(PostgreSQL_FOUND)
   add_compile_definitions(HAVE_LIBPQ)
+  set(BENCH_LIBPQ_FOUND ON)
   message(STATUS "PostgreSQL found: ${PostgreSQL_LIBRARIES}")
 else()
-  message(STATUS "PostgreSQL not found - database writing disabled")
+  find_library(BENCH_LIBPQ_LIBRARY
+    NAMES pq libpq
+    PATHS /opt/homebrew/lib /usr/local/lib /opt/anaconda3/lib)
+  find_path(BENCH_LIBPQ_INCLUDE_DIR
+    NAMES libpq-fe.h
+    PATHS /opt/homebrew/include /usr/local/include /opt/anaconda3/include)
+  if(BENCH_LIBPQ_LIBRARY AND BENCH_LIBPQ_INCLUDE_DIR)
+    set(BENCH_LIBPQ_FOUND ON)
+    add_compile_definitions(HAVE_LIBPQ)
+    message(STATUS "PostgreSQL found via fallback: ${BENCH_LIBPQ_LIBRARY}")
+  else()
+    message(STATUS "PostgreSQL not found - database writing disabled")
+  endif()
 endif()
 
 set(FASTFHIR_ROOT "" CACHE PATH "Path to an external FastFHIR checkout with submodules")
@@ -92,27 +104,6 @@ target_include_directories(bench_core INTERFACE ${FASTFHIR_SIMDJSON_INCLUDE_DIR}
 target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
 target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY} ${FASTFHIR_INGESTOR_LIBRARY})
 
-if(BENCH_ENABLE_HL7PARSER)
-  if(EXISTS "${HL7PARSER_ROOT}/include/hl7parser/parser.h")
-    file(GLOB HL7PARSER_SOURCES "${HL7PARSER_ROOT}/src/*.c")
-    if(HL7PARSER_SOURCES)
-      add_library(hl7parser_static STATIC ${HL7PARSER_SOURCES})
-      target_include_directories(hl7parser_static PUBLIC "${HL7PARSER_ROOT}/include")
-      target_compile_definitions(hl7parser_static PUBLIC HL7PARSER_STATIC=1)
-
-      target_link_libraries(bench_core INTERFACE hl7parser_static)
-      target_compile_definitions(bench_core INTERFACE HAVE_HL7PARSER=1)
-      message(STATUS "HL7 parser enabled from ${HL7PARSER_ROOT}")
-    else()
-      message(WARNING "HL7 parser sources not found under ${HL7PARSER_ROOT}/src; building hl7v2 arm without parser integration")
-    endif()
-  else()
-    message(STATUS "HL7 parser not found at ${HL7PARSER_ROOT}; building hl7v2 arm without parser integration")
-  endif()
-else()
-  message(STATUS "HL7 parser integration disabled (BENCH_ENABLE_HL7PARSER=OFF)")
-endif()
-
 if(BENCH_TBB_TARGET)
   target_link_libraries(bench_core INTERFACE ${BENCH_TBB_TARGET})
 endif()
@@ -120,26 +111,31 @@ endif()
 if(PostgreSQL_FOUND)
   target_include_directories(bench_core INTERFACE ${PostgreSQL_INCLUDE_DIRS})
   target_link_libraries(bench_core INTERFACE ${PostgreSQL_LIBRARIES})
+elseif(BENCH_LIBPQ_FOUND)
+  target_include_directories(bench_core INTERFACE ${BENCH_LIBPQ_INCLUDE_DIR})
+  target_link_libraries(bench_core INTERFACE ${BENCH_LIBPQ_LIBRARY})
 endif()
 
 add_executable(bench_harness
   main.cpp
   arm_fastfhir.cpp
   arm_json_fhir.cpp
-  arm_google_fhir.cpp
-  arm_hl7v2.cpp
   synthea_fixture.cpp
 )
 target_link_libraries(bench_harness PRIVATE bench_core)
+if(BENCH_ASSIGN_FORCE_FULL_CAST)
+  target_compile_definitions(bench_harness PRIVATE BENCH_ASSIGN_FORCE_FULL_CAST=1)
+endif()
 
 add_executable(bench_timing_conformance
   timing_conformance_test.cpp
   arm_fastfhir.cpp
   arm_json_fhir.cpp
-  arm_google_fhir.cpp
-  arm_hl7v2.cpp
 )
 target_link_libraries(bench_timing_conformance PRIVATE bench_core)
+if(BENCH_ASSIGN_FORCE_FULL_CAST)
+  target_compile_definitions(bench_timing_conformance PRIVATE BENCH_ASSIGN_FORCE_FULL_CAST=1)
+endif()
 
 # Ensure runtime linker can locate libfastfhir from the install prefix.
 set_target_properties(bench_harness PROPERTIES BUILD_RPATH "${FASTFHIR_INSTALL_PREFIX}/lib")

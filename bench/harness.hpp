@@ -11,8 +11,12 @@
 
 #include <FastFHIR.hpp>
 #include <FF_Bundle.hpp>
+#include <FF_Condition.hpp>
+#include <FF_Encounter.hpp>
 #include <FF_FieldKeys.hpp>
+#include <FF_Observation.hpp>
 #include <FF_Patient.hpp>
+#include <FF_Procedure.hpp>
 
 namespace bench {
 
@@ -40,6 +44,7 @@ struct MetricEvent {
 struct ArmRunResult {
   std::vector<MetricEvent> metrics;
   std::string queried_value;
+  std::string reconstructed_bundle_json;
 };
 
 class Timer {
@@ -87,6 +92,10 @@ inline constexpr std::string_view kLoincSystem = "http://loinc.org";
 struct BundlePatient {
   FastFHIR::Memory memory;
   PatientData patient;
+  std::vector<EncounterData> encounters;
+  std::vector<ConditionData> conditions;
+  std::vector<ProcedureData> procedures;
+  std::vector<ObservationData> observations;
 };
 
 struct BundleBenchFixture {
@@ -96,40 +105,22 @@ struct BundleBenchFixture {
   int64_t fastfhir_vma_bytes = 0;
 };
 
+namespace detail {
+void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
+                              BundlePatient& bundle_patient);
+}
+
 BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path);
 
 inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
   BundlePatient dst{};
   dst.memory = src.memory;
 
-  // Re-hydrate PatientData from the copied FFHR memory so cloned fixtures keep
-  // all patient fields (including nested vectors/objects), not just scalar stubs.
+  // Re-hydrate the POCO bundle from copied FFHR memory so cloned fixtures keep
+  // string-backed fields valid after arena duplication.
   if (dst.memory) {
     FastFHIR::Parser parser(dst.memory);
-    auto root = parser.root();
-    FastFHIR::Reflective::Node patient_node;
-
-    if (root && root.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-      patient_node = root;
-    } else if (root && root.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
-      if (auto entries = root[FastFHIR::Fields::BUNDLE::ENTRY]) {
-        for (auto& entry : entries.entries()) {
-          auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
-          if (!resource) {
-            continue;
-          }
-          auto resource_node = resource.as_node();
-          if (resource_node && resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-            patient_node = resource_node;
-            break;
-          }
-        }
-      }
-    }
-
-    if (patient_node && patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-      dst.patient = patient_node.as<PatientData>();
-    }
+    detail::hydrate_bundle_resources(parser.root(), dst);
   }
 
   // Fallback for defensive compatibility if re-hydration cannot locate a patient.
@@ -146,14 +137,108 @@ inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
 
 ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture);
 ArmRunResult run_json_bundle(const BundleBenchFixture& fixture);
-ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture);
-ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture);
 
 // ---------------------------------------------------------------------------
 // Cross-arm result validation
 // ---------------------------------------------------------------------------
 
 namespace detail {
+
+inline bool reference_matches_patient_id(const ReferenceData& reference,
+                                         std::string_view patient_id) {
+  if (patient_id.empty() || reference.reference.empty()) {
+    return false;
+  }
+
+  if (reference.reference == patient_id) {
+    return true;
+  }
+
+  constexpr std::string_view kPatientPrefix = "Patient/";
+  return reference.reference.size() == kPatientPrefix.size() + patient_id.size() &&
+         reference.reference.substr(0, kPatientPrefix.size()) == kPatientPrefix &&
+         reference.reference.substr(kPatientPrefix.size()) == patient_id;
+}
+
+template <typename Resource>
+inline void copy_resources_for_patient(const std::vector<FastFHIR::Reflective::Node>& resource_nodes,
+                                       std::string_view patient_id,
+                                       std::vector<Resource>& out) {
+  out.clear();
+  out.reserve(resource_nodes.size());
+
+  for (const auto& resource_node : resource_nodes) {
+    auto resource = resource_node.as<Resource>();
+    if (!patient_id.empty() && resource.subject) {
+      if (!reference_matches_patient_id(*resource.subject, patient_id)) {
+        continue;
+      }
+    }
+    out.push_back(std::move(resource));
+  }
+}
+
+inline void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
+                                     BundlePatient& bundle_patient) {
+  bundle_patient.patient = PatientData{};
+  bundle_patient.encounters.clear();
+  bundle_patient.conditions.clear();
+  bundle_patient.procedures.clear();
+  bundle_patient.observations.clear();
+
+  FastFHIR::Reflective::Node patient_node;
+  std::vector<FastFHIR::Reflective::Node> encounter_nodes;
+  std::vector<FastFHIR::Reflective::Node> condition_nodes;
+  std::vector<FastFHIR::Reflective::Node> procedure_nodes;
+  std::vector<FastFHIR::Reflective::Node> observation_nodes;
+
+  if (root && root.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+    patient_node = root;
+  } else if (root && root.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
+    if (auto entries = root[FastFHIR::Fields::BUNDLE::ENTRY]) {
+      for (auto& entry : entries.entries()) {
+        auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
+        if (!resource) {
+          continue;
+        }
+
+        auto resource_node = resource.as_node();
+        if (!resource_node) {
+          continue;
+        }
+
+        if (!patient_node && resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+          patient_node = resource_node;
+          continue;
+        }
+        if (resource_node.is<FastFHIR::RESOURCETYPE::ENCOUNTER>()) {
+          encounter_nodes.push_back(resource_node);
+          continue;
+        }
+        if (resource_node.is<FastFHIR::RESOURCETYPE::CONDITION>()) {
+          condition_nodes.push_back(resource_node);
+          continue;
+        }
+        if (resource_node.is<FastFHIR::RESOURCETYPE::PROCEDURE>()) {
+          procedure_nodes.push_back(resource_node);
+          continue;
+        }
+        if (resource_node.is<FastFHIR::RESOURCETYPE::OBSERVATION>()) {
+          observation_nodes.push_back(resource_node);
+        }
+      }
+    }
+  }
+
+  if (patient_node && patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+    bundle_patient.patient = patient_node.as<PatientData>();
+  }
+
+  copy_resources_for_patient(encounter_nodes, bundle_patient.patient.id, bundle_patient.encounters);
+  copy_resources_for_patient(condition_nodes, bundle_patient.patient.id, bundle_patient.conditions);
+  copy_resources_for_patient(procedure_nodes, bundle_patient.patient.id, bundle_patient.procedures);
+  copy_resources_for_patient(observation_nodes, bundle_patient.patient.id, bundle_patient.observations);
+}
 
 // Extract a key=value field from a queried_value string.
 inline std::string qv_field(const std::string& qv, const std::string& key) {
@@ -175,17 +260,15 @@ inline std::string digits_only(const std::string& s) {
 
 } // namespace detail
 
-// Compare the query results across all four arms and print a warning to stderr
+// Compare the query results across FFHR and JSON arms and print a warning to stderr
 // for each discrepancy.  Returns true only if every check passes.
 //
 // Checks performed:
-//   1. patients=N   — all four arms must agree
-//   2. birthdate    — normalized to digits; all four arms must agree
-//   3. encounters   — when present in all arms, values must agree
-//   4. conditions   — when present in all arms, values must agree
-//   5. hl7v2 parity — numerator must equal denominator (all ZPV snapshots matched)
-inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf,
-                              const ArmRunResult& gf, const ArmRunResult& h2) {
+//   1. patients=N   — both arms must agree
+//   2. birthdate    — normalized to digits; both arms must agree
+//   3. encounters   — when present in both arms, values must agree
+//   4. conditions   — when present in both arms, values must agree
+inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf) {
   using detail::qv_field;
   using detail::digits_only;
   bool ok = true;
@@ -193,43 +276,31 @@ inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf,
   // 1. Patient count
   const auto ff_pat = qv_field(ff.queried_value, "patients");
   const auto jf_pat = qv_field(jf.queried_value, "patients");
-  const auto gf_pat = qv_field(gf.queried_value, "patients");
-  const auto h2_pat = qv_field(h2.queried_value, "patients");
-  if (ff_pat != jf_pat || ff_pat != gf_pat || ff_pat != h2_pat) {
+  if (ff_pat != jf_pat) {
     std::cerr << "[validate] MISMATCH patients:"
               << " fastfhir=" << ff_pat
-              << " json="     << jf_pat
-              << " google="   << gf_pat
-              << " hl7v2="    << h2_pat << "\n";
+              << " json="     << jf_pat << "\n";
     ok = false;
   }
 
   // 2. Birthdate (spot-check first patient; format-normalised)
   const auto ff_bd = digits_only(qv_field(ff.queried_value, "birthdate"));
   const auto jf_bd = digits_only(qv_field(jf.queried_value, "birthdate"));
-  const auto gf_bd = digits_only(qv_field(gf.queried_value, "birthdate"));
-  const auto h2_bd = digits_only(qv_field(h2.queried_value, "birthdate"));
-  if (!ff_bd.empty() && (ff_bd != jf_bd || ff_bd != gf_bd || ff_bd != h2_bd)) {
+  if (!ff_bd.empty() && ff_bd != jf_bd) {
     std::cerr << "[validate] MISMATCH birthdate:"
               << " fastfhir=" << ff_bd
-              << " json="     << jf_bd
-              << " google="   << gf_bd
-              << " hl7v2="    << h2_bd << "\n";
+              << " json="     << jf_bd << "\n";
     ok = false;
   }
 
   // 3. Encounter count (optional until all arms emit it)
   const auto ff_enc = qv_field(ff.queried_value, "encounters");
   const auto jf_enc = qv_field(jf.queried_value, "encounters");
-  const auto gf_enc = qv_field(gf.queried_value, "encounters");
-  const auto h2_enc = qv_field(h2.queried_value, "encounters");
-  if (!ff_enc.empty() && !jf_enc.empty() && !gf_enc.empty() && !h2_enc.empty()) {
-    if (ff_enc != jf_enc || ff_enc != gf_enc || ff_enc != h2_enc) {
+  if (!ff_enc.empty() && !jf_enc.empty()) {
+    if (ff_enc != jf_enc) {
       std::cerr << "[validate] MISMATCH encounters:"
                 << " fastfhir=" << ff_enc
-                << " json="     << jf_enc
-                << " google="   << gf_enc
-                << " hl7v2="    << h2_enc << "\n";
+                << " json="     << jf_enc << "\n";
       ok = false;
     }
   }
@@ -237,26 +308,21 @@ inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf,
   // 4. Condition count (optional until all arms emit it)
   const auto ff_cond = qv_field(ff.queried_value, "conditions");
   const auto jf_cond = qv_field(jf.queried_value, "conditions");
-  const auto gf_cond = qv_field(gf.queried_value, "conditions");
-  const auto h2_cond = qv_field(h2.queried_value, "conditions");
-  if (!ff_cond.empty() && !jf_cond.empty() && !gf_cond.empty() && !h2_cond.empty()) {
-    if (ff_cond != jf_cond || ff_cond != gf_cond || ff_cond != h2_cond) {
+  if (!ff_cond.empty() && !jf_cond.empty()) {
+    if (ff_cond != jf_cond) {
       std::cerr << "[validate] MISMATCH conditions:"
                 << " fastfhir=" << ff_cond
-                << " json="     << jf_cond
-                << " google="   << gf_cond
-                << " hl7v2="    << h2_cond << "\n";
+                << " json="     << jf_cond << "\n";
       ok = false;
     }
   }
 
-  // 5. HL7v2 ZPV parity — numerator must equal denominator
-  const auto parity = qv_field(h2.queried_value, "parity");
-  if (!parity.empty()) {
-    const auto slash = parity.find('/');
-    if (slash != std::string::npos &&
-        parity.substr(0, slash) != parity.substr(slash + 1)) {
-      std::cerr << "[validate] hl7v2 ZPV parity mismatch: parity=" << parity << "\n";
+  // 5. Reconstructed fixture parity (both arms must reconstruct identical bundle JSON)
+  if (!ff.reconstructed_bundle_json.empty() && !jf.reconstructed_bundle_json.empty()) {
+    if (ff.reconstructed_bundle_json != jf.reconstructed_bundle_json) {
+      std::cerr << "[validate] MISMATCH reconstructed_bundle_json:"
+                << " fastfhir=" << ff.reconstructed_bundle_json.size()
+                << " json=" << jf.reconstructed_bundle_json.size() << "\n";
       ok = false;
     }
   }

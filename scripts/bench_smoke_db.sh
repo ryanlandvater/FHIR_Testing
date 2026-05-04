@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 TARGETS_MB="${TARGETS_MB:-1,2,4,8}"
 ITERATIONS="${ITERATIONS:-1}"
+RUNS="${RUNS:-1}"
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-benchmark}"
@@ -22,16 +23,14 @@ EXPECTED_STAGE_KEYS=(
   "fastfhir:stage3_query"
   "json_fhir:stage1_serialize"
   "json_fhir:stage3_query"
-  "google_fhir:stage1_serialize"
-  "google_fhir:stage2_transport"
-  "google_fhir:stage3_query"
-  "hl7v2:stage1_serialize"
-  "hl7v2:stage2_transport"
-  "hl7v2:stage3_query"
 )
 
-if [[ ! -x ./build/bench/bench/bench_harness ]]; then
-  echo "bench_harness missing; build first with cmake --build build/bench --target bench_harness" >&2
+BENCH_BIN="./build/bench/bench_harness"
+if [[ ! -x "$BENCH_BIN" && -x ./build/bench/bench/bench_harness ]]; then
+  BENCH_BIN="./build/bench/bench/bench_harness"
+fi
+if [[ ! -x "$BENCH_BIN" ]]; then
+  echo "bench_harness missing; build first with cmake --build build --target bench_harness" >&2
   exit 1
 fi
 
@@ -44,9 +43,11 @@ fi
 docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -f /docker-entrypoint-initdb.d/migrations/001_init.sql >/dev/null
 
 LOG_FILE="$(mktemp /tmp/bench_smoke_db.XXXXXX)"
-echo "Running bench_harness (targets=${TARGETS_MB}, iterations=${ITERATIONS})..."
-DYLD_LIBRARY_PATH=local/lib ./build/bench/bench/bench_harness \
+echo "Running bench_harness (targets=${TARGETS_MB}, iterations=${ITERATIONS}, runs=${RUNS})..."
+DYLD_LIBRARY_PATH=local/lib "$BENCH_BIN" \
   --iterations "$ITERATIONS" \
+  --runs "$RUNS" \
+  --warmup-iterations 0 \
   --bundle-targets-mb "$TARGETS_MB" \
   --bundle-max-mb "${TARGETS_MB##*,}" \
   --db "$DB_CONN" 2>&1 | tee "$LOG_FILE" >/dev/null
@@ -66,7 +67,7 @@ fi
 
 IFS=',' read -r -a TARGET_ARRAY <<< "$TARGETS_MB"
 TARGET_COUNT="${#TARGET_ARRAY[@]}"
-EXPECTED_TOTAL_ROWS=$(( TARGET_COUNT * ITERATIONS * ${#EXPECTED_STAGE_KEYS[@]} ))
+EXPECTED_TOTAL_ROWS=$(( TARGET_COUNT * ITERATIONS * RUNS * ${#EXPECTED_STAGE_KEYS[@]} ))
 
 ACTUAL_TOTAL_ROWS="$(docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -At -c "SELECT COUNT(*) FROM benchmark_results WHERE run_id=${RUN_ID};")"
 if [[ "$ACTUAL_TOTAL_ROWS" != "$EXPECTED_TOTAL_ROWS" ]]; then
@@ -78,7 +79,7 @@ for key in "${EXPECTED_STAGE_KEYS[@]}"; do
   arm="${key%%:*}"
   stage="${key##*:}"
   rows="$(docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -At -c "SELECT COUNT(*) FROM benchmark_results WHERE run_id=${RUN_ID} AND arm='${arm}' AND stage='${stage}';")"
-  expected_rows=$(( TARGET_COUNT * ITERATIONS ))
+  expected_rows=$(( TARGET_COUNT * ITERATIONS * RUNS ))
   if [[ "$rows" != "$expected_rows" ]]; then
     echo "Stage coverage mismatch for ${arm}/${stage}: expected=${expected_rows}, actual=${rows}" >&2
     exit 1

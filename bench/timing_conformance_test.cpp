@@ -88,12 +88,9 @@ int main() {
 
   const auto fastfhir = bench::run_fastfhir_bundle(fixture);
   const auto json = bench::run_json_bundle(fixture);
-  const auto google = bench::run_google_fhir_bundle(fixture);
-  const auto hl7 = bench::run_hl7v2_bundle(fixture);
 
-  if (fastfhir.metrics.size() < 2 || json.metrics.size() < 2
-      || google.metrics.size() < 2 || hl7.metrics.size() < 3) {
-    std::cerr << "timing conformance failed: expected stage metrics from all arms\n";
+  if (fastfhir.metrics.size() < 2 || json.metrics.size() < 2) {
+    std::cerr << "timing conformance failed: expected stage metrics from both arms\n";
     return 1;
   }
 
@@ -105,175 +102,24 @@ int main() {
     std::cerr << "timing conformance failed: JSON metric duration invalid\n";
     return 1;
   }
-  if (!metrics_are_valid(google, false)) {
-    std::cerr << "timing conformance failed: Google metric duration invalid\n";
-    return 1;
-  }
-  if (!metrics_are_valid(hl7, true)) {
-    std::cerr << "timing conformance failed: HL7 metric duration invalid\n";
-    return 1;
-  }
-
   const int fast_patients = extract_patients(fastfhir.queried_value);
   const int json_patients = extract_patients(json.queried_value);
-  const int google_patients = extract_patients(google.queried_value);
-  const int hl7_patients = extract_patients(hl7.queried_value);
 
-  if (fast_patients != 1 || json_patients != 1 || google_patients != 1 || hl7_patients != 1) {
-    std::cerr << "timing conformance failed: expected patients=1 for all arms\n"
+  if (fast_patients != 1 || json_patients != 1) {
+    std::cerr << "timing conformance failed: expected patients=1 for both arms\n"
               << "  fastfhir: " << fastfhir.queried_value << "\n"
-              << "  json:     " << json.queried_value << "\n"
-              << "  google:   " << google.queried_value << "\n"
-              << "  hl7v2:    " << hl7.queried_value << "\n";
+              << "  json:     " << json.queried_value << "\n";
     return 1;
   }
 
   const auto fast_birth = normalize_birthdate(extract_field(fastfhir.queried_value, "birthdate"));
   const auto json_birth = normalize_birthdate(extract_field(json.queried_value, "birthdate"));
-  const auto google_birth = normalize_birthdate(extract_field(google.queried_value, "birthdate"));
-  const auto hl7_birth = normalize_birthdate(extract_field(hl7.queried_value, "birthdate"));
 
-  if (fast_birth.empty() || json_birth.empty() || google_birth.empty() || hl7_birth.empty()
-      || fast_birth != json_birth || fast_birth != google_birth || fast_birth != hl7_birth) {
-    std::cerr << "timing conformance failed: birthdate mismatch across arms\n"
+  if (fast_birth.empty() || json_birth.empty() || fast_birth != json_birth) {
+    std::cerr << "timing conformance failed: birthdate mismatch across FFHR/JSON arms\n"
               << "  fastfhir: " << fastfhir.queried_value << "\n"
-              << "  json:     " << json.queried_value << "\n"
-              << "  google:   " << google.queried_value << "\n"
-              << "  hl7v2:    " << hl7.queried_value << "\n";
+              << "  json:     " << json.queried_value << "\n";
     return 1;
-  }
-
-  const auto hl7_parity = extract_field(hl7.queried_value, "parity");
-  if (hl7_parity != "1/1") {
-    std::cerr << "timing conformance failed: hl7 parity expected 1/1, got: "
-              << hl7.queried_value << "\n";
-    return 1;
-  }
-
-  // ── 2. HL7v2 field-level encode/decode check ─────────────────────────────
-  // Build a patient with names, address, telecom, identifier, and contact so
-  // the ZPV snapshot parity covers all those fields and the PID decode is
-  // fully exercised.  String literals have static duration; string_view is safe.
-  {
-    PatientData rich{};
-    rich.id        = "patient-rich";
-    rich.birthdate = "1985-07-15";
-    rich.gender    = AdministrativeGender::Female;
-    rich.active    = 1;
-
-    // PID-5 — patient name (XPN)
-    HumanNameData nm{};
-    nm.family = "Smith";
-    nm.given  = {"Jane", "Marie"};
-    nm.use    = NameUse::Official;
-    rich.name.push_back(std::move(nm));
-
-    // PID-11 — patient address (XAD)
-    AddressData addr{};
-    addr.line       = {"123 Main St"};
-    addr.city       = "Boston";
-    addr.state      = "MA";
-    addr.postalcode = "02101";
-    addr.country    = "US";
-    addr.use        = AddressUse::Home;
-    rich.address.push_back(std::move(addr));
-
-    // PID-13 — home phone (XTN)
-    ContactPointData cp{};
-    cp.system = ContactPointSystem::Phone;
-    cp.use    = ContactPointUse::Home;
-    cp.value  = "617-555-0100";
-    rich.telecom.push_back(std::move(cp));
-
-    // PID-3 — patient identifier (CX)
-    IdentifierData ident{};
-    ident.system = "http://hospital.example.org";
-    ident.value  = "PAT-001";
-    rich.identifier.push_back(std::move(ident));
-
-    // NK1 — patient contact
-    PatientcontactData ctct{};
-    ctct.name = std::make_unique<HumanNameData>();
-    ctct.name->family = "Jones";
-    ctct.name->given  = {"Bob"};
-    rich.contact.push_back(std::move(ctct));
-
-    bench::BundlePatient rich_bp{};
-    rich_bp.patient = std::move(rich);
-
-    bench::BundleBenchFixture rich_fixture{};
-    rich_fixture.actual_ingested_bytes = 1024;
-    rich_fixture.bundle.push_back(std::move(rich_bp));
-
-    const auto rich_hl7 = bench::run_hl7v2_bundle(rich_fixture);
-
-    if (!metrics_are_valid(rich_hl7, true)) {
-      std::cerr << "hl7v2 field parity failed: invalid metrics\n";
-      return 1;
-    }
-
-    const int rich_patients = extract_patients(rich_hl7.queried_value);
-    if (rich_patients != 1) {
-      std::cerr << "hl7v2 field parity failed: expected patients=1, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // Full ZPV snapshot round-trip
-    const auto rich_parity = extract_field(rich_hl7.queried_value, "parity");
-    if (rich_parity != "1/1") {
-      std::cerr << "hl7v2 field parity failed: ZPV snapshot parity expected 1/1, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // PID-7 birthdate (YYYYMMDD after decode)
-    const auto rich_birth = normalize_birthdate(extract_field(rich_hl7.queried_value, "birthdate"));
-    if (rich_birth != "19850715") {
-      std::cerr << "hl7v2 field parity failed: birthdate expected 19850715, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // PID-8 administrative sex (HL7 code: F for Female)
-    const auto rich_gender = extract_field(rich_hl7.queried_value, "gender");
-    if (rich_gender != "F") {
-      std::cerr << "hl7v2 field parity failed: gender expected F, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // PID-5 family name (XPN component 0)
-    const auto rich_family = extract_field(rich_hl7.queried_value, "family");
-    if (rich_family != "Smith") {
-      std::cerr << "hl7v2 field parity failed: family expected Smith, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // PID-11 city (XAD component 2)
-    const auto rich_city = extract_field(rich_hl7.queried_value, "city");
-    if (rich_city != "Boston") {
-      std::cerr << "hl7v2 field parity failed: city expected Boston, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // PID-3 identifier repetition count
-    const auto rich_ids = extract_field(rich_hl7.queried_value, "identifiers");
-    if (rich_ids != "1") {
-      std::cerr << "hl7v2 field parity failed: identifiers expected 1, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
-
-    // NK1 segment count
-    const auto rich_ctcts = extract_field(rich_hl7.queried_value, "contacts");
-    if (rich_ctcts != "1") {
-      std::cerr << "hl7v2 field parity failed: contacts expected 1, got: "
-                << rich_hl7.queried_value << "\n";
-      return 1;
-    }
   }
 
   std::cout << "timing conformance passed\n";

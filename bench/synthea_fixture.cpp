@@ -57,29 +57,9 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
   }
 
   const auto root_node = root.as_node();
-  FastFHIR::Reflective::Node patient_node;
+  detail::hydrate_bundle_resources(root_node, item);
 
-  if (root_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-    patient_node = root_node;
-  }
-
-  if (!patient_node && root_node.is<FastFHIR::RESOURCETYPE::BUNDLE>()) {
-    if (auto entries = root_node[FastFHIR::Fields::BUNDLE::ENTRY]) {
-      for (auto& entry : entries.entries()) {
-        auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
-        if (!resource) {
-          continue;
-        }
-        auto resource_node = resource.as_node();
-        if (resource_node && resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-          patient_node = resource_node;
-          break;
-        }
-      }
-    }
-  }
-
-  if (!patient_node || !patient_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
+  if (item.patient.id.empty()) {
     throw std::runtime_error("No Patient resource in ingested root for " + json_path.string());
   }
 
@@ -88,7 +68,6 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
     // No-op checksum callback for benchmarking; real implementation would hash the data.
     return std::vector<BYTE>(32);
   });
-  item.patient = patient_node.as<PatientData>();
   return item;
 }
 

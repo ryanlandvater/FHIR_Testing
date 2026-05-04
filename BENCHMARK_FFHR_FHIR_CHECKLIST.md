@@ -1,0 +1,43 @@
+# FFHR + JSON FHIR Implementation Checklist
+
+Status legend: [ ] Not Started, [~] In Progress, [x] Done, [!] Blocked
+
+## Scope Lock
+- [x] Limit benchmark arms to FastFHIR + JSON FHIR only
+- [x] Remove Google FHIR + HL7v2 from active benchmark target builds
+- [x] Restrict conformance checks to two-arm parity
+
+## Shared Assignment Layer
+- [x] Add macro-based shared assignment header: bench/bench_assign.hpp
+- [x] Cover Patient + Observation + Encounter + Condition field mapping
+- [ ] Expand assignment coverage to broader nested FHIR fields as needed
+
+## FastFHIR Arm
+- [x] Add bench/arm_fastfhir.cpp implementation
+- [x] Stage1 serialize path implemented
+- [x] Stage3 query path implemented (birthDate + LOINC 2085-9 match count)
+- [ ] Stage2 transport metric decision finalized
+
+## JSON FHIR Arm
+- [x] Add bench/arm_json_fhir.cpp implementation
+- [x] Stage1 serialize path implemented
+- [x] Stage3 query path implemented (birthDate + LOINC 2085-9 match count)
+- [ ] Stage2 transport metric decision finalized
+
+## run_metrics + PostgreSQL
+- [x] Concatenate FFHR + JSON metric vectors per measured iteration
+- [x] Append concatenated metrics into benchmark_results (existing schema)
+- [x] Keep DB write mode best-effort (log and continue)
+- [x] Update smoke DB stage-key expectations for two-arm mode
+
+## Verification Gates
+- [x] Build bench_harness + bench_timing_conformance cleanly
+- [x] bench_timing_conformance passes for FFHR + JSON
+- [x] bench_harness passes without validate mismatches at 1MB
+- [x] bench_harness passes without validate mismatches at 64MB
+- [x] PostgreSQL row counts match two-arm expected totals
+
+## Notes
+- Current query requirement is birthDate plus LOINC 2085-9 observation match check.
+- Current serialization scope includes Patient, Observation, Encounter, Condition.
+- This document tracks implementation progress only for the FFHR + JSON first milestone.
