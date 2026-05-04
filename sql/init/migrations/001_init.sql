@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS benchmark_results (
   run_id INT NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
   arm VARCHAR(50) NOT NULL,
   stage VARCHAR(50) NOT NULL,
-  duration_us BIGINT NOT NULL,
+  duration_ns BIGINT NOT NULL,
   target_mb INT NOT NULL,
   patients_in_bundle INT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

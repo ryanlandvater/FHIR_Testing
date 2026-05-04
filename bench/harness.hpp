@@ -38,7 +38,7 @@ enum class Stage {
 struct MetricEvent {
   std::string arm;
   Stage stage;
-  std::int64_t duration_us;
+  std::int64_t duration_ns;
 };
 
 struct ArmRunResult {
@@ -50,15 +50,14 @@ struct ArmRunResult {
 class Timer {
  public:
   void start() { begin_ = std::chrono::steady_clock::now(); }
-  std::int64_t stop_us() const {
+  std::int64_t stop_ns() const {
     const auto end = std::chrono::steady_clock::now();
     const auto elapsed_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin_).count();
     if (elapsed_ns <= 0) {
       return 1;
     }
-    // Round up sub-microsecond samples so recorded metrics are never zero.
-    return (elapsed_ns + 999) / 1000;
+    return elapsed_ns;
   }
 
  private:
@@ -80,7 +79,7 @@ inline std::string to_string(Stage s) {
 }
 
 inline void print_metric(const MetricEvent& e) {
-  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_us << "\n" << std::flush;
+  std::cout << e.arm << "," << to_string(e.stage) << "," << e.duration_ns << "\n" << std::flush;
 }
 
 inline constexpr std::string_view kPatientQueryField = "birthDate";
@@ -268,10 +267,31 @@ inline std::string digits_only(const std::string& s) {
 //   2. birthdate    — normalized to digits; both arms must agree
 //   3. encounters   — when present in both arms, values must agree
 //   4. conditions   — when present in both arms, values must agree
+//   5. observations — required in both arms and values must agree
+//   6. loinc_2085_9_matches — required in both arms and values must agree
+//   7. Observation value/effective/component semantic counters — required parity
 inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf) {
   using detail::qv_field;
   using detail::digits_only;
   bool ok = true;
+
+  auto compare_required_field = [&](const char* key) {
+    const auto ff_value = qv_field(ff.queried_value, key);
+    const auto jf_value = qv_field(jf.queried_value, key);
+    if (ff_value.empty() || jf_value.empty()) {
+      std::cerr << "[validate] MISSING required field " << key << ":"
+                << " fastfhir=" << (ff_value.empty() ? "<missing>" : ff_value)
+                << " json=" << (jf_value.empty() ? "<missing>" : jf_value) << "\n";
+      ok = false;
+      return;
+    }
+    if (ff_value != jf_value) {
+      std::cerr << "[validate] MISMATCH " << key << ":"
+                << " fastfhir=" << ff_value
+                << " json=" << jf_value << "\n";
+      ok = false;
+    }
+  };
 
   // 1. Patient count
   const auto ff_pat = qv_field(ff.queried_value, "patients");
@@ -317,7 +337,23 @@ inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf) {
     }
   }
 
-  // 5. Reconstructed fixture parity (both arms must reconstruct identical bundle JSON)
+  compare_required_field("observations");
+  compare_required_field("loinc_2085_9_matches");
+  compare_required_field("obs_value_present");
+  compare_required_field("obs_value_quantity");
+  compare_required_field("obs_value_codeableconcept");
+  compare_required_field("obs_value_string");
+  compare_required_field("obs_value_code");
+  compare_required_field("obs_effective_datetime");
+  compare_required_field("obs_effective_period");
+  compare_required_field("obs_issued_present");
+  compare_required_field("obs_component_value_present");
+  compare_required_field("obs_component_value_quantity");
+  compare_required_field("obs_component_value_codeableconcept");
+  compare_required_field("obs_component_value_string");
+  compare_required_field("obs_component_value_code");
+
+  // 6. Reconstructed fixture parity (both arms must reconstruct identical bundle JSON)
   if (!ff.reconstructed_bundle_json.empty() && !jf.reconstructed_bundle_json.empty()) {
     if (ff.reconstructed_bundle_json != jf.reconstructed_bundle_json) {
       std::cerr << "[validate] MISMATCH reconstructed_bundle_json:"

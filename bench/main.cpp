@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
   std::uniform_int_distribution<std::size_t> patient_dist(0, all_patients.size() - 1);
 
   // CSV header
-  std::cout << "arm,stage,duration_us,target_mb,patients_in_bundle\n" << std::flush;
+  std::cout << "arm,stage,duration_ns,target_mb,patients_in_bundle\n" << std::flush;
 
 #ifdef HAVE_LIBPQ
   PGconn* db_conn = nullptr;
@@ -135,6 +135,22 @@ int main(int argc, char** argv) {
       PQfinish(db_conn);
       db_conn = nullptr;
     } else {
+      PGresult* alter_res = PQexec(
+          db_conn,
+          "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS duration_ns BIGINT");
+      if (PQresultStatus(alter_res) != PGRES_COMMAND_OK) {
+        std::cerr << "Failed to ensure duration_ns column: " << PQerrorMessage(db_conn);
+      }
+      PQclear(alter_res);
+
+      alter_res = PQexec(
+          db_conn,
+          "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS duration_us BIGINT");
+      if (PQresultStatus(alter_res) != PGRES_COMMAND_OK) {
+        std::cerr << "Failed to ensure duration_us column: " << PQerrorMessage(db_conn);
+      }
+      PQclear(alter_res);
+
       // Insert benchmark run record
       const std::string run_query =
           "INSERT INTO benchmark_runs (iterations) VALUES (" + std::to_string(iterations) + ") RETURNING id";
@@ -185,16 +201,18 @@ int main(int argc, char** argv) {
           }
 
           const std::string run_id_s = std::to_string(run_id);
-          const std::string duration_s = std::to_string(m.duration_us);
+            const std::string duration_ns_s = std::to_string(m.duration_ns);
+            const std::string duration_us_s = std::to_string((m.duration_ns + 999) / 1000);
           const std::string target_mb_s = std::to_string(target_mb);
           const std::string n_patients_s = std::to_string(n_patients);
           const std::string stage_s = bench::to_string(m.stage);
 
-          const char* params[6] = {
+            const char* params[7] = {
               run_id_s.c_str(),
               m.arm.c_str(),
               stage_s.c_str(),
-              duration_s.c_str(),
+              duration_ns_s.c_str(),
+              duration_us_s.c_str(),
               target_mb_s.c_str(),
               n_patients_s.c_str(),
           };
@@ -202,9 +220,9 @@ int main(int argc, char** argv) {
           PGresult* res = PQexecParams(
               db_conn,
               "INSERT INTO benchmark_results "
-              "(run_id, arm, stage, duration_us, target_mb, patients_in_bundle) "
-              "VALUES ($1::int, $2::text, $3::text, $4::bigint, $5::int, $6::int)",
-              6,
+              "(run_id, arm, stage, duration_ns, duration_us, target_mb, patients_in_bundle) "
+              "VALUES ($1::int, $2::text, $3::text, $4::bigint, $5::bigint, $6::int, $7::int)",
+              7,
               nullptr,
               params,
               nullptr,
@@ -237,7 +255,7 @@ int main(int argc, char** argv) {
         run_metrics.insert(run_metrics.end(), jf.metrics.begin(), jf.metrics.end());
 
         for (const auto& m : run_metrics) {
-          std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_us
+          std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_ns
                     << "," << target_mb << "," << n_patients << "\n";
 #ifdef HAVE_LIBPQ
           maybe_insert_metric(m);

@@ -27,6 +27,10 @@ Understand how this was built:
   - Build dependency resolution
   - Validation checklist
   - Real-world implications
+- **[docs/OBSERVATION_PHASE_GUARDRAILS.md](docs/OBSERVATION_PHASE_GUARDRAILS.md)** - Observation expansion guardrails
+  - Shared parity architecture constraints
+  - CODE/CHOICE assignment semantics
+  - Runtime and query parity rules
 
 ### For Project Status (10 minutes)
 Track what was completed:

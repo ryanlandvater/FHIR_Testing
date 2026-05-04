@@ -47,10 +47,10 @@ std::string normalize_birthdate(std::string value) {
 
 bool metrics_are_valid(const bench::ArmRunResult& run, bool allow_stage2_zero) {
   for (const auto& metric : run.metrics) {
-    if (metric.duration_us > 0) {
+    if (metric.duration_ns > 0) {
       continue;
     }
-    if (allow_stage2_zero && metric.stage == bench::Stage::Stage2Transport && metric.duration_us == 0) {
+    if (allow_stage2_zero && metric.stage == bench::Stage::Stage2Transport && metric.duration_ns == 0) {
       continue;
     }
     return false;

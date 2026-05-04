@@ -16,6 +16,7 @@ benchmark-control mechanism, not a recommended production integration pattern.
 */
 
 #include <FF_Patient.hpp>
+#include <FF_Observation.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -123,6 +124,11 @@ inline Json to_json_human_name(const HumanNameData& src);
 inline Json to_json_address(const AddressData& src);
 inline Json to_json_contact_point(const ContactPointData& src);
 inline Json to_json_attachment(const AttachmentData& src);
+inline Json to_json_range(const RangeData& src);
+inline Json to_json_annotation(const AnnotationData& src);
+inline Json to_json_observation_triggered_by(const ObservationtriggeredByData& src);
+inline Json to_json_observation_reference_range(const ObservationreferenceRangeData& src);
+inline Json to_json_observation_component(const ObservationcomponentData& src);
 inline Json to_json_extension(const ExtensionData& src) {
   Json out = Json::object();
   put_if_string(out, "id", src.id);
@@ -342,6 +348,97 @@ inline Json to_json_attachment(const AttachmentData& src) {
   if (!src.extension.empty()) {
     out["extension"] = Json::array();
     for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  return out;
+}
+
+inline Json to_json_range(const RangeData& src) {
+  Json out = Json::object();
+  put_if_string(out, "id", src.id);
+  if (!src.extension.empty()) {
+    out["extension"] = Json::array();
+    for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  if (src.low) out["low"] = to_json_quantity(*src.low);
+  if (src.high) out["high"] = to_json_quantity(*src.high);
+  return out;
+}
+
+inline Json to_json_annotation(const AnnotationData& src) {
+  Json out = Json::object();
+  put_if_string(out, "id", src.id);
+  if (!src.extension.empty()) {
+    out["extension"] = Json::array();
+    for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  write_choice(out, "author", src.author);
+  put_if_string(out, "time", src.time);
+  put_if_string(out, "text", src.text);
+  return out;
+}
+
+inline Json to_json_observation_triggered_by(const ObservationtriggeredByData& src) {
+  Json out = Json::object();
+  put_if_string(out, "id", src.id);
+  if (!src.extension.empty()) {
+    out["extension"] = Json::array();
+    for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  if (!src.modifierextension.empty()) {
+    out["modifierExtension"] = Json::array();
+    for (const auto& e : src.modifierextension) out["modifierExtension"].push_back(to_json_extension(e));
+  }
+  if (src.observation) out["observation"] = to_json_reference(*src.observation);
+  put_if_enum(out, "type", static_cast<int>(src.type));
+  put_if_string(out, "reason", src.reason);
+  return out;
+}
+
+inline Json to_json_observation_reference_range(const ObservationreferenceRangeData& src) {
+  Json out = Json::object();
+  put_if_string(out, "id", src.id);
+  if (!src.extension.empty()) {
+    out["extension"] = Json::array();
+    for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  if (!src.modifierextension.empty()) {
+    out["modifierExtension"] = Json::array();
+    for (const auto& e : src.modifierextension) out["modifierExtension"].push_back(to_json_extension(e));
+  }
+  if (src.low) out["low"] = to_json_quantity(*src.low);
+  if (src.high) out["high"] = to_json_quantity(*src.high);
+  if (src.type) out["type"] = to_json_codeable_concept(*src.type);
+  if (!src.appliesto.empty()) {
+    out["appliesTo"] = Json::array();
+    for (const auto& c : src.appliesto) out["appliesTo"].push_back(to_json_codeable_concept(c));
+  }
+  if (src.age) out["age"] = to_json_range(*src.age);
+  put_if_string(out, "text", src.text);
+  if (src.normalvalue) out["normalValue"] = to_json_codeable_concept(*src.normalvalue);
+  return out;
+}
+
+inline Json to_json_observation_component(const ObservationcomponentData& src) {
+  Json out = Json::object();
+  put_if_string(out, "id", src.id);
+  if (!src.extension.empty()) {
+    out["extension"] = Json::array();
+    for (const auto& e : src.extension) out["extension"].push_back(to_json_extension(e));
+  }
+  if (!src.modifierextension.empty()) {
+    out["modifierExtension"] = Json::array();
+    for (const auto& e : src.modifierextension) out["modifierExtension"].push_back(to_json_extension(e));
+  }
+  if (src.code) out["code"] = to_json_codeable_concept(*src.code);
+  write_choice(out, "value", src.value);
+  if (src.dataabsentreason) out["dataAbsentReason"] = to_json_codeable_concept(*src.dataabsentreason);
+  if (!src.interpretation.empty()) {
+    out["interpretation"] = Json::array();
+    for (const auto& c : src.interpretation) out["interpretation"].push_back(to_json_codeable_concept(c));
+  }
+  if (!src.referencerange.empty()) {
+    out["referenceRange"] = Json::array();
+    for (const auto& rr : src.referencerange) out["referenceRange"].push_back(to_json_observation_reference_range(rr));
   }
   return out;
 }
@@ -764,6 +861,443 @@ inline void assign_patient_link(const PatientData& src, PatientStreamSink& dst) 
 }
 #endif
 
+// ------- Observation field assignment (JSON + FFHR stream) -------
+
+#if defined(ARM_JSON)
+inline void assign_observation_contained(const ObservationData& src, Json& dst) {
+  if (!src.contained.empty()) {
+    dst["contained"] = Json::array();
+    for (const auto& c : src.contained) {
+      dst["contained"].push_back({{"offset", c.offset}, {"recovery", static_cast<int>(c.recovery)}});
+    }
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_contained(const ObservationData& src, PatientStreamSink&) {
+  if (!src.contained.empty()) {
+    throw std::runtime_error("FastFHIR benchmark assignment: Observation.contained remap is not implemented for stream assignment");
+  }
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_id(const ObservationData& src, Json& dst) { put_if_string(dst, "id", src.id); }
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_id(const ObservationData& src, PatientStreamSink& dst) {
+  if (!src.id.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ID] = src.id;
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_meta(const ObservationData& src, Json& dst) {
+  if (src.meta) dst["meta"] = to_json_meta(*src.meta);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_meta(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.meta) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::META, *src.meta);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_implicit_rules(const ObservationData& src, Json& dst) {
+  put_if_string(dst, "implicitRules", src.implicitrules);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_implicit_rules(const ObservationData& src, PatientStreamSink& dst) {
+  if (!src.implicitrules.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::IMPLICIT_RULES] = src.implicitrules;
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_language(const ObservationData& src, Json& dst) { put_if_string(dst, "language", src.language); }
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_language(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::LANGUAGE, src.language);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_text(const ObservationData& src, Json& dst) {
+  if (src.text) dst["text"] = to_json_narrative(*src.text);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_text(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.text) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::TEXT, *src.text);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_extension(const ObservationData& src, Json& dst) {
+  if (!src.extension.empty()) {
+    dst["extension"] = Json::array();
+    for (const auto& e : src.extension) dst["extension"].push_back(to_json_extension(e));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_extension(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::EXTENSION, src.extension);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_modifier_extension(const ObservationData& src, Json& dst) {
+  if (!src.modifierextension.empty()) {
+    dst["modifierExtension"] = Json::array();
+    for (const auto& e : src.modifierextension) dst["modifierExtension"].push_back(to_json_extension(e));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_modifier_extension(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::MODIFIER_EXTENSION, src.modifierextension);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_identifier(const ObservationData& src, Json& dst) {
+  if (!src.identifier.empty()) {
+    dst["identifier"] = Json::array();
+    for (const auto& v : src.identifier) dst["identifier"].push_back(to_json_identifier(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_identifier(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::IDENTIFIER, src.identifier);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_based_on(const ObservationData& src, Json& dst) {
+  if (!src.basedon.empty()) {
+    dst["basedOn"] = Json::array();
+    for (const auto& v : src.basedon) dst["basedOn"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_based_on(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::BASED_ON, src.basedon);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_part_of(const ObservationData& src, Json& dst) {
+  if (!src.partof.empty()) {
+    dst["partOf"] = Json::array();
+    for (const auto& v : src.partof) dst["partOf"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_part_of(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PART_OF, src.partof);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_status(const ObservationData& src, Json& dst) {
+  put_if_string(dst, "status", FF_ObservationStatusToString(src.status));
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_status(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::STATUS, FF_ObservationStatusToString(src.status));
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_category(const ObservationData& src, Json& dst) {
+  if (!src.category.empty()) {
+    dst["category"] = Json::array();
+    for (const auto& v : src.category) dst["category"].push_back(to_json_codeable_concept(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_category(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::CATEGORY, src.category);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_code(const ObservationData& src, Json& dst) {
+  if (src.code) dst["code"] = to_json_codeable_concept(*src.code);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_code(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.code) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::CODE, *src.code);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_subject(const ObservationData& src, Json& dst) {
+  if (src.subject) dst["subject"] = to_json_reference(*src.subject);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_subject(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.subject) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SUBJECT, *src.subject);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_focus(const ObservationData& src, Json& dst) {
+  if (!src.focus.empty()) {
+    dst["focus"] = Json::array();
+    for (const auto& v : src.focus) dst["focus"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_focus(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::FOCUS, src.focus);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_encounter(const ObservationData& src, Json& dst) {
+  if (src.encounter) dst["encounter"] = to_json_reference(*src.encounter);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_encounter(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.encounter) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::ENCOUNTER, *src.encounter);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_effective(const ObservationData& src, Json& dst) { write_choice(dst, "effective", src.effective); }
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_effective(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::EFFECTIVE, src.effective, "Observation.effective");
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_issued(const ObservationData& src, Json& dst) { put_if_string(dst, "issued", src.issued); }
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_issued(const ObservationData& src, PatientStreamSink& dst) {
+  if (!src.issued.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ISSUED] = src.issued;
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_performer(const ObservationData& src, Json& dst) {
+  if (!src.performer.empty()) {
+    dst["performer"] = Json::array();
+    for (const auto& v : src.performer) dst["performer"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_performer(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PERFORMER, src.performer);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_value(const ObservationData& src, Json& dst) { write_choice(dst, "value", src.value); }
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_value(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::VALUE, src.value, "Observation.value");
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_data_absent_reason(const ObservationData& src, Json& dst) {
+  if (src.dataabsentreason) dst["dataAbsentReason"] = to_json_codeable_concept(*src.dataabsentreason);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_data_absent_reason(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.dataabsentreason) {
+    stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DATA_ABSENT_REASON, *src.dataabsentreason);
+  }
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_interpretation(const ObservationData& src, Json& dst) {
+  if (!src.interpretation.empty()) {
+    dst["interpretation"] = Json::array();
+    for (const auto& v : src.interpretation) dst["interpretation"].push_back(to_json_codeable_concept(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_interpretation(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::INTERPRETATION, src.interpretation);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_note(const ObservationData& src, Json& dst) {
+  if (!src.note.empty()) {
+    dst["note"] = Json::array();
+    for (const auto& v : src.note) dst["note"].push_back(to_json_annotation(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_note(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::NOTE, src.note);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_body_site(const ObservationData& src, Json& dst) {
+  if (src.bodysite) dst["bodySite"] = to_json_codeable_concept(*src.bodysite);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_body_site(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.bodysite) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_SITE, *src.bodysite);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_method(const ObservationData& src, Json& dst) {
+  if (src.method) dst["method"] = to_json_codeable_concept(*src.method);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_method(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.method) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::METHOD, *src.method);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_specimen(const ObservationData& src, Json& dst) {
+  if (src.specimen) dst["specimen"] = to_json_reference(*src.specimen);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_specimen(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.specimen) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SPECIMEN, *src.specimen);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_device(const ObservationData& src, Json& dst) {
+  if (src.device) dst["device"] = to_json_reference(*src.device);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_device(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.device) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DEVICE, *src.device);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_reference_range(const ObservationData& src, Json& dst) {
+  if (!src.referencerange.empty()) {
+    dst["referenceRange"] = Json::array();
+    for (const auto& v : src.referencerange) dst["referenceRange"].push_back(to_json_observation_reference_range(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_reference_range(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::REFERENCE_RANGE, src.referencerange);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_has_member(const ObservationData& src, Json& dst) {
+  if (!src.hasmember.empty()) {
+    dst["hasMember"] = Json::array();
+    for (const auto& v : src.hasmember) dst["hasMember"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_has_member(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::HAS_MEMBER, src.hasmember);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_derived_from(const ObservationData& src, Json& dst) {
+  if (!src.derivedfrom.empty()) {
+    dst["derivedFrom"] = Json::array();
+    for (const auto& v : src.derivedfrom) dst["derivedFrom"].push_back(to_json_reference(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_derived_from(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::DERIVED_FROM, src.derivedfrom);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_component(const ObservationData& src, Json& dst) {
+  if (!src.component.empty()) {
+    dst["component"] = Json::array();
+    for (const auto& v : src.component) dst["component"].push_back(to_json_observation_component(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_component(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::COMPONENT, src.component);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_instantiates(const ObservationData& src, Json& dst) {
+  write_choice(dst, "instantiates", src.instantiates);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_instantiates(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::INSTANTIATES, src.instantiates, "Observation.instantiates");
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_triggered_by(const ObservationData& src, Json& dst) {
+  if (!src.triggeredby.empty()) {
+    dst["triggeredBy"] = Json::array();
+    for (const auto& v : src.triggeredby) dst["triggeredBy"].push_back(to_json_observation_triggered_by(v));
+  }
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_triggered_by(const ObservationData& src, PatientStreamSink& dst) {
+  stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::TRIGGERED_BY, src.triggeredby);
+}
+#endif
+
+#if defined(ARM_JSON)
+inline void assign_observation_body_structure(const ObservationData& src, Json& dst) {
+  if (src.bodystructure) dst["bodyStructure"] = to_json_reference(*src.bodystructure);
+}
+#elif defined(ARM_FASTFHIR)
+inline void assign_observation_body_structure(const ObservationData& src, PatientStreamSink& dst) {
+  if (src.bodystructure) {
+    stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_STRUCTURE, *src.bodystructure);
+  }
+}
+#endif
+
+template <typename Sink>
+inline void assign_observation_common(const ObservationData& src, Sink& dst) {
+  assign_observation_contained(src, dst);
+  assign_observation_id(src, dst);
+  assign_observation_meta(src, dst);
+  assign_observation_implicit_rules(src, dst);
+  assign_observation_language(src, dst);
+  assign_observation_text(src, dst);
+  assign_observation_extension(src, dst);
+  assign_observation_modifier_extension(src, dst);
+  assign_observation_identifier(src, dst);
+  assign_observation_based_on(src, dst);
+  assign_observation_part_of(src, dst);
+  assign_observation_status(src, dst);
+  assign_observation_category(src, dst);
+  assign_observation_code(src, dst);
+  assign_observation_subject(src, dst);
+  assign_observation_focus(src, dst);
+  assign_observation_encounter(src, dst);
+  assign_observation_effective(src, dst);
+  assign_observation_issued(src, dst);
+  assign_observation_performer(src, dst);
+  assign_observation_value(src, dst);
+  assign_observation_data_absent_reason(src, dst);
+  assign_observation_interpretation(src, dst);
+  assign_observation_note(src, dst);
+  assign_observation_body_site(src, dst);
+  assign_observation_method(src, dst);
+  assign_observation_specimen(src, dst);
+  assign_observation_device(src, dst);
+  assign_observation_reference_range(src, dst);
+  assign_observation_has_member(src, dst);
+  assign_observation_derived_from(src, dst);
+  assign_observation_component(src, dst);
+  assign_observation_instantiates(src, dst);
+  assign_observation_triggered_by(src, dst);
+  assign_observation_body_structure(src, dst);
+}
+
 template <typename Dst>
 inline void assign_patient_contained_t(const PatientData& src, Dst& dst) { assign_patient_contained(src, dst); }
 template <typename Dst>
@@ -863,11 +1397,36 @@ inline void assign_patient(const PatientData& src, Target& dst) {
 #endif
 }
 
+template <typename Target>
+inline void assign_observation(const ObservationData& src, Target& dst) {
+#if defined(ARM_JSON)
+  dst = detail::Json::object();
+  dst["resourceType"] = "Observation";
+  detail::assign_observation_common(src, dst);
+#elif defined(ARM_FASTFHIR)
+  auto* builder = dst.get_builder();
+  if (builder == nullptr) {
+    throw std::runtime_error("assign_observation: ObjectHandle has null builder");
+  }
+  detail::PatientStreamSink sink{*builder, dst};
+  detail::assign_observation_common(src, sink);
+#else
+  static_assert(sizeof(Target) == 0, "Unsupported benchmark assignment arm");
+#endif
+}
+
 #if defined(ARM_FASTFHIR)
 inline FastFHIR::Reflective::ObjectHandle append_patient_stream(FastFHIR::Builder& builder,
                                                                 const PatientData& src) {
   auto handle = builder.append_obj(PatientData{});
   assign_patient(src, handle);
+  return handle;
+}
+
+inline FastFHIR::Reflective::ObjectHandle append_observation_stream(FastFHIR::Builder& builder,
+                                                                    const ObservationData& src) {
+  auto handle = builder.append_obj(ObservationData{});
+  assign_observation(src, handle);
   return handle;
 }
 #endif

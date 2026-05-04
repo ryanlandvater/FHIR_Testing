@@ -72,7 +72,7 @@ DYLD_LIBRARY_PATH=local/lib ./build/bench/bench/bench_harness \
 Output columns:
 
 ```text
-arm,stage,duration_us,target_mb,patients_in_bundle
+arm,stage,duration_ns,target_mb,patients_in_bundle
 ```
 
 ## Validate
