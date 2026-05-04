@@ -8,15 +8,15 @@ Status legend: [ ] Not Started, [~] In Progress, [x] Done, [!] Blocked
 - [ ] Extend conformance checks from two-arm parity to include HL7v2 parity gates
 
 ## Shared Assignment Layer
-- [x] Add macro-based shared assignment header: bench/bench_assign.hpp
+- [x] Add macro-based shared assignment header: bench/bench_test_1.hpp
 - [x] Cover Patient + Observation + Encounter + Condition field mapping
 - [ ] Expand assignment coverage to broader nested FHIR fields as needed
 
 ## FastFHIR Arm
 - [x] Add bench/arm_fastfhir.cpp implementation
-- [x] Stage1 serialize path implemented
-- [x] Stage3 query path implemented (birthDate + LOINC 2085-9 match count)
-- [ ] Stage2 transport metric decision finalized
+- [x] Test 1 serialize path implemented
+- [x] Test 3 query path implemented (birthDate + LOINC 2085-9 match count)
+- [x] Test 2 materialize placeholder emitted during taxonomy migration
 
 ## JSON FHIR Arm
 - [x] Add bench/arm_json_fhir.cpp implementation

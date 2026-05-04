@@ -77,7 +77,7 @@ namespace bench {
 5. **Validate (Untimed):** Convert the `NativeDom` back into a new `BundlePatient` struct and verify it matches the original source data.
 
 ## The Shared Traversal Contract
-To guarantee that no arm cheats by skipping data or altering the flow, **all serialization must use a single, shared assignment header** (`bench_assign.hpp`). 
+To guarantee that no arm cheats by skipping data or altering the flow, **all Test 1 serialization must use a single, shared assignment header** (`bench_test_1.hpp`). 
 
 ### FFHR Assignment Rule (Mandatory)
 For the FFHR arm, do not serialize by first cloning the full source POCO into a new `*Data` struct and then calling `append_obj(clone)`.

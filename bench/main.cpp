@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
   std::uniform_int_distribution<std::size_t> patient_dist(0, all_patients.size() - 1);
 
   // CSV header
-  std::cout << "arm,stage,duration_ns,target_mb,patients_in_bundle\n" << std::flush;
+  std::cout << "arm,test,duration_ns,target_mb,patients_in_bundle\n" << std::flush;
 
 #ifdef HAVE_LIBPQ
   PGconn* db_conn = nullptr;

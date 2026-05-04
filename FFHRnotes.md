@@ -285,21 +285,21 @@ Resulting confusion:
 3) Nested object append safety from parsed source structs is under-specified
 
 - Directly appending nested objects copied from parsed fixtures can preserve internal references in ways that may require explicit deep-clone assignment logic.
-- Existing `bench_assign.hpp` already has deep-clone routines for parity.
+- Existing `bench_test_1.hpp` already has deep-clone routines for parity.
 
 Resulting confusion:
 - Is appending nested structs taken from parser output guaranteed safe, or is deep-clone assignment required before append in reflective workflows?
 
 4) Unified assignment location expectation (resolved in consumer)
 
-- Benchmark design intent is unified assignment semantics in `bench_assign.hpp`.
+- Benchmark design intent is unified assignment semantics in `bench_test_1.hpp`.
 - Initial refactor introduced patient stream assignment logic directly inside `bench/arm_fastfhir.cpp`, which conflicts with that design intent.
 
 Resulting confusion:
-- Should stream-style FFHR assignment helpers be moved into `bench_assign.hpp` under `#if defined(ARM_FASTFHIR)` so both FFHR and JSON arms stay structurally unified?
+- Should stream-style FFHR assignment helpers be moved into `bench_test_1.hpp` under `#if defined(ARM_FASTFHIR)` so both FFHR and JSON arms stay structurally unified?
 
 Status update:
-- This has now been implemented: patient stream-assignment helper moved to `bench/bench_assign.hpp`, and `bench/arm_fastfhir.cpp` now calls it as a thin delegator.
+- This has now been implemented: patient stream-assignment helper moved to `bench/bench_test_1.hpp`, and `bench/arm_fastfhir.cpp` now calls it as a thin delegator.
 
 5) Runtime crash still present with broad patient stream assignment (active blocker)
 
@@ -313,8 +313,8 @@ Resulting confusion:
 - Candidate risk areas remain: CHOICE non-scalar handling, contained/resource-reference semantics, or one/more deep object array assignment paths.
 
 Post-README implementation update:
-- `bench_assign.hpp` now aligns CODE custom-string relative-offset math to object header base.
-- `bench_assign.hpp` now uses `Builder::amend_variant(...)` for scalar and string-backed CHOICE variants.
+- `bench_test_1.hpp` now aligns CODE custom-string relative-offset math to object header base.
+- `bench_test_1.hpp` now uses `Builder::amend_variant(...)` for scalar and string-backed CHOICE variants.
 - Build still succeeds, but `bench_harness --iterations 1 --warmup-iterations 0 --runs 1` still segfaults in 1 MB case.
 
 Upstream value of this blocker:

@@ -83,9 +83,9 @@ ArmRunResult run_hl7v2_bundle       (const BundleBenchFixture& fixture);
 - [x] Wrap entries in `BundleData` collection and call `builder.set_root()` + `builder.finalize()`
 - [x] **Timer STOP** — immediately after `view = builder.finalize()`, before any transport
 
-### Stage 2 — Transport (Stub)
-- [ ] Add `// TODO(stage2): replace with asio::async_write(socket, view.data(), view.size())`
-- [ ] Add `MetricEvent{..., Stage::Stage2Transport, 0}` placeholder with zero duration
+### Test 2 — Materialize (Migration Placeholder)
+- [ ] Replace placeholder with real deserialize/materialize work for FastFHIR
+- [x] Emit `MetricEvent{..., Stage::Test2Materialize, 0}` placeholder with zero duration
 
 ### Stage 3 — Query / Traversal
 - [x] **Timer START** — immediately before `FastFHIR::Parser parser(view.data(), view.size())`
@@ -110,9 +110,9 @@ ArmRunResult run_hl7v2_bundle       (const BundleBenchFixture& fixture);
 - [x] `bundle.dump()` to produce JSON string
 - [x] **Timer STOP** — after `dump()` completes
 
-### Stage 2 — Transport (Stub)
-- [ ] Add `// TODO(stage2): send payload string over Asio socket`
-- [ ] Add `MetricEvent{..., Stage::Stage2Transport, 0}` placeholder
+### Test 2 — Materialize (Migration Placeholder)
+- [ ] Replace placeholder with real deserialize/materialize work for JSON FHIR
+- [x] Add `MetricEvent{..., Stage::Test2Materialize, 0}` placeholder
 
 ### Stage 3 — Query / Traversal
 - [x] **Timer START** — immediately before `nlohmann::json::parse(payload)`
@@ -137,7 +137,7 @@ ArmRunResult run_hl7v2_bundle       (const BundleBenchFixture& fixture);
 - [ ] **Timer START**
 - [ ] Smoke: loop over patients, simulate per-patient serialization work
 - [ ] **Timer STOP**
-- [ ] Emit `MetricEvent{"google_fhir", Stage::Stage1Serialize, duration}`
+- [ ] Emit `MetricEvent{"google_fhir", Stage::Test1Serialize, duration}`
 
 ### Stage 1 — Serialization (Real — future, requires google/fhir)
 - [ ] `google::fhir::r4::Patient proto_patient` per patient
@@ -145,15 +145,14 @@ ArmRunResult run_hl7v2_bundle       (const BundleBenchFixture& fixture);
 - [ ] Add `Observation` submessage per `CholesterolObservation`: set coding system/code + valueQuantity
 - [ ] Serialize bundle: `google::fhir::PrintFhirToJsonString(bundle_proto)` or protobuf wire bytes
 
-### Stage 2 — Transport (Stub)
-- [ ] `// TODO(stage2): asio transport stub`
-- [ ] `MetricEvent{"google_fhir", Stage::Stage2Transport, 0}` placeholder
+### Test 2 — Materialize
+- [ ] `MetricEvent{"google_fhir", Stage::Test2Materialize, duration}`
 
 ### Stage 3 — Query (Smoke — current)
 - [ ] **Timer START**
 - [ ] Smoke: loop over patients, simulate per-patient query work
 - [ ] **Timer STOP**
-- [ ] Emit `MetricEvent{"google_fhir", Stage::Stage3Query, duration}`
+- [ ] Emit `MetricEvent{"google_fhir", Stage::Test3Query, duration}`
 
 ### Stage 3 — Query (Real — future, requires google/fhir)
 - [ ] `JsonFhirStringToProto<Bundle>(payload)` → `bundle_proto`
@@ -177,7 +176,7 @@ ArmRunResult run_hl7v2_bundle       (const BundleBenchFixture& fixture);
 - [ ] **Timer START**
 - [ ] Smoke: loop over patients, simulate per-patient message construction work
 - [ ] **Timer STOP**
-- [ ] Emit `MetricEvent{"hl7v2", Stage::Stage1Serialize, duration}`
+- [x] Emit `MetricEvent{"hl7v2", Stage::Test1Serialize, duration}`
 
 ### Stage 1 — Serialization (Real — future, requires hl7parser)
 For each patient build an `ORU^R01` HL7v2 message:
@@ -189,15 +188,15 @@ OBX|1|NM|2085-9^Total Cholesterol^LN||<value>|mg/dL|...
 - [ ] Concatenate segments with `\r` delimiter
 - [ ] No nonstandard segments; if field has no HL7v2 mapping, omit and document in `FFHRnotes.md`
 
-### Stage 2 — Transport (Stub)
-- [ ] `// TODO(stage2): asio transport stub`
-- [ ] `MetricEvent{"hl7v2", Stage::Stage2Transport, 0}` placeholder
+### Test 2 — Materialize (Migration Placeholder)
+- [ ] Replace placeholder with real deserialize/materialize work for HL7v2
+- [x] `MetricEvent{"hl7v2", Stage::Test2Materialize, 0}` placeholder
 
 ### Stage 3 — Query (Smoke — current)
 - [ ] **Timer START**
 - [ ] Smoke: loop over patients, simulate per-patient parse + query work
 - [ ] **Timer STOP**
-- [ ] Emit `MetricEvent{"hl7v2", Stage::Stage3Query, duration}`
+- [x] Emit `MetricEvent{"hl7v2", Stage::Test3Query, duration}`
 
 ### Stage 3 — Query (Real — future, requires hl7parser)
 - [ ] Parse message string using `hl7parser`

@@ -4,11 +4,11 @@ Date: 2026-05-04
 Scope: FFHR + JSON only (no protobuf/HL7v2)
 
 ## Goal
-- Keep unified assignment semantics in `bench_assign.hpp`.
+- Keep unified assignment semantics in `bench_test_1.hpp`.
 - Use stream-first FFHR pattern (`append_obj(blank)` + field-level assignment) without shortcuts.
 
 ## Current Status
-- Implemented: patient stream-first assignment helper in `bench/bench_assign.hpp` (unified parity layer).
+- Implemented: patient stream-first assignment helper in `bench/bench_test_1.hpp` (unified parity layer).
 - Implemented: `bench/arm_fastfhir.cpp` reduced to thin caller for patient assignment (`assign::append_patient_stream(...)`).
 - Implemented: architecture note in `BENCHMARK_BIG_PICTURE.md` requiring stream-first FFHR assignment.
 - Implemented: README-aligned CODE assignment behavior in helper (dictionary -> custom-string + flag -> null sentinel).
@@ -26,7 +26,7 @@ Scope: FFHR + JSON only (no protobuf/HL7v2)
 1. CODE field reflective assignment path is unclear (`RECOVER_FF_CODE` expectations vs string TypeTraits behavior).
 2. CHOICE field reflective assignment for non-scalar variants is unclear.
 3. Safety of appending nested parsed structs without deep-clone assignment is unclear.
-4. Exact placement of FFHR stream-assignment logic: should live in `bench_assign.hpp` to preserve unified-assignment design.
+4. Exact placement of FFHR stream-assignment logic: should live in `bench_test_1.hpp` to preserve unified-assignment design.
 
 ## Next Step (blocked on clarification)
 - Isolate the crashing field family in unified patient stream assignment, then restore full assignment coverage safely.

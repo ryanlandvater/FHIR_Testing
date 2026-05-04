@@ -21,18 +21,23 @@
 namespace bench {
 
 // Timed sections are declared here first for manual reviewability.
-// Stage 1 start: immediately before first field write to destination representation.
-// Stage 1 end: immediately after payload sealed and before transport preparation.
-// Stage 2 start: immediately before send API call.
-// Stage 2 end: on transport completion callback/confirmation.
-// Stage 3/7.2 start: first parser/read call that consumes bytes for query.
-// Stage 3/7.2 end: target value extracted into result variable.
+// Test 1 start: immediately before first field write to destination representation.
+// Test 1 end: immediately after payload sealed.
+// Test 2 start: immediately before deserialize/materialize work begins.
+// Test 2 end: when the in-memory representation is available for query logic.
+// Test 3 start: first parser/read call that consumes bytes or materialized nodes for query.
+// Test 3 end: target value extracted into result variable.
 
 enum class Stage {
-  Stage1Serialize,
-  Stage2Transport,
-  Stage3Query,
-  Stage3Materialize
+  Test1Serialize,
+  Test2Materialize,
+  Test3Query,
+
+  // Temporary compatibility aliases during the stage -> test migration.
+  Stage1Serialize = Test1Serialize,
+  Stage2Transport = Test2Materialize,
+  Stage3Query = Test3Query,
+  Stage3Materialize = Test2Materialize
 };
 
 struct MetricEvent {
@@ -66,14 +71,12 @@ class Timer {
 
 inline std::string to_string(Stage s) {
   switch (s) {
-    case Stage::Stage1Serialize:
-      return "stage1_serialize";
-    case Stage::Stage2Transport:
-      return "stage2_transport";
-    case Stage::Stage3Query:
-      return "stage3_query";
-    case Stage::Stage3Materialize:
-      return "stage3_materialize";
+    case Stage::Test1Serialize:
+      return "test_1_serialize";
+    case Stage::Test2Materialize:
+      return "test_2_materialize";
+    case Stage::Test3Query:
+      return "test_3_query";
   }
   return "unknown";
 }

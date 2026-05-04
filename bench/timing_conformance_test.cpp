@@ -45,12 +45,12 @@ std::string normalize_birthdate(std::string value) {
   return out;
 }
 
-bool metrics_are_valid(const bench::ArmRunResult& run, bool allow_stage2_zero) {
+bool metrics_are_valid(const bench::ArmRunResult& run, bool allow_test2_zero) {
   for (const auto& metric : run.metrics) {
     if (metric.duration_ns > 0) {
       continue;
     }
-    if (allow_stage2_zero && metric.stage == bench::Stage::Stage2Transport && metric.duration_ns == 0) {
+    if (allow_test2_zero && metric.stage == bench::Stage::Test2Materialize && metric.duration_ns == 0) {
       continue;
     }
     return false;
@@ -89,16 +89,16 @@ int main() {
   const auto fastfhir = bench::run_fastfhir_bundle(fixture);
   const auto json = bench::run_json_bundle(fixture);
 
-  if (fastfhir.metrics.size() < 2 || json.metrics.size() < 2) {
-    std::cerr << "timing conformance failed: expected stage metrics from both arms\n";
+  if (fastfhir.metrics.size() < 3 || json.metrics.size() < 3) {
+    std::cerr << "timing conformance failed: expected test metrics from both arms\n";
     return 1;
   }
 
-  if (!metrics_are_valid(fastfhir, false)) {
+  if (!metrics_are_valid(fastfhir, true)) {
     std::cerr << "timing conformance failed: FastFHIR metric duration invalid\n";
     return 1;
   }
-  if (!metrics_are_valid(json, false)) {
+  if (!metrics_are_valid(json, true)) {
     std::cerr << "timing conformance failed: JSON metric duration invalid\n";
     return 1;
   }
