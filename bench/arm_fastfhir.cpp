@@ -2,12 +2,34 @@
 
 #include <FF_Bundle.hpp>
 
+#include <algorithm>
+#include <execution>
+
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+
 #define ARM_FASTFHIR
 #include "bench_assign.hpp"
 #undef ARM_FASTFHIR
 
 namespace bench {
 namespace {
+#if defined(__APPLE__)
+struct EntryBuildContext {
+  FastFHIR::Builder* builder;
+  const std::vector<BundlePatient>* bundle;
+  std::vector<BundleentryData>* entries;
+};
+
+static inline void build_bundle_entry(void* raw_context, std::size_t idx) {
+  auto* context = static_cast<EntryBuildContext*>(raw_context);
+  const auto& item = (*context->bundle)[idx];
+  auto patient_handle = context->builder->append_obj(PatientData{});
+  assign::assign_patient(item.patient, patient_handle);
+  (*context->entries)[idx] = BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
+}
+#endif
 }  // namespace
 
 ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
@@ -27,11 +49,34 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   BundleData bundle{};
   bundle.type = BundleType::Collection;
 
-  for (const auto& item : fixture.bundle) {
-    auto patient_handle = builder.append_obj(PatientData{});
-    assign::assign_patient(item.patient, patient_handle);
-    bundle.entry.push_back(BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)});
-  }
+  std::vector<BundleentryData> entries(fixture.bundle.size());
+#if defined(__APPLE__)
+  EntryBuildContext context{&builder, &fixture.bundle, &entries};
+  dispatch_apply_f(entries.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
+                   build_bundle_entry);
+#elif defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
+  std::transform(
+      std::execution::par_unseq,
+      fixture.bundle.begin(),
+      fixture.bundle.end(),
+      entries.begin(),
+      [&builder](const BundlePatient& item) -> BundleentryData {
+        auto patient_handle = builder.append_obj(PatientData{});
+        assign::assign_patient(item.patient, patient_handle);
+        return BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
+      });
+#else
+  std::transform(
+      fixture.bundle.begin(),
+      fixture.bundle.end(),
+      entries.begin(),
+      [&builder](const BundlePatient& item) -> BundleentryData {
+        auto patient_handle = builder.append_obj(PatientData{});
+        assign::assign_patient(item.patient, patient_handle);
+        return BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
+      });
+#endif
+  bundle.entry = std::move(entries);
 
   const auto root = builder.append_obj(bundle);
   builder.set_root(root);
