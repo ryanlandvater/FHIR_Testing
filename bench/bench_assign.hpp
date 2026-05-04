@@ -42,6 +42,36 @@ inline bool has_u8(uint8_t v) { return v != FF_NULL_UINT8; }
 inline bool has_u32(uint32_t v) { return v != FF_NULL_UINT32; }
 inline bool has_f64(double v) { return v != FF_NULL_F64; }
 
+#if defined(ARM_HL7V2)
+struct HL7v2Sink {
+  bench::hl7v2::OruR01Message& message;
+  bench::hl7v2::ObxSegment current_obx{};
+  bool has_open_observation = false;
+
+  void append_custom_field(std::string_view field_name, std::string payload) {
+    message.append_custom_field(field_name, std::move(payload));
+  }
+
+  void begin_observation() {
+    current_obx = bench::hl7v2::ObxSegment{};
+    current_obx.set_id = static_cast<int>(message.obx.size() + 1);
+    has_open_observation = true;
+  }
+
+  void finish_observation() {
+    if (!has_open_observation) {
+      return;
+    }
+    if (current_obx.observation_id.empty()) {
+      current_obx.observation_id = "UNK^Observation^99LOCAL";
+    }
+    message.obx.push_back(std::move(current_obx));
+    current_obx = bench::hl7v2::ObxSegment{};
+    has_open_observation = false;
+  }
+};
+#endif
+
 inline std::string choice_suffix(RECOVERY_TAG tag) {
   switch (tag) {
     case RECOVER_FF_BOOL:
@@ -503,6 +533,102 @@ inline Json to_json_patient_link(const PatientlinkData& src) {
   return out;
 }
 
+#if defined(ARM_HL7V2)
+inline Json hl7_json_value(std::string_view src) { return std::string(src); }
+inline Json hl7_json_value(const std::string& src) { return src; }
+inline Json hl7_json_value(bool src) { return src; }
+inline Json hl7_json_value(uint8_t src) { return src != 0; }
+inline Json hl7_json_value(uint32_t src) { return src; }
+inline Json hl7_json_value(int src) { return src; }
+inline Json hl7_json_value(double src) { return src; }
+inline Json hl7_json_value(const ResourceReference& src) {
+  return Json{{"offset", src.offset}, {"recovery", static_cast<int>(src.recovery)}};
+}
+inline Json hl7_json_value(const ExtensionData& src) { return to_json_extension(src); }
+inline Json hl7_json_value(const CodingData& src) { return to_json_coding(src); }
+inline Json hl7_json_value(const CodeableConceptData& src) { return to_json_codeable_concept(src); }
+inline Json hl7_json_value(const PeriodData& src) { return to_json_period(src); }
+inline Json hl7_json_value(const QuantityData& src) { return to_json_quantity(src); }
+inline Json hl7_json_value(const ReferenceData& src) { return to_json_reference(src); }
+inline Json hl7_json_value(const IdentifierData& src) { return to_json_identifier(src); }
+inline Json hl7_json_value(const MetaData& src) { return to_json_meta(src); }
+inline Json hl7_json_value(const NarrativeData& src) { return to_json_narrative(src); }
+inline Json hl7_json_value(const HumanNameData& src) { return to_json_human_name(src); }
+inline Json hl7_json_value(const AddressData& src) { return to_json_address(src); }
+inline Json hl7_json_value(const ContactPointData& src) { return to_json_contact_point(src); }
+inline Json hl7_json_value(const AttachmentData& src) { return to_json_attachment(src); }
+inline Json hl7_json_value(const RangeData& src) { return to_json_range(src); }
+inline Json hl7_json_value(const AnnotationData& src) { return to_json_annotation(src); }
+inline Json hl7_json_value(const ObservationtriggeredByData& src) {
+  return to_json_observation_triggered_by(src);
+}
+inline Json hl7_json_value(const ObservationreferenceRangeData& src) {
+  return to_json_observation_reference_range(src);
+}
+inline Json hl7_json_value(const ObservationcomponentData& src) {
+  return to_json_observation_component(src);
+}
+inline Json hl7_json_value(const PatientcontactData& src) { return to_json_patient_contact(src); }
+inline Json hl7_json_value(const PatientcommunicationData& src) {
+  return to_json_patient_communication(src);
+}
+inline Json hl7_json_value(const PatientlinkData& src) { return to_json_patient_link(src); }
+inline Json hl7_json_value(const ChoiceEntry& choice) {
+  Json out = Json::object();
+  write_choice(out, "value", choice);
+  return out;
+}
+
+template <typename T>
+inline Json hl7_json_array(const std::vector<T>& values) {
+  Json out = Json::array();
+  for (const auto& value : values) {
+    out.push_back(hl7_json_value(value));
+  }
+  return out;
+}
+
+template <typename Target>
+inline void hl7_append_json_field(Target& dst, const char* field_name, const Json& payload) {
+  dst.append_custom_field(field_name, payload.dump());
+}
+
+template <typename Target>
+inline void hl7_mark_if_string(Target& dst, const char* field_name, std::string_view value) {
+  if (!value.empty()) {
+    hl7_append_json_field(dst, field_name, hl7_json_value(value));
+  }
+}
+
+template <typename Target>
+inline void hl7_mark_if_bool(Target& dst, const char* field_name, uint8_t value) {
+  if (has_u8(value)) {
+    hl7_append_json_field(dst, field_name, hl7_json_value(value));
+  }
+}
+
+template <typename Target, typename Pointer>
+inline void hl7_mark_if_pointer(Target& dst, const char* field_name, const Pointer& value) {
+  if (value) {
+    hl7_append_json_field(dst, field_name, hl7_json_value(*value));
+  }
+}
+
+template <typename Target, typename T>
+inline void hl7_mark_if_vector(Target& dst, const char* field_name, const std::vector<T>& values) {
+  if (!values.empty()) {
+    hl7_append_json_field(dst, field_name, hl7_json_array(values));
+  }
+}
+
+template <typename Target>
+inline void hl7_mark_if_choice(Target& dst, const char* field_name, const ChoiceEntry& choice) {
+  if (!choice.is_empty()) {
+    hl7_append_json_field(dst, field_name, hl7_json_value(choice));
+  }
+}
+#endif
+
 // ------- Unified Patient field assignment (JSON + FFHR stream) -------
 
 #if defined(ARM_FASTFHIR)
@@ -598,6 +724,10 @@ inline void assign_patient_contained(const PatientData& src, PatientStreamSink&)
     throw std::runtime_error("FastFHIR benchmark assignment: Patient.contained remap is not implemented for stream assignment");
   }
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_contained(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.contained", src.contained);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -605,6 +735,10 @@ inline void assign_patient_id(const PatientData& src, Json& dst) { put_if_string
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_id(const PatientData& src, PatientStreamSink& dst) {
   if (!src.id.empty()) dst.handle[FastFHIR::Fields::PATIENT::ID] = src.id;
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_id(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.patient_id = std::string(src.id);
 }
 #endif
 
@@ -616,6 +750,10 @@ inline void assign_patient_implicit_rules(const PatientData& src, Json& dst) {
 inline void assign_patient_implicit_rules(const PatientData& src, PatientStreamSink& dst) {
   if (!src.implicitrules.empty()) dst.handle[FastFHIR::Fields::PATIENT::IMPLICIT_RULES] = src.implicitrules;
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_implicit_rules(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "patient.implicitRules", src.implicitrules);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -624,6 +762,10 @@ inline void assign_patient_language(const PatientData& src, Json& dst) { put_if_
 inline void assign_patient_language(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::LANGUAGE, src.language);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_language(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "patient.language", src.language);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -631,6 +773,10 @@ inline void assign_patient_active(const PatientData& src, Json& dst) { put_if_bo
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_active(const PatientData& src, PatientStreamSink& dst) {
   if (src.active != FF_NULL_UINT8) dst.handle[FastFHIR::Fields::PATIENT::ACTIVE] = (src.active != 0);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_active(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_bool(dst, "patient.active", src.active);
 }
 #endif
 
@@ -642,6 +788,10 @@ inline void assign_patient_gender(const PatientData& src, Json& dst) {
 inline void assign_patient_gender(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::GENDER, FF_AdministrativeGenderToString(src.gender));
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_gender(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.administrative_sex = bench::hl7v2::sex_code(src);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -652,6 +802,10 @@ inline void assign_patient_birth_date(const PatientData& src, Json& dst) {
 inline void assign_patient_birth_date(const PatientData& src, PatientStreamSink& dst) {
   if (!src.birthdate.empty()) dst.handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = src.birthdate;
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_birth_date(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.birth_date = bench::hl7v2::normalize_birthdate(src.birthdate);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -659,6 +813,10 @@ inline void assign_patient_deceased(const PatientData& src, Json& dst) { write_c
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_deceased(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::PATIENT::DECEASED, src.deceased, "Patient.deceased");
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_deceased(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_choice(dst, "patient.deceased[x]", src.deceased);
 }
 #endif
 
@@ -670,6 +828,10 @@ inline void assign_patient_multiple_birth(const PatientData& src, Json& dst) {
 inline void assign_patient_multiple_birth(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH, src.multiplebirth, "Patient.multipleBirth");
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_multiple_birth(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_choice(dst, "patient.multipleBirth[x]", src.multiplebirth);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -680,6 +842,10 @@ inline void assign_patient_meta(const PatientData& src, Json& dst) {
 inline void assign_patient_meta(const PatientData& src, PatientStreamSink& dst) {
   if (src.meta) stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::META, *src.meta);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_meta(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "patient.meta", src.meta);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -689,6 +855,10 @@ inline void assign_patient_text(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_text(const PatientData& src, PatientStreamSink& dst) {
   if (src.text) stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::TEXT, *src.text);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_text(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "patient.text", src.text);
 }
 #endif
 
@@ -703,6 +873,10 @@ inline void assign_patient_extension(const PatientData& src, Json& dst) {
 inline void assign_patient_extension(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::EXTENSION, src.extension);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_extension(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.extension", src.extension);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -715,6 +889,10 @@ inline void assign_patient_modifier_extension(const PatientData& src, Json& dst)
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_modifier_extension(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::MODIFIER_EXTENSION, src.modifierextension);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_modifier_extension(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.modifierExtension", src.modifierextension);
 }
 #endif
 
@@ -729,6 +907,10 @@ inline void assign_patient_identifier(const PatientData& src, Json& dst) {
 inline void assign_patient_identifier(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::IDENTIFIER, src.identifier);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_identifier(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.identifier", src.identifier);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -741,6 +923,21 @@ inline void assign_patient_name(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_name(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::NAME, src.name);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_name(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.patient_name = bench::hl7v2::hl7_name_xpn(src);
+  if (!src.name.empty()) {
+    const auto& name = src.name.front();
+    if (!name.id.empty() || !name.extension.empty() || static_cast<int>(name.use) != 0 ||
+        !name.text.empty() || name.given.size() > 1 || !name.prefix.empty() ||
+        !name.suffix.empty() || name.period) {
+      hl7_append_json_field(dst, "patient.name[0].details", hl7_json_value(name));
+    }
+  }
+  if (src.name.size() > 1) {
+    hl7_append_json_field(dst, "patient.name[*]", hl7_json_array(src.name));
+  }
 }
 #endif
 
@@ -755,6 +952,21 @@ inline void assign_patient_telecom(const PatientData& src, Json& dst) {
 inline void assign_patient_telecom(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::TELECOM, src.telecom);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_telecom(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.home_phone = bench::hl7v2::hl7_phone_xtn(src);
+  for (const auto& telecom : src.telecom) {
+    if (!telecom.id.empty() || !telecom.extension.empty() ||
+        static_cast<int>(telecom.system) != 0 || static_cast<int>(telecom.use) != 0 ||
+        has_u32(telecom.rank) || telecom.period) {
+      hl7_append_json_field(dst, "patient.telecom.details", hl7_json_array(src.telecom));
+      break;
+    }
+  }
+  if (src.telecom.size() > 1) {
+    hl7_append_json_field(dst, "patient.telecom[*]", hl7_json_array(src.telecom));
+  }
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -768,6 +980,21 @@ inline void assign_patient_address(const PatientData& src, Json& dst) {
 inline void assign_patient_address(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::ADDRESS, src.address);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_address(const PatientData& src, HL7v2Sink& dst) {
+  dst.message.pid.patient_address = bench::hl7v2::hl7_address_xad(src);
+  if (!src.address.empty()) {
+    const auto& address = src.address.front();
+    if (!address.id.empty() || !address.extension.empty() || static_cast<int>(address.use) != 0 ||
+        static_cast<int>(address.type) != 0 || !address.text.empty() || address.line.size() > 1 ||
+        !address.district.empty() || address.period) {
+      hl7_append_json_field(dst, "patient.address[0].details", hl7_json_value(address));
+    }
+  }
+  if (src.address.size() > 1) {
+    hl7_append_json_field(dst, "patient.address[*]", hl7_json_array(src.address));
+  }
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -779,6 +1006,10 @@ inline void assign_patient_marital_status(const PatientData& src, PatientStreamS
   if (src.maritalstatus) {
     stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::MARITAL_STATUS, *src.maritalstatus);
   }
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_marital_status(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "patient.maritalStatus", src.maritalstatus);
 }
 #endif
 
@@ -793,6 +1024,10 @@ inline void assign_patient_photo(const PatientData& src, Json& dst) {
 inline void assign_patient_photo(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::PHOTO, src.photo);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_photo(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.photo", src.photo);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -806,6 +1041,10 @@ inline void assign_patient_contact(const PatientData& src, Json& dst) {
 inline void assign_patient_contact(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::CONTACT, src.contact);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_contact(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.contact", src.contact);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -818,6 +1057,10 @@ inline void assign_patient_communication(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_communication(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::COMMUNICATION, src.communication);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_communication(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.communication", src.communication);
 }
 #endif
 
@@ -833,6 +1076,10 @@ inline void assign_patient_general_practitioner(const PatientData& src, PatientS
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::GENERAL_PRACTITIONER,
                               src.generalpractitioner);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_general_practitioner(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.generalPractitioner", src.generalpractitioner);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -846,6 +1093,10 @@ inline void assign_patient_managing_organization(const PatientData& src, Patient
                                   *src.managingorganization);
   }
 }
+#elif defined(ARM_HL7V2)
+inline void assign_patient_managing_organization(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "patient.managingOrganization", src.managingorganization);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -858,6 +1109,10 @@ inline void assign_patient_link(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_link(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::LINK, src.link);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_patient_link(const PatientData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "patient.link", src.link);
 }
 #endif
 
@@ -878,6 +1133,10 @@ inline void assign_observation_contained(const ObservationData& src, PatientStre
     throw std::runtime_error("FastFHIR benchmark assignment: Observation.contained remap is not implemented for stream assignment");
   }
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_contained(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.contained", src.contained);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -885,6 +1144,10 @@ inline void assign_observation_id(const ObservationData& src, Json& dst) { put_i
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_id(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.id.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ID] = src.id;
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_id(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "observation.id", src.id);
 }
 #endif
 
@@ -896,6 +1159,10 @@ inline void assign_observation_meta(const ObservationData& src, Json& dst) {
 inline void assign_observation_meta(const ObservationData& src, PatientStreamSink& dst) {
   if (src.meta) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::META, *src.meta);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_meta(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.meta", src.meta);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -906,6 +1173,10 @@ inline void assign_observation_implicit_rules(const ObservationData& src, Json& 
 inline void assign_observation_implicit_rules(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.implicitrules.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::IMPLICIT_RULES] = src.implicitrules;
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_implicit_rules(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "observation.implicitRules", src.implicitrules);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -913,6 +1184,10 @@ inline void assign_observation_language(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_language(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::LANGUAGE, src.language);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_language(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "observation.language", src.language);
 }
 #endif
 
@@ -923,6 +1198,10 @@ inline void assign_observation_text(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_text(const ObservationData& src, PatientStreamSink& dst) {
   if (src.text) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::TEXT, *src.text);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_text(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.text", src.text);
 }
 #endif
 
@@ -937,6 +1216,10 @@ inline void assign_observation_extension(const ObservationData& src, Json& dst) 
 inline void assign_observation_extension(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::EXTENSION, src.extension);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_extension(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.extension", src.extension);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -949,6 +1232,10 @@ inline void assign_observation_modifier_extension(const ObservationData& src, Js
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_modifier_extension(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::MODIFIER_EXTENSION, src.modifierextension);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_modifier_extension(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.modifierExtension", src.modifierextension);
 }
 #endif
 
@@ -963,6 +1250,10 @@ inline void assign_observation_identifier(const ObservationData& src, Json& dst)
 inline void assign_observation_identifier(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::IDENTIFIER, src.identifier);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_identifier(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.identifier", src.identifier);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -975,6 +1266,10 @@ inline void assign_observation_based_on(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_based_on(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::BASED_ON, src.basedon);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_based_on(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.basedOn", src.basedon);
 }
 #endif
 
@@ -989,6 +1284,10 @@ inline void assign_observation_part_of(const ObservationData& src, Json& dst) {
 inline void assign_observation_part_of(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PART_OF, src.partof);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_part_of(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.partOf", src.partof);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -998,6 +1297,12 @@ inline void assign_observation_status(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_status(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::STATUS, FF_ObservationStatusToString(src.status));
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_status(const ObservationData& src, HL7v2Sink& dst) {
+  if (static_cast<int>(src.status) != 0) {
+    hl7_append_json_field(dst, "observation.status", hl7_json_value(static_cast<int>(src.status)));
+  }
 }
 #endif
 
@@ -1012,6 +1317,10 @@ inline void assign_observation_category(const ObservationData& src, Json& dst) {
 inline void assign_observation_category(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::CATEGORY, src.category);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_category(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.category", src.category);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1022,6 +1331,23 @@ inline void assign_observation_code(const ObservationData& src, Json& dst) {
 inline void assign_observation_code(const ObservationData& src, PatientStreamSink& dst) {
   if (src.code) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::CODE, *src.code);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_code(const ObservationData& src, HL7v2Sink& dst) {
+  dst.current_obx.observation_id = bench::hl7v2::observation_code_id(src);
+  if (src.code) {
+    if (!src.code->id.empty() || !src.code->extension.empty() || !src.code->text.empty() ||
+        src.code->coding.size() > 1) {
+      hl7_append_json_field(dst, "observation.code.details", hl7_json_value(*src.code));
+    }
+    if (!src.code->coding.empty()) {
+      const auto& coding = src.code->coding.front();
+      if (!coding.id.empty() || !coding.extension.empty() || !coding.version.empty() ||
+          has_u8(coding.userselected)) {
+        hl7_append_json_field(dst, "observation.code.coding[0].details", hl7_json_value(coding));
+      }
+    }
+  }
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1031,6 +1357,10 @@ inline void assign_observation_subject(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_subject(const ObservationData& src, PatientStreamSink& dst) {
   if (src.subject) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SUBJECT, *src.subject);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_subject(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.subject", src.subject);
 }
 #endif
 
@@ -1045,6 +1375,10 @@ inline void assign_observation_focus(const ObservationData& src, Json& dst) {
 inline void assign_observation_focus(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::FOCUS, src.focus);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_focus(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.focus", src.focus);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1055,6 +1389,10 @@ inline void assign_observation_encounter(const ObservationData& src, Json& dst) 
 inline void assign_observation_encounter(const ObservationData& src, PatientStreamSink& dst) {
   if (src.encounter) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::ENCOUNTER, *src.encounter);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_encounter(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.encounter", src.encounter);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1063,6 +1401,10 @@ inline void assign_observation_effective(const ObservationData& src, Json& dst) 
 inline void assign_observation_effective(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::EFFECTIVE, src.effective, "Observation.effective");
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_effective(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_choice(dst, "observation.effective[x]", src.effective);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1070,6 +1412,10 @@ inline void assign_observation_issued(const ObservationData& src, Json& dst) { p
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_issued(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.issued.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ISSUED] = src.issued;
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_issued(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_string(dst, "observation.issued", src.issued);
 }
 #endif
 
@@ -1084,6 +1430,10 @@ inline void assign_observation_performer(const ObservationData& src, Json& dst) 
 inline void assign_observation_performer(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PERFORMER, src.performer);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_performer(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.performer", src.performer);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1091,6 +1441,36 @@ inline void assign_observation_value(const ObservationData& src, Json& dst) { wr
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_value(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::VALUE, src.value, "Observation.value");
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_value(const ObservationData& src, HL7v2Sink& dst) {
+  switch (src.value.tag) {
+    case RECOVER_FF_QUANTITY:
+      dst.current_obx.value_type = "NM";
+      dst.current_obx.value = "1";
+      dst.current_obx.units = "{qty}";
+      break;
+    case RECOVER_FF_CODEABLECONCEPT:
+      dst.current_obx.value_type = "CE";
+      dst.current_obx.value = "1";
+      dst.current_obx.units.clear();
+      break;
+    case RECOVER_FF_CODE:
+      dst.current_obx.value_type = "CWE";
+      dst.current_obx.value = "1";
+      dst.current_obx.units.clear();
+      break;
+    case RECOVER_FF_STRING:
+      dst.current_obx.value_type = "ST";
+      dst.current_obx.value = "1";
+      dst.current_obx.units.clear();
+      break;
+    default:
+      dst.current_obx.value_type = "ST";
+      dst.current_obx.value = src.value.is_empty() ? "" : "1";
+      dst.current_obx.units.clear();
+      break;
+  }
 }
 #endif
 
@@ -1103,6 +1483,10 @@ inline void assign_observation_data_absent_reason(const ObservationData& src, Pa
   if (src.dataabsentreason) {
     stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DATA_ABSENT_REASON, *src.dataabsentreason);
   }
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_data_absent_reason(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.dataAbsentReason", src.dataabsentreason);
 }
 #endif
 
@@ -1117,6 +1501,10 @@ inline void assign_observation_interpretation(const ObservationData& src, Json& 
 inline void assign_observation_interpretation(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::INTERPRETATION, src.interpretation);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_interpretation(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.interpretation", src.interpretation);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1130,6 +1518,10 @@ inline void assign_observation_note(const ObservationData& src, Json& dst) {
 inline void assign_observation_note(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::NOTE, src.note);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_note(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.note", src.note);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1139,6 +1531,10 @@ inline void assign_observation_body_site(const ObservationData& src, Json& dst) 
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_body_site(const ObservationData& src, PatientStreamSink& dst) {
   if (src.bodysite) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_SITE, *src.bodysite);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_body_site(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.bodySite", src.bodysite);
 }
 #endif
 
@@ -1150,6 +1546,10 @@ inline void assign_observation_method(const ObservationData& src, Json& dst) {
 inline void assign_observation_method(const ObservationData& src, PatientStreamSink& dst) {
   if (src.method) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::METHOD, *src.method);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_method(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.method", src.method);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1160,6 +1560,10 @@ inline void assign_observation_specimen(const ObservationData& src, Json& dst) {
 inline void assign_observation_specimen(const ObservationData& src, PatientStreamSink& dst) {
   if (src.specimen) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SPECIMEN, *src.specimen);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_specimen(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.specimen", src.specimen);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1169,6 +1573,10 @@ inline void assign_observation_device(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_device(const ObservationData& src, PatientStreamSink& dst) {
   if (src.device) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DEVICE, *src.device);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_device(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.device", src.device);
 }
 #endif
 
@@ -1183,6 +1591,10 @@ inline void assign_observation_reference_range(const ObservationData& src, Json&
 inline void assign_observation_reference_range(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::REFERENCE_RANGE, src.referencerange);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_reference_range(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.referenceRange", src.referencerange);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1195,6 +1607,10 @@ inline void assign_observation_has_member(const ObservationData& src, Json& dst)
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_has_member(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::HAS_MEMBER, src.hasmember);
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_has_member(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.hasMember", src.hasmember);
 }
 #endif
 
@@ -1209,6 +1625,10 @@ inline void assign_observation_derived_from(const ObservationData& src, Json& ds
 inline void assign_observation_derived_from(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::DERIVED_FROM, src.derivedfrom);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_derived_from(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.derivedFrom", src.derivedfrom);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1222,6 +1642,10 @@ inline void assign_observation_component(const ObservationData& src, Json& dst) 
 inline void assign_observation_component(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::COMPONENT, src.component);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_component(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.component", src.component);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1231,6 +1655,10 @@ inline void assign_observation_instantiates(const ObservationData& src, Json& ds
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_instantiates(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::INSTANTIATES, src.instantiates, "Observation.instantiates");
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_instantiates(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_choice(dst, "observation.instantiates[x]", src.instantiates);
 }
 #endif
 
@@ -1245,6 +1673,10 @@ inline void assign_observation_triggered_by(const ObservationData& src, Json& ds
 inline void assign_observation_triggered_by(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::TRIGGERED_BY, src.triggeredby);
 }
+#elif defined(ARM_HL7V2)
+inline void assign_observation_triggered_by(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_vector(dst, "observation.triggeredBy", src.triggeredby);
+}
 #endif
 
 #if defined(ARM_JSON)
@@ -1256,6 +1688,10 @@ inline void assign_observation_body_structure(const ObservationData& src, Patien
   if (src.bodystructure) {
     stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_STRUCTURE, *src.bodystructure);
   }
+}
+#elif defined(ARM_HL7V2)
+inline void assign_observation_body_structure(const ObservationData& src, HL7v2Sink& dst) {
+  hl7_mark_if_pointer(dst, "observation.bodyStructure", src.bodystructure);
 }
 #endif
 
@@ -1392,6 +1828,9 @@ inline void assign_patient(const PatientData& src, Target& dst) {
   }
   detail::PatientStreamSink sink{*builder, dst};
   detail::assign_patient_common(src, sink);
+#elif defined(ARM_HL7V2)
+  detail::HL7v2Sink sink{dst};
+  detail::assign_patient_common(src, sink);
 #else
   static_assert(sizeof(Target) == 0, "Unsupported benchmark assignment arm");
 #endif
@@ -1410,6 +1849,11 @@ inline void assign_observation(const ObservationData& src, Target& dst) {
   }
   detail::PatientStreamSink sink{*builder, dst};
   detail::assign_observation_common(src, sink);
+#elif defined(ARM_HL7V2)
+  detail::HL7v2Sink sink{dst};
+  sink.begin_observation();
+  detail::assign_observation_common(src, sink);
+  sink.finish_observation();
 #else
   static_assert(sizeof(Target) == 0, "Unsupported benchmark assignment arm");
 #endif

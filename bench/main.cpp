@@ -168,6 +168,7 @@ int main(int argc, char** argv) {
 
 
   // Main benchmark loop — one pass per target size, multiple random runs per size
+  bool validation_failed = false;
   for (const int64_t target_bytes : target_sizes_bytes) {
     const int64_t target_mb = target_bytes / (1024 * 1024);
     std::cerr << "=== " << target_mb << " MB (" << num_runs << " runs, "
@@ -239,20 +240,29 @@ int main(int argc, char** argv) {
         for (int warm = 0; warm < warmup_iterations; ++warm) {
           (void)bench::run_fastfhir_bundle(bundle);
           (void)bench::run_json_bundle(bundle);
+          (void)bench::run_hl7v2_bundle(bundle);
         }
 
         const auto ff = bench::run_fastfhir_bundle(bundle);
         const auto jf = bench::run_json_bundle(bundle);
+        const auto h2 = bench::run_hl7v2_bundle(bundle);
 
         if (!bench::validate_results(ff, jf)) {
+          validation_failed = true;
           std::cerr << "  [validate] values: fastfhir=[" << ff.queried_value << "]"
                     << " json=["     << jf.queried_value << "]\n";
         }
+        if (!bench::validate_hl7_results(ff, jf, h2)) {
+          validation_failed = true;
+          std::cerr << "  [validate-hl7] values: baseline_json=[" << jf.queried_value << "]"
+                    << " hl7=[" << h2.queried_value << "]\n";
+        }
 
         std::vector<bench::MetricEvent> run_metrics;
-        run_metrics.reserve(ff.metrics.size() + jf.metrics.size());
+        run_metrics.reserve(ff.metrics.size() + jf.metrics.size() + h2.metrics.size());
         run_metrics.insert(run_metrics.end(), ff.metrics.begin(), ff.metrics.end());
         run_metrics.insert(run_metrics.end(), jf.metrics.begin(), jf.metrics.end());
+        run_metrics.insert(run_metrics.end(), h2.metrics.begin(), h2.metrics.end());
 
         for (const auto& m : run_metrics) {
           std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_ns
@@ -271,6 +281,11 @@ int main(int argc, char** argv) {
     PQfinish(db_conn);
   }
 #endif
+
+  if (validation_failed) {
+    std::cerr << "Validation failed: one or more cross-arm parity checks did not match.\n";
+    return 2;
+  }
 
   return 0;
 }

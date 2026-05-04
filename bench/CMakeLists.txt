@@ -27,7 +27,7 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-message(STATUS "Benchmark configured for FFHR + JSON arms only (protobuf/HL7v2 disabled in this phase).")
+message(STATUS "Benchmark configured for FFHR + JSON + HL7v2 arms.")
 
 # Optional: PostgreSQL libpq for database result writing
 find_package(PostgreSQL QUIET)
@@ -120,6 +120,7 @@ add_executable(bench_harness
   main.cpp
   arm_fastfhir.cpp
   arm_json_fhir.cpp
+  arm_hl7v2.cpp
   synthea_fixture.cpp
 )
 target_link_libraries(bench_harness PRIVATE bench_core)

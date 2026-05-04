@@ -136,6 +136,7 @@ inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
 
 ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture);
 ArmRunResult run_json_bundle(const BundleBenchFixture& fixture);
+ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture);
 
 // ---------------------------------------------------------------------------
 // Cross-arm result validation
@@ -363,6 +364,71 @@ inline bool validate_results(const ArmRunResult& ff, const ArmRunResult& jf) {
     }
   }
 
+  return ok;
+}
+
+// Compare HL7v2 query outputs against FFHR/JSON baseline for the subset of
+// fields that HL7v2 currently models directly.
+inline bool validate_hl7_results(const ArmRunResult& ff,
+                                 const ArmRunResult& jf,
+                                 const ArmRunResult& h2) {
+  using detail::digits_only;
+  using detail::qv_field;
+
+  bool ok = true;
+  auto compare_required_field = [&](const char* key) {
+    const auto baseline_value = qv_field(jf.queried_value, key);
+    const auto hl7_value = qv_field(h2.queried_value, key);
+    if (baseline_value.empty() || hl7_value.empty()) {
+      std::cerr << "[validate] MISSING hl7 required field " << key << ":"
+                << " baseline=" << (baseline_value.empty() ? "<missing>" : baseline_value)
+                << " hl7=" << (hl7_value.empty() ? "<missing>" : hl7_value) << "\n";
+      ok = false;
+      return;
+    }
+    if (baseline_value != hl7_value) {
+      std::cerr << "[validate] MISMATCH hl7 " << key << ":"
+                << " baseline=" << baseline_value
+                << " hl7=" << hl7_value << "\n";
+      ok = false;
+    }
+  };
+
+  compare_required_field("patients");
+
+  const auto baseline_birthdate = digits_only(qv_field(jf.queried_value, "birthdate"));
+  const auto hl7_birthdate = digits_only(qv_field(h2.queried_value, "birthdate"));
+  if (baseline_birthdate.empty() || hl7_birthdate.empty()) {
+    std::cerr << "[validate] MISSING hl7 required field birthdate:"
+              << " baseline=" << (baseline_birthdate.empty() ? "<missing>" : baseline_birthdate)
+              << " hl7=" << (hl7_birthdate.empty() ? "<missing>" : hl7_birthdate) << "\n";
+    ok = false;
+  } else if (baseline_birthdate != hl7_birthdate) {
+    std::cerr << "[validate] MISMATCH hl7 birthdate:"
+              << " baseline=" << baseline_birthdate
+              << " hl7=" << hl7_birthdate << "\n";
+    ok = false;
+  }
+
+  compare_required_field("observations");
+  compare_required_field("loinc_2085_9_matches");
+  compare_required_field("obs_value_present");
+  compare_required_field("obs_value_quantity");
+  compare_required_field("obs_value_codeableconcept");
+  compare_required_field("obs_value_string");
+  compare_required_field("obs_value_code");
+  compare_required_field("obs_effective_datetime");
+  compare_required_field("obs_effective_period");
+  compare_required_field("obs_issued_present");
+  compare_required_field("obs_component_value_present");
+  compare_required_field("obs_component_value_quantity");
+  compare_required_field("obs_component_value_codeableconcept");
+  compare_required_field("obs_component_value_string");
+  compare_required_field("obs_component_value_code");
+
+  // Keep FFHR input referenced to make baseline dependency explicit and avoid
+  // accidental drift where only one arm is checked.
+  (void)ff;
   return ok;
 }
 

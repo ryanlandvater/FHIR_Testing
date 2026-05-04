@@ -1,11 +1,11 @@
-# FFHR + JSON FHIR Implementation Checklist
+# FFHR + JSON + HL7v2 Implementation Checklist
 
 Status legend: [ ] Not Started, [~] In Progress, [x] Done, [!] Blocked
 
 ## Scope Lock
-- [x] Limit benchmark arms to FastFHIR + JSON FHIR only
-- [x] Remove Google FHIR + HL7v2 from active benchmark target builds
-- [x] Restrict conformance checks to two-arm parity
+- [x] Keep FastFHIR + JSON FHIR as baseline active arms
+- [~] Re-enable HL7v2 as structured builder arm (ORU-style message object + dump)
+- [ ] Extend conformance checks from two-arm parity to include HL7v2 parity gates
 
 ## Shared Assignment Layer
 - [x] Add macro-based shared assignment header: bench/bench_assign.hpp
@@ -40,4 +40,4 @@ Status legend: [ ] Not Started, [~] In Progress, [x] Done, [!] Blocked
 ## Notes
 - Current query requirement is birthDate plus LOINC 2085-9 observation match check.
 - Current serialization scope includes Patient, Observation, Encounter, Condition.
-- This document tracks implementation progress only for the FFHR + JSON first milestone.
+- HL7v2 enablement is now in progress; this checklist tracks active migration from two-arm to three-arm runtime.
