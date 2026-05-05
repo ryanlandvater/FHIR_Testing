@@ -101,7 +101,6 @@ target_include_directories(bench_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(bench_core INTERFACE ${FASTFHIR_INCLUDE_DIR})
 target_include_directories(bench_core INTERFACE ${FASTFHIR_GENERATED_INCLUDE_DIR})
 target_include_directories(bench_core INTERFACE ${FASTFHIR_SIMDJSON_INCLUDE_DIR})
-target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
 target_link_libraries(bench_core INTERFACE nlohmann_json::nlohmann_json ${FASTFHIR_LIBRARY} ${FASTFHIR_INGESTOR_LIBRARY})
 
 if(BENCH_TBB_TARGET)
@@ -123,6 +122,7 @@ add_executable(bench_harness
   arm_hl7v2.cpp
   synthea_fixture.cpp
 )
+
 target_link_libraries(bench_harness PRIVATE bench_core)
 if(BENCH_ASSIGN_FORCE_FULL_CAST)
   target_compile_definitions(bench_harness PRIVATE BENCH_ASSIGN_FORCE_FULL_CAST=1)

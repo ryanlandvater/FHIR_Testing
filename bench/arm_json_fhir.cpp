@@ -118,7 +118,12 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
 
   const std::string payload = bundle.dump();
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_timer.stop_ns()});
-  out.metrics.push_back(test_2::materialize_placeholder("json_fhir"));
+
+  Timer test2_timer;
+  test2_timer.start();
+  const auto materialized = test_2::materialize(payload);
+  out.metrics.push_back(test_2::materialize_metric("json_fhir", test2_timer.stop_ns()));
+  (void)materialized;
 
   Timer test3_timer;
   test3_timer.start();

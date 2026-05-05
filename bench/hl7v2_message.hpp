@@ -3,6 +3,7 @@
 #include "harness.hpp"
 
 #include <cctype>
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -205,5 +206,387 @@ struct OruR01Message {
     return out;
   }
 };
+
+// ==========================================
+// Zero-copy parse-side structures
+// ==========================================
+
+struct Component {
+  std::string_view val;
+  std::vector<std::string_view> subcomponents;
+
+  void dump(std::string& out) const {
+    if (subcomponents.empty()) {
+      out.append(val);
+      return;
+    }
+    for (std::size_t i = 0; i < subcomponents.size(); ++i) {
+      out.append(subcomponents[i]);
+      if (i + 1 < subcomponents.size()) {
+        out.push_back('&');
+      }
+    }
+  }
+};
+
+struct Field {
+  std::string_view val;
+  std::vector<Component> components;
+
+  std::string_view get_component(std::size_t index) const {
+    if (index == 0 || components.empty() || index > components.size()) {
+      return val;
+    }
+    return components[index - 1].val;
+  }
+
+  void dump(std::string& out) const {
+    if (components.empty()) {
+      out.append(val);
+      return;
+    }
+    for (std::size_t i = 0; i < components.size(); ++i) {
+      components[i].dump(out);
+      if (i + 1 < components.size()) {
+        out.push_back('^');
+      }
+    }
+  }
+};
+
+struct Segment {
+  std::string_view name;
+  std::vector<Field> fields;
+
+  const Field* get_field(std::size_t index) const {
+    if (index == 0 || index > fields.size()) {
+      return nullptr;
+    }
+    return &fields[index - 1];
+  }
+
+  void dump(std::string& out) const {
+    out.append(name);
+    for (const auto& field : fields) {
+      out.push_back('|');
+      field.dump(out);
+    }
+  }
+};
+
+struct MessageTree {
+  std::vector<Segment> segments;
+
+  std::string dump() const {
+    std::string out;
+    out.reserve(2048);
+    for (const auto& seg : segments) {
+      seg.dump(out);
+      out.push_back('\r');
+    }
+    return out;
+  }
+};
+
+class PidView {
+ public:
+  explicit PidView(const Segment& segment) : seg_(segment) {}
+
+  std::string_view patient_id() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view family_name() const {
+    if (const auto* f = seg_.get_field(5)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view given_name() const {
+    if (const auto* f = seg_.get_field(5)) {
+      return f->get_component(2);
+    }
+    return {};
+  }
+
+  std::string_view birth_date() const {
+    if (const auto* f = seg_.get_field(7)) {
+      return f->val;
+    }
+    return {};
+  }
+
+  std::string_view sex() const {
+    if (const auto* f = seg_.get_field(8)) {
+      return f->val;
+    }
+    return {};
+  }
+
+ private:
+  const Segment& seg_;
+};
+
+class Pv1View {
+ public:
+  explicit Pv1View(const Segment& segment) : seg_(segment) {}
+
+  std::string_view patient_class() const {
+    if (const auto* f = seg_.get_field(2)) {
+      return f->val;
+    }
+    return {};
+  }
+
+  std::string_view point_of_care() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view room() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(2);
+    }
+    return {};
+  }
+
+ private:
+  const Segment& seg_;
+};
+
+class ObrView {
+ public:
+  explicit ObrView(const Segment& segment) : seg_(segment) {}
+
+  std::string_view filler_order_number() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view service_id() const {
+    if (const auto* f = seg_.get_field(4)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view service_name() const {
+    if (const auto* f = seg_.get_field(4)) {
+      return f->get_component(2);
+    }
+    return {};
+  }
+
+ private:
+  const Segment& seg_;
+};
+
+class ObxView {
+ public:
+  explicit ObxView(const Segment& segment) : seg_(segment) {}
+
+  std::string_view value_type() const {
+    if (const auto* f = seg_.get_field(2)) {
+      return f->val;
+    }
+    return {};
+  }
+
+  std::string_view observation_id() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view value() const {
+    if (const auto* f = seg_.get_field(5)) {
+      return f->val;
+    }
+    return {};
+  }
+
+  std::string_view units() const {
+    if (const auto* f = seg_.get_field(6)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+ private:
+  const Segment& seg_;
+};
+
+class Pr1View {
+ public:
+  explicit Pr1View(const Segment& segment) : seg_(segment) {}
+
+  std::string_view procedure_code() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(1);
+    }
+    return {};
+  }
+
+  std::string_view procedure_description() const {
+    if (const auto* f = seg_.get_field(3)) {
+      return f->get_component(2);
+    }
+    return {};
+  }
+
+  std::string_view procedure_datetime() const {
+    if (const auto* f = seg_.get_field(5)) {
+      return f->val;
+    }
+    return {};
+  }
+
+ private:
+  const Segment& seg_;
+};
+
+struct ParsedMessage {
+  std::string storage;
+  MessageTree tree;
+};
+
+inline bool is_message_start(std::string_view payload, std::size_t pos) {
+  if (pos + 4 > payload.size()) {
+    return false;
+  }
+  if (payload[pos] != 'M' || payload[pos + 1] != 'S' || payload[pos + 2] != 'H' ||
+      payload[pos + 3] != '|') {
+    return false;
+  }
+  return pos == 0 || payload[pos - 1] == '\r';
+}
+
+inline std::vector<std::size_t> find_message_starts(std::string_view payload) {
+  std::vector<std::size_t> starts;
+  if (payload.size() < 4) {
+    return starts;
+  }
+  for (std::size_t i = 0; i + 3 < payload.size(); ++i) {
+    if (is_message_start(payload, i)) {
+      starts.push_back(i);
+    }
+  }
+  return starts;
+}
+
+inline std::vector<std::string_view> split_escaped(std::string_view src, char delimiter,
+                                                   char escape_char = '\\') {
+  std::vector<std::string_view> out;
+  std::size_t start = 0;
+  bool in_escape = false;
+
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    if (src[i] == escape_char) {
+      in_escape = !in_escape;
+      continue;
+    }
+    if (!in_escape && src[i] == delimiter) {
+      out.push_back(src.substr(start, i - start));
+      start = i + 1;
+    }
+  }
+  out.push_back(src.substr(start));
+  return out;
+}
+
+inline Component parse_component(std::string_view token) {
+  Component component;
+  component.val = token;
+  const auto subcomponents = split_escaped(token, '&');
+  if (subcomponents.size() > 1) {
+    component.subcomponents = std::move(subcomponents);
+  }
+  return component;
+}
+
+inline Field parse_field(std::string_view token) {
+  Field field;
+  field.val = token;
+  const auto components = split_escaped(token, '^');
+  if (components.size() > 1) {
+    field.components.reserve(components.size());
+    for (const auto component : components) {
+      field.components.push_back(parse_component(component));
+    }
+  }
+  return field;
+}
+
+inline Segment parse_segment_line(std::string_view line) {
+  Segment segment;
+  if (line.empty()) {
+    return segment;
+  }
+
+  const auto tokens = split_escaped(line, '|');
+  if (tokens.empty()) {
+    return segment;
+  }
+
+  segment.name = tokens[0];
+  if (tokens.size() > 1) {
+    segment.fields.reserve(tokens.size() - 1);
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+      segment.fields.push_back(parse_field(tokens[i]));
+    }
+  }
+  return segment;
+}
+
+inline void parse_message_into_tree(std::string_view message, MessageTree& tree) {
+  std::size_t line_start = 0;
+  while (line_start < message.size()) {
+    const std::size_t line_end = message.find('\r', line_start);
+    const std::size_t end = line_end == std::string_view::npos ? message.size() : line_end;
+    const std::string_view line = message.substr(line_start, end - line_start);
+    if (!line.empty()) {
+      tree.segments.push_back(parse_segment_line(line));
+    }
+
+    if (line_end == std::string_view::npos) {
+      break;
+    }
+    line_start = line_end + 1;
+  }
+}
+
+inline ParsedMessage parse_message(std::string_view message) {
+  ParsedMessage parsed;
+  parsed.storage.assign(message.data(), message.size());
+  parse_message_into_tree(std::string_view(parsed.storage), parsed.tree);
+  return parsed;
+}
+
+inline std::vector<ParsedMessage> parse_batch(std::string_view payload) {
+  std::vector<ParsedMessage> messages;
+  const auto starts = find_message_starts(payload);
+  if (starts.empty()) {
+    return messages;
+  }
+
+  messages.reserve(starts.size());
+  for (std::size_t i = 0; i < starts.size(); ++i) {
+    const std::size_t begin = starts[i];
+    const std::size_t end = (i + 1 < starts.size()) ? starts[i + 1] : payload.size();
+    if (end > begin) {
+      messages.push_back(parse_message(payload.substr(begin, end - begin)));
+    }
+  }
+  return messages;
+}
 
 }  // namespace bench::hl7v2

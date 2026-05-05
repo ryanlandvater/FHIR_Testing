@@ -94,11 +94,11 @@ int main() {
     return 1;
   }
 
-  if (!metrics_are_valid(fastfhir, true)) {
+  if (!metrics_are_valid(fastfhir, false)) {
     std::cerr << "timing conformance failed: FastFHIR metric duration invalid\n";
     return 1;
   }
-  if (!metrics_are_valid(json, true)) {
+  if (!metrics_are_valid(json, false)) {
     std::cerr << "timing conformance failed: JSON metric duration invalid\n";
     return 1;
   }

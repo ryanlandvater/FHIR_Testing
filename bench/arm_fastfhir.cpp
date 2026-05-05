@@ -149,11 +149,16 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
                            return std::vector<BYTE>(32);
                          });
   out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_timer.stop_ns()});
-  out.metrics.push_back(test_2::materialize_placeholder("fastfhir"));
+
+  Timer test2_timer;
+  test2_timer.start();
+  const auto materialized = test_2::materialize(payload_memory);
+  out.metrics.push_back(test_2::materialize_metric("fastfhir", test2_timer.stop_ns()));
+  (void)materialized;
 
   Timer test3_timer;
   test3_timer.start();
-  const auto query_summary = test_3::query(payload_memory);
+  const auto query_summary = test_3::query(payload_memory.view());
   out.metrics.push_back({"fastfhir", Stage::Test3Query, test3_timer.stop_ns()});
   out.queried_value = test_3::format_query_summary(query_summary);
   return out;

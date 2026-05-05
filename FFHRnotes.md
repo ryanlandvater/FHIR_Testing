@@ -138,23 +138,31 @@ Fix needed upstream:
 
 ### 7) Compile-Pipeline Mismatch Causes Runtime Ingest Failure (Hard Blocker)
 
-Observed and reproduced in this consumer:
+Confirmed diagnosis in this consumer (2026-05-05):
 
-- The same source file (`FF_Ingest.cpp`) and same input JSON can produce opposite runtime behavior depending on compile profile.
-- Compiling with consumer-style flags/includes produced runtime ingest failure:
-  - `simdjson Exception: CAPACITY: This parser can't support a document that big`
-- Compiling with FastFHIR build-style profile succeeded on the same file and produced valid `.ffhr` output.
+- `ff_ingest` and `bench_harness` loaded the same `libfastfhir_ingestor.dylib`, but behavior diverged by caller build profile.
+- `bench_harness` in Debug produced repeated root-path failures at parser allocation:
+  - `simdjson allocate failed before root parse: CAPACITY...`
+  - with sane request sizes (for example ~1.09 MB, ~2.91 MB).
+- Rebuilding `bench_harness` in Release (`-O3 -DNDEBUG`) removed CAPACITY skips for patient files and loaded the expected patient set.
 
-Key deltas identified during repro:
+What did *not* fix it during validation:
 
-- Build mode/flags drift mattered (`Release` profile with `-O3 -DNDEBUG -fPIE` vs non-Release defaults).
-- Include path provenance mattered (FastFHIR source/generated headers + bundled simdjson include roots vs consumer-local include assumptions).
-- Required compile definitions were not reliably propagated to consumers unless manually duplicated.
+- Forcing per-file compile flags on `synthea_fixture.cpp` alone did not eliminate CAPACITY failures in Debug benchmark builds.
+- Forcing `target_compile_options(bench_harness PRIVATE -O3 -DNDEBUG -fPIE)` while still configuring the project as Debug did not eliminate CAPACITY failures.
+
+What consistently reproduced success:
+
+- Building and running benchmark in Release profile end-to-end (same profile class as the working `ff_ingest` tool build).
+
+Implication:
+
+- The failure mode is not "bad file size passed in"; it is compile-profile mismatch at the install boundary (caller/toolchain parity issue).
 
 Impact:
 
-- Public integration appears successful at compile/link time but can fail at runtime on valid clinical payloads.
-- This creates a high-risk false-positive integration state for downstream consumers.
+- Integration can appear compile/link-correct but fail at runtime on valid payloads.
+- Downstream consumers can misdiagnose this as data-size or parser-limit failure.
 
 Fix needed upstream:
 
@@ -162,12 +170,9 @@ Fix needed upstream:
   - required include directories,
   - required compile definitions,
   - required transitive dependencies,
-  - and any profile-sensitive options that affect ABI/runtime behavior.
-- Ensure installed target usage reproduces the same runtime behavior as FastFHIR's own tools.
-- Add CI parity test:
-  - Build a tiny external consumer against installed targets only.
-  - Compile and run ingest on a representative large JSON bundle.
-  - Assert runtime success and stable parsed-count semantics.
+  - and profile-sensitive options that affect runtime behavior.
+- Ensure installed target usage reproduces the same runtime behavior as FastFHIR tools.
+- Add CI parity test for an external installed-target consumer on representative Synthea bundles.
 
 ### 8) Public Install Contract Must Not Require Source-Tree Coupling
 
@@ -197,6 +202,41 @@ These are not optional polish items for this consumer. They are integration bloc
 - Ingestor surface/link parity,
 - compile-profile/runtime parity,
 - and install-contract self-sufficiency.
+
+### 10) CAPACITY Parser Theory (Superseded During Triage)
+
+Observed during early triage:
+
+- Ingest can fail with:
+  - `simdjson Exception: CAPACITY: This parser can't support a document that big`
+- Failures were observed on realistic Synthea files around 1.0 MB to 2.8 MB, not only very large inputs.
+- The skip pattern appears during bundle pre-ingest routing/chunking and can affect many files in one run.
+
+Why this matters:
+
+- This creates a misleading "file too big" signal for payloads that are operationally normal.
+- External consumers may wrongly attribute failures to data quality or machine limits.
+- Benchmark and production ingest reliability are both impacted.
+
+Why this is marked superseded:
+
+- After profile-parity validation, the dominant reproducible factor was Debug-vs-Release consumer build mismatch, not raw payload size itself.
+
+Still-worthwhile hardening:
+
+- `simdjson::ondemand::parser` instances used in ingest pre-processing paths may rely on default/internal capacity instead of allocating to payload size before `iterate(...)`.
+- Any parser handling full payload or per-entry chunks should allocate explicitly against the current input size.
+
+Fix needed upstream:
+
+- Audit all ingest parser callsites and explicitly allocate parser capacity for each payload/chunk before parse.
+- Keep capacity logic consistent across:
+  - root payload parse,
+  - bundle entry chunk extraction,
+  - producer-side chunk scans,
+  - and any additional pre-digest paths.
+- Add regression tests that ingest multiple files in the ~1 MB to ~5 MB range and assert no CAPACITY failure.
+- Add install-surface CI that runs this test from an external consumer target linked only to installed artifacts.
 
 Upstream should treat these as release-gating for external package quality.
 

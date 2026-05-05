@@ -36,7 +36,12 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   }
 
   out.metrics.push_back({"hl7v2", Stage::Test1Serialize, test1_timer.stop_ns()});
-  out.metrics.push_back(test_2::materialize_placeholder("hl7v2"));
+
+  Timer test2_timer;
+  test2_timer.start();
+  const auto materialized = test_2::materialize(payload);
+  out.metrics.push_back(test_2::materialize_metric("hl7v2", test2_timer.stop_ns()));
+  (void)materialized;
 
   Timer test3_timer;
   test3_timer.start();

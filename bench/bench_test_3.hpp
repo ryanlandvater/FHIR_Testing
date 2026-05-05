@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bench_test_2.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -210,10 +212,10 @@ inline std::optional<detail::ValueKind> value_kind_from_choice_tag(RECOVERY_TAG 
   }
 }
 
-static inline QuerySummary query(const FastFHIR::Memory& payload_memory) {
+static inline QuerySummary query(std::string_view payload) {
   detail::QueryAccumulator acc;
 
-  FastFHIR::Parser parser(payload_memory);
+  FastFHIR::Parser parser(payload.data(), payload.size());
   const auto root_node = parser.root();
   if (!(root_node && root_node.is<FastFHIR::RESOURCETYPE::BUNDLE>())) {
     return acc.finalize();
@@ -300,8 +302,8 @@ static inline QuerySummary query(const FastFHIR::Memory& payload_memory) {
 static inline QuerySummary query(const std::string& payload) {
   detail::QueryAccumulator acc;
 
-  simdjson::dom::parser parser;
-  auto doc = parser.parse(payload);
+  simdjson::dom::parser json_parser;
+  auto doc = json_parser.parse(payload);
   if (doc.error()) {
     return acc.finalize();
   }
@@ -429,6 +431,26 @@ static inline QuerySummary query(const std::string& payload) {
 #define TEST3_HL7_FIELD_VALUE 6
 #define TEST3_HL7_FIELD_BIRTHDATE 8
 
+// Returns the one_based_index-th pipe-delimited field of a raw HL7 segment line
+// (1 = segment ID, 2 = first data field, etc.).
+inline std::string_view segment_field(std::string_view seg, std::size_t one_based_index) {
+  std::size_t field = 1;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i <= seg.size(); ++i) {
+    if (i == seg.size() || seg[i] == '|') {
+      if (field == one_based_index) {
+        return seg.substr(start, i - start);
+      }
+      ++field;
+      start = i + 1;
+      if (field > one_based_index) {
+        break;
+      }
+    }
+  }
+  return {};
+}
+
 static inline QuerySummary query(const std::string& payload) {
   QuerySummary summary;
 
@@ -446,18 +468,19 @@ static inline QuerySummary query(const std::string& payload) {
   while (line_start < payload.size()) {
     const auto line_end = payload.find('\r', line_start);
     const auto end = line_end == std::string::npos ? payload.size() : line_end;
-    const std::string_view segment(payload.data() + line_start, end - line_start);
+    const std::string_view seg(payload.data() + line_start, end - line_start);
 
-    if (segment.size() >= 4 && segment.substr(0, 4) == TEST3_HL7_PATIENT_SEG) {
+    if (seg.size() >= 4 && seg.substr(0, 4) == TEST3_HL7_PATIENT_SEG) {
       ++patient_count;
       if (birthdate.empty()) {
-        birthdate = detail::segment_field(segment, TEST3_HL7_FIELD_BIRTHDATE);
+        const auto bd = segment_field(seg, TEST3_HL7_FIELD_BIRTHDATE);
+        birthdate.assign(bd.data(), bd.size());
       }
-    } else if (segment.size() >= 4 && segment.substr(0, 4) == TEST3_HL7_OBS_SEG) {
+    } else if (seg.size() >= 4 && seg.substr(0, 4) == TEST3_HL7_OBS_SEG) {
       ++observation_count;
-      const auto id = detail::segment_field(segment, TEST3_HL7_FIELD_CODE);
-      const auto value_type = detail::segment_field(segment, TEST3_HL7_FIELD_VALUE_TYPE);
-      const auto value = detail::segment_field(segment, TEST3_HL7_FIELD_VALUE);
+      const auto id         = segment_field(seg, TEST3_HL7_FIELD_CODE);
+      const auto value_type = segment_field(seg, TEST3_HL7_FIELD_VALUE_TYPE);
+      const auto value      = segment_field(seg, TEST3_HL7_FIELD_VALUE);
       if (id.rfind("2085-9", 0) == 0) {
         ++cholesterol_matches;
       }
