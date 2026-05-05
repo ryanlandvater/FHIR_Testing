@@ -174,6 +174,24 @@ Fix needed upstream:
 - Ensure installed target usage reproduces the same runtime behavior as FastFHIR tools.
 - Add CI parity test for an external installed-target consumer on representative Synthea bundles.
 
+Consumer requirements to avoid this failure mode during development:
+
+- Treat profile parity as mandatory for ingest validation:
+  - Debug consumer must validate against Debug-built FastFHIR artifacts.
+  - Release/RelWithDebInfo consumer must validate against Release-class FastFHIR artifacts.
+- Do not treat Debug-consumer + Release-library ingest behavior as authoritative.
+- Keep two lanes in CI/local scripts:
+  - logic lane (Debug allowed),
+  - ingest/parity lane (Release or RelWithDebInfo required).
+- Require ingest/parity lane pass before publishing benchmark conclusions.
+
+Strict enforcement options for distributed CMake package config:
+
+- Record FastFHIR build profile in installed package metadata (for example `FastFHIR_BUILD_PROFILE=Debug|Release|RelWithDebInfo`).
+- In exported `FastFHIRConfig.cmake`, compare consumer build profile to package profile and fail configuration on mismatch by default.
+- Allow explicit override only via opt-in escape hatch (for example `-DFASTFHIR_ALLOW_PROFILE_MISMATCH=ON`) and print a high-visibility warning.
+- For single-config generators, check `CMAKE_BUILD_TYPE`; for multi-config generators, check `CMAKE_CONFIGURATION_TYPES` and enforce at generate/build time via generator expressions or per-config imported locations.
+
 ### 8) Public Install Contract Must Not Require Source-Tree Coupling
 
 Observed integration pressure:
