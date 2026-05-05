@@ -140,6 +140,7 @@ inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
 ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture);
 ArmRunResult run_json_bundle(const BundleBenchFixture& fixture);
 ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture);
+ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture);
 
 // ---------------------------------------------------------------------------
 // Cross-arm result validation

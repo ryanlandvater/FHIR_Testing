@@ -1,0 +1,46 @@
+diff --git a/cc/google/fhir/BUILD b/cc/google/fhir/BUILD
+index 99fffe63..c734be02 100644
+--- a/cc/google/fhir/BUILD
++++ b/cc/google/fhir/BUILD
+@@ -1,4 +1,5 @@
+ load("@rules_cc//cc:cc_library.bzl", "cc_library")
++load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+ load("@rules_cc//cc:cc_test.bzl", "cc_test")
+ 
+ licenses(["notice"])
+@@ -12,6 +13,35 @@ package_group(
+     ],
+ )
+ 
++cc_library(
++    name = "reference",
++    visibility = ["//visibility:public"],
++    deps = [":references"],
++)
++
++cc_shared_library(
++    name = "libgoogle_fhir_bundled",
++    visibility = ["//visibility:public"],
++    deps = [
++        ":annotations",
++        ":core_resource_registry",
++        ":error_reporter",
++        ":json_format",
++        ":primitive_handler",
++        ":reference",
++        ":resource_validation",
++        "//cc/google/fhir/json:fhir_json",
++        "//cc/google/fhir/r4:json_format",
++        "//proto/google/fhir/proto:annotations_cc_proto",
++        "//proto/google/fhir/proto/r4/core:codes_cc_proto",
++        "//proto/google/fhir/proto/r4/core:datatypes_cc_proto",
++        "//proto/google/fhir/proto/r4/core:valuesets_cc_proto",
++        "//proto/google/fhir/proto/r4/core/resources:bundle_and_contained_resource_cc_proto",
++        "//proto/google/fhir/proto/r4/core/resources:observation_cc_proto",
++        "//proto/google/fhir/proto/r4/core/resources:patient_cc_proto",
++    ],
++)
++
+ cc_library(
+     name = "codes",
+     srcs = ["codes.cc"],

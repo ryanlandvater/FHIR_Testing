@@ -33,10 +33,13 @@ GOOGLE_FHIR_BAZEL_VERSION="${GOOGLE_FHIR_BAZEL_VERSION:-7.7.1}"
 GOOGLE_FHIR_BAZELISK_VERSION="${GOOGLE_FHIR_BAZELISK_VERSION:-v1.22.1}"
 GOOGLE_FHIR_OUTPUT_BASE="${GOOGLE_FHIR_BUILD}/output-base"
 GOOGLE_FHIR_REPOSITORY_CACHE="${GOOGLE_FHIR_BUILD}/repository-cache"
-GOOGLE_FHIR_CLEAN_ARTIFACTS="${GOOGLE_FHIR_CLEAN_ARTIFACTS:-1}"
+GOOGLE_FHIR_CLEAN_ARTIFACTS="${GOOGLE_FHIR_CLEAN_ARTIFACTS:-0}"
 TEST_GOOGLE_FHIR_COMPONENTS="${TEST_GOOGLE_FHIR_COMPONENTS:-1}"
 TEST_BENCH_COMPONENTS="${TEST_BENCH_COMPONENTS:-1}"
 GOOGLE_FHIR_USE_SYSTEM_ZLIB="${GOOGLE_FHIR_USE_SYSTEM_ZLIB:-1}"
+GOOGLE_FHIR_APPLY_PATCH="${GOOGLE_FHIR_APPLY_PATCH:-1}"
+GOOGLE_FHIR_PATCH_FILE="${GOOGLE_FHIR_PATCH_FILE:-${REPO_ROOT}/patches/google-fhir-benchmark.patch}"
+GOOGLE_FHIR_BUILD_STATIC_CLOSURE="${GOOGLE_FHIR_BUILD_STATIC_CLOSURE:-1}"
 HL7PARSER_ENABLE="${HL7PARSER_ENABLE:-1}"
 HL7PARSER_DIR="${EXTERNAL_DIR}/hl7parser"
 HL7PARSER_DEFAULT_REPO="${HL7PARSER_DEFAULT_REPO:-https://github.com/jcomellas/hl7parser.git}"
@@ -289,6 +292,31 @@ ensure_google_fhir_java() {
   return 1
 }
 
+ensure_google_fhir_patch_applied() {
+  if [[ "${GOOGLE_FHIR_APPLY_PATCH}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${GOOGLE_FHIR_PATCH_FILE}" ]]; then
+    echo -e "${YELLOW}Google FHIR patch file not found at ${GOOGLE_FHIR_PATCH_FILE}; continuing without patch.${NC}"
+    return 0
+  fi
+
+  pushd "${GOOGLE_FHIR_DIR}" >/dev/null
+  if git apply --check "${GOOGLE_FHIR_PATCH_FILE}" >/dev/null 2>&1; then
+    echo -e "${YELLOW}Applying Google FHIR benchmark patch: ${GOOGLE_FHIR_PATCH_FILE}${NC}"
+    git apply "${GOOGLE_FHIR_PATCH_FILE}"
+  elif git apply -R --check "${GOOGLE_FHIR_PATCH_FILE}" >/dev/null 2>&1; then
+    echo -e "${GREEN}Google FHIR benchmark patch already applied.${NC}"
+  else
+    echo -e "${RED}Google FHIR patch cannot be applied cleanly: ${GOOGLE_FHIR_PATCH_FILE}${NC}"
+    echo -e "${RED}Upstream google/fhir BUILD layout likely changed. Update the patch file in patches/.${NC}"
+    popd >/dev/null
+    exit 1
+  fi
+  popd >/dev/null
+}
+
 # ============================================================================
 # Step 1: Resolve FastFHIR source
 # ============================================================================
@@ -390,14 +418,21 @@ if [[ "${GOOGLE_FHIR_ENABLE}" == "1" ]]; then
     exit 1
   fi
 
+  ensure_google_fhir_patch_applied
+
+  GOOGLE_FHIR_PATCH_FINGERPRINT="patch=none"
+  if [[ "${GOOGLE_FHIR_APPLY_PATCH}" == "1" && -f "${GOOGLE_FHIR_PATCH_FILE}" ]]; then
+    GOOGLE_FHIR_PATCH_FINGERPRINT="patch=$(shasum -a 256 "${GOOGLE_FHIR_PATCH_FILE}" | awk '{print $1}')"
+  fi
+
   if [[ -d "${GOOGLE_FHIR_DIR}/.git" ]]; then
     GOOGLE_FHIR_SOURCE_REV="$(git -C "${GOOGLE_FHIR_DIR}" rev-parse HEAD)"
   else
     GOOGLE_FHIR_SOURCE_REV="nogit-$(stat -f %m "${GOOGLE_FHIR_DIR}")"
   fi
 
-  GOOGLE_FHIR_TARGET_FINGERPRINT="//cc/google/fhir:json_format //cc/google/fhir/r4:json_format //proto/google/fhir/proto/r4/core/resources:patient_cc_proto"
-  GOOGLE_FHIR_BUILD_FINGERPRINT="rev=${GOOGLE_FHIR_SOURCE_REV};bazel=${GOOGLE_FHIR_BAZEL_VERSION};targets=${GOOGLE_FHIR_TARGET_FINGERPRINT}"
+  GOOGLE_FHIR_TARGET_FINGERPRINT="//cc/google/fhir:json_format //cc/google/fhir/r4:json_format //cc/google/fhir:libgoogle_fhir_bundled //proto/google/fhir/proto/r4/core/resources:patient_cc_proto @com_google_protobuf//:protobuf @com_google_absl//absl/...:all"
+  GOOGLE_FHIR_BUILD_FINGERPRINT="rev=${GOOGLE_FHIR_SOURCE_REV};bazel=${GOOGLE_FHIR_BAZEL_VERSION};targets=${GOOGLE_FHIR_TARGET_FINGERPRINT};${GOOGLE_FHIR_PATCH_FINGERPRINT};static_closure=${GOOGLE_FHIR_BUILD_STATIC_CLOSURE}"
 
   NEEDS_GOOGLE_FHIR_BUILD=1
   if [[ "${FORCE_GOOGLE_FHIR_REBUILD}" == "1" ]]; then
@@ -519,8 +554,15 @@ if [[ "${GOOGLE_FHIR_ENABLE}" == "1" ]]; then
   GOOGLE_FHIR_TARGETS=(
     "//cc/google/fhir:json_format"
     "//cc/google/fhir/r4:json_format"
+    "//cc/google/fhir:libgoogle_fhir_bundled"
     "//proto/google/fhir/proto/r4/core/resources:patient_cc_proto"
   )
+  if [[ "${GOOGLE_FHIR_BUILD_STATIC_CLOSURE}" == "1" ]]; then
+    GOOGLE_FHIR_TARGETS+=(
+      "@com_google_protobuf//:protobuf"
+      "@com_google_absl//absl/...:all"
+    )
+  fi
 
   if [[ "${NEEDS_GOOGLE_FHIR_BUILD}" == "1" ]]; then
     mkdir -p "${GOOGLE_FHIR_BUILD}" "${GOOGLE_FHIR_OUTPUT_BASE}" "${GOOGLE_FHIR_REPOSITORY_CACHE}"
@@ -559,6 +601,9 @@ EOF
         --output_base="${GOOGLE_FHIR_OUTPUT_BASE}" \
         build "${target}" \
         "${GOOGLE_FHIR_BAZEL_FLAGS[@]}" \
+        --compilation_mode=fastbuild \
+        --cxxopt=-mmacosx-version-min=15.0 \
+        --conlyopt=-mmacosx-version-min=15.0 \
         --jobs="${THREADS}"
     done
 

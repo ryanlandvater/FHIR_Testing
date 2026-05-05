@@ -241,11 +241,13 @@ int main(int argc, char** argv) {
           (void)bench::run_fastfhir_bundle(bundle);
           (void)bench::run_json_bundle(bundle);
           (void)bench::run_hl7v2_bundle(bundle);
+          (void)bench::run_google_fhir_bundle(bundle);
         }
 
         const auto ff = bench::run_fastfhir_bundle(bundle);
         const auto jf = bench::run_json_bundle(bundle);
         const auto h2 = bench::run_hl7v2_bundle(bundle);
+        const auto gf = bench::run_google_fhir_bundle(bundle);
 
         if (!bench::validate_results(ff, jf)) {
           validation_failed = true;
@@ -259,10 +261,11 @@ int main(int argc, char** argv) {
         }
 
         std::vector<bench::MetricEvent> run_metrics;
-        run_metrics.reserve(ff.metrics.size() + jf.metrics.size() + h2.metrics.size());
+        run_metrics.reserve(ff.metrics.size() + jf.metrics.size() + h2.metrics.size() + gf.metrics.size());
         run_metrics.insert(run_metrics.end(), ff.metrics.begin(), ff.metrics.end());
         run_metrics.insert(run_metrics.end(), jf.metrics.begin(), jf.metrics.end());
         run_metrics.insert(run_metrics.end(), h2.metrics.begin(), h2.metrics.end());
+        run_metrics.insert(run_metrics.end(), gf.metrics.begin(), gf.metrics.end());
 
         for (const auto& m : run_metrics) {
           std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_ns

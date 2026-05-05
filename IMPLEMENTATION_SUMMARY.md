@@ -4,7 +4,7 @@
 
 This document summarizes the implementation, execution, and validation of a comparative benchmark between **FastFHIR**, **nlohmann::json**, **Google FHIR**, and **HL7v2** on realistic FHIR data.
 
-**Status**: 🚧 **In Progress: 4-Arm Benchmark Scaffolding**
+**Status**: 🟡 **In Progress: Google FHIR Stage 1 Live; Stages 2/3 Stubbed**
 
 ---
 
@@ -47,17 +47,46 @@ This document summarizes the implementation, execution, and validation of a comp
 - **JSON Arm**:
   - Implemented in `bench/arm_json_fhir.cpp`.
 - **Google FHIR Arm**:
-  - `bench/arm_google_fhir.cpp` is currently a proxy smoke implementation and does not yet benchmark the real Google protobuf `json_format` path.
-  - Build-attempt chronology (macOS):
-    - Attempt 1 failed during Bazel `rules_jvm_external` fetch with TLS handshake errors to Maven Central while running on legacy Oracle JDK 11.0.1.
-    - Attempt 2 switched to OpenJDK 17, which resolved the Maven TLS fetch failures.
-    - Attempt 3 progressed further but failed compiling external `@zlib` (`zutil.c` / `fdopen` macro expansion) under Xcode/Clang on macOS.
-  - Cleanup behavior was verified after each attempt: only `.external/google-fhir` source checkout retained; Bazel output artifacts were removed.
+  - **Stage 1 (Serialize) is live** with real protobuf message construction in `bench/arm_google_fhir.cpp`.
+  - Stage 2 (Materialize) and Stage 3 (Query) remain intentionally stubbed at 0 pending future work.
+  - **Build approach**: `DYNAMIC_BUNDLED` linkage via a single Bazel-built dylib (`liblibgoogle_fhir_bundled.dylib`, ~65 MB).  Static archive linkage was attempted first but abandoned because linking real protobuf Stage 1 code caused hundreds of undefined symbols from absl/protobuf/utf8_range that could not be closed from the Bazel fastbuild output tree.
+  - **Build chronology (macOS)**:
+    - Attempt 1 (static): Failed during Bazel `rules_jvm_external` fetch — TLS handshake errors to Maven Central on legacy Oracle JDK 11.0.1.
+    - Attempt 2 (static): Switched to OpenJDK 17, resolved Maven TLS failures.
+    - Attempt 3 (static): Progressed further but failed compiling external `@zlib` (`zutil.c` / `fdopen` macro expansion) under Xcode/Clang.
+    - Attempt 4 (static, protobuf Stage 1 added): Static link closure exploded — hundreds of undefined symbols from absl/protobuf/utf8_range not present in the manually enumerated `.a` list.
+    - **Resolution**: Switched to `DYNAMIC_BUNDLED` mode.  Built `//cc/google/fhir:libgoogle_fhir_bundled` via `generate_repo.sh` using Bazelisk.  This bundles all of google-fhir + protobuf + absl into a single dylib that resolves at runtime.
+  - **Runtime dylib loading**: The Bazel-built dylib has a relative install name (e.g. `bazel-out/darwin_arm64-fastbuild/bin/cc/google/fhir/liblibgoogle_fhir_bundled.dylib`). `bench/CMakeLists.txt` post-build copies the dylib beside `bench_harness` and rewrites the load command to `@rpath/<name>` via `install_name_tool`. Two rpaths are appended: the original Bazel output dir (for build-tree runs) and `@loader_path` (for beside-binary resolution).  Both use `set_property APPEND` — not `set_target_properties` — to avoid overwriting previously added rpaths.
+  - **macOS deployment target**: `CMakeLists.txt` sets `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` to match FastFHIR's compiled dylib minos. `generate_repo.sh` passes `--cxxopt=-mmacosx-version-min=15.0 --conlyopt=-mmacosx-version-min=15.0` to Bazel to minimize version-mismatch linker warnings.  The Bazel-built dylib still reports SDK 26.2 (Xcode's current SDK) in its load commands — this is cosmetic only.
+  - **Runtime command**: `DYLD_LIBRARY_PATH=local/lib ./build/bench/bench_harness ...`
 - **HL7v2 Arm**:
   - Migrated from smoke loop skeleton to parser-backed implementation using `jcomellas/hl7parser` with explicit Stage 1/2/3 metric boundaries.
   - Added deterministic `PatientData` parity snapshots carried in repeated `ZPV` segments so Stage 3 can re-read the full patient surface without a JSON conversion bridge.
   - Standard HL7 coverage remains readable via `PID`/`PD1`/`NK1`, while non-standard or deeply nested FHIR-native fields are preserved in the parity snapshot.
   - Current runtime verification is still blocked by the existing FastFHIR anonymous mmap failure in fixture ingestion/conformance runs (`POSIX anonymous mmap failed: Invalid argument`).
+
+---
+
+### Phase 3b: Google FHIR Arm — Implementation Details
+**Objective**: Implement real protobuf message construction for Patient and Observation in Stage 1.
+
+**What `arm_google_fhir.cpp` does (Stage 1)**:
+- Iterates each `BundleItem` in the fixture.
+- Constructs a `google::fhir::r4::core::Patient` proto: sets `id`, `active`, `gender`, `birth_date` (epoch microseconds, UTC, DAY precision), and the first HumanName text.
+- Constructs a `google::fhir::r4::core::Observation` proto per observation: sets `id`, `status`, `code.text`, and a `subject.patientId` reference (stripped of `"Patient/"` prefix).
+- Serializes each message with `SerializeToString` and concatenates the binary protobuf bytes into a payload string.
+- Records total elapsed nanoseconds as `Stage::Test1Serialize`.
+
+**Helper functions**:
+- `parse_birthdate_us(string_view)` — parses `"YYYY-MM-DD"` using `timegm` → microseconds since epoch.
+- `map_gender(AdministrativeGender)` → `AdministrativeGenderCode_Value`.
+- `map_observation_status(ObservationStatus)` → `ObservationStatusCode_Value`.
+
+**Include paths**: `arm_google_fhir.cpp` includes from `proto/google/fhir/proto/r4/core/...` which resolve against the Bazel fastbuild output tree (set as a `target_include_directories` in `bench/CMakeLists.txt`).  Protobuf and absl headers resolve from the Bazel output-base external directories.
+
+**What remains stubbed**:
+- Stage 2 (Materialize): returns 0 — protobuf-to-struct materialization not yet implemented.
+- Stage 3 (Query): returns 0 — protobuf-native field access traversal not yet implemented.
 
 **Key Insight**: All arms follow an identical stage structure, ensuring direct latency comparison.
 
@@ -71,6 +100,12 @@ This document summarizes the implementation, execution, and validation of a comp
 | Problem | Root Cause | Solution |
 |---------|-----------|----------|
 | Missing headers (FF_Bundle.hpp) | Generated headers not installed by CMake | Manually copied from build/generated_src/ to build/include/ |
+| Google FHIR static link closure | Hundreds of undefined absl/protobuf symbols | Switched to DYNAMIC_BUNDLED (single bundled dylib) |
+| Dylib not found at runtime | Bazel-built dylib has relative install name | CMake post-build: copy dylib + `install_name_tool` rewrite to `@rpath/<name>` |
+| rpath overwrite | `set_target_properties(PROPERTIES BUILD_RPATH ...)` cleared prior rpaths | Changed final rpath line to `set_property APPEND PROPERTY BUILD_RPATH` |
+| macOS deployment target mismatch warnings | CMake defaulted to older target; Bazel unset | Set `CMAKE_OSX_DEPLOYMENT_TARGET=15.0` in root CMakeLists.txt; added `--cxxopt=-mmacosx-version-min=15.0` to Bazel build loop in `generate_repo.sh` |
+| Bazel cache permission denied on `rm -rf` | `.class` files under `rules_java_builtin` had restricted permissions | `find .external/google-fhir-build -name "*.class" -exec chmod u+w {} \;` before clean |
+├── arm_google_fhir.cpp                  # Google FHIR protobuf arm (Stage 1 live; 2/3 stubbed)
 | Undefined types (ObservationData, BundleData) | Headers not included in harness | Added `#include <FF_Bundle.hpp>` and `#include <FF_Observation.hpp>` |
 | Ingestor linker errors | Symbol not exported in libfastfhir.dylib | Pivoted to struct-based Builder (fully public API) |
 | Directory detection | Synthea files at datasets/synthea/, not datasets/synthea/fhir/ | Added fallback logic in main.cpp |
