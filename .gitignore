@@ -36,6 +36,7 @@ datasets/*
 logs/
 profiles/
 metrics/
+notebooks/results/
 *.log
 *.sqlite
 *.db
