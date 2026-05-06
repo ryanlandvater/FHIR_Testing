@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <variant>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,7 @@ enum class Stage {
   Test1Serialize,
   Test2Materialize,
   Test3Query,
+  Test4Enrich,
 
   // Temporary compatibility aliases during the stage -> test migration.
   Stage1Serialize = Test1Serialize,
@@ -50,6 +52,8 @@ struct ArmRunResult {
   std::vector<MetricEvent> metrics;
   std::string queried_value;
   std::string reconstructed_bundle_json;
+  std::variant<std::monostate, FastFHIR::Memory, std::string> enriched_stream;
+  std::string enrich_metrics_summary;
 };
 
 class Timer {
@@ -77,6 +81,8 @@ inline std::string to_string(Stage s) {
       return "test_2_materialize";
     case Stage::Test3Query:
       return "test_3_query";
+    case Stage::Test4Enrich:
+      return "test_4_enrich";
   }
   return "unknown";
 }
@@ -107,12 +113,18 @@ struct BundleBenchFixture {
   int64_t fastfhir_vma_bytes = 0;
 };
 
+struct EnrichmentObservationFixture {
+  FastFHIR::Memory memory;
+  ObservationData observation;
+};
+
 namespace detail {
 void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
                               BundlePatient& bundle_patient);
 }
 
 BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path);
+EnrichmentObservationFixture load_enrichment_observation_from_json(const std::filesystem::path& json_path);
 
 inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
   BundlePatient dst{};

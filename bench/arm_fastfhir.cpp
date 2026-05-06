@@ -13,11 +13,18 @@
 #include "bench_test_1.hpp"
 #include "bench_test_2.hpp"
 #include "bench_test_3.hpp"
+#include "bench_test_4.hpp"
 #undef ARM_FASTFHIR
 
 
 namespace bench {
 namespace {
+
+const ObservationData& enrichment_observation_fixture() {
+  static const EnrichmentObservationFixture fixture =
+      load_enrichment_observation_from_json("bench/enrich.json");
+  return fixture.observation;
+}
 
 #if defined(__APPLE__)
 struct EntryBuildContext {
@@ -161,6 +168,11 @@ ArmRunResult run_fastfhir_bundle(const BundleBenchFixture& fixture) {
   const auto query_summary = test_3::query(payload_memory.view());
   out.metrics.push_back({"fastfhir", Stage::Test3Query, test3_timer.stop_ns()});
   out.queried_value = test_3::format_query_summary(query_summary);
+
+  auto enrich_result = test_4::enrich(payload_memory, enrichment_observation_fixture());
+  out.metrics.push_back(test_4::enrich_metric("fastfhir", enrich_result.summary.duration_ns));
+  out.enriched_stream = std::move(enrich_result.enriched_stream);
+  out.enrich_metrics_summary = test_4::format_enrich_summary(enrich_result.summary);
   return out;
 }
 
