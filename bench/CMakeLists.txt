@@ -319,6 +319,7 @@ add_executable(bench_timing_conformance
   timing_conformance_test.cpp
   arm_fastfhir.cpp
   arm_json_fhir.cpp
+  synthea_fixture.cpp
 )
 target_link_libraries(bench_timing_conformance PRIVATE bench_core)
 if(BENCH_ASSIGN_FORCE_FULL_CAST)
