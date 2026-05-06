@@ -21,25 +21,6 @@ const ObservationData& enrichment_observation_fixture() {
   return fixture.observation;
 }
 
-test_4::EnrichResult<std::string> enrich_hl7v2(const std::string& payload,
-                                               const ObservationData& enrichment_observation) {
-  Timer timer;
-  timer.start();
-
-  hl7v2::OruR01Message message;
-  assign::assign_observation(enrichment_observation, message);
-
-  std::string enriched_stream = payload;
-  enriched_stream += message.dump();
-
-  test_4::EnrichMetricsSummary summary;
-  summary.source_bytes = payload.size();
-  summary.enriched_bytes = enriched_stream.size();
-  summary.appended_observations = 1;
-  summary.duration_ns = timer.stop_ns();
-  return test_4::EnrichResult<std::string>{std::move(enriched_stream), summary};
-}
-
 }  // namespace
 
 ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
@@ -77,7 +58,7 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   out.queried_value = test_3::format_query_summary(query_summary);
   out.reconstructed_bundle_json = payload;
 
-  auto enrich_result = enrich_hl7v2(payload, enrichment_observation_fixture());
+  auto enrich_result = test_4::BENCH_TEST4_ENRICH_FN(payload, enrichment_observation_fixture());
   out.metrics.push_back(test_4::enrich_metric("hl7v2", enrich_result.summary.duration_ns));
   out.enriched_stream = std::move(enrich_result.enriched_stream);
   out.enrich_metrics_summary = test_4::format_enrich_summary(enrich_result.summary);

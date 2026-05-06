@@ -9,8 +9,17 @@
 
 #if defined(ARM_FASTFHIR)
 #include <FF_Bundle.hpp>
+#define BENCH_TEST4_ENRICH_FN enrich_fastfhir
 #elif defined(ARM_JSON)
 #include <nlohmann/json.hpp>
+#define BENCH_TEST4_ENRICH_FN enrich_json
+#elif defined(ARM_HL7V2)
+#include "hl7v2_message.hpp"
+#define BENCH_TEST4_ENRICH_FN enrich_hl7v2
+#elif defined(ARM_GOOGLE_FHIR)
+#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
+#define BENCH_TEST4_ENRICH_FN enrich_google_fhir
 #endif
 
 #include "bench_test_1.hpp"
@@ -45,8 +54,8 @@ inline MetricEvent enrich_metric(std::string_view arm, std::int64_t duration_ns)
 
 using StreamType = FastFHIR::Memory;
 
-inline EnrichResult<StreamType> enrich(const StreamType& payload,
-                                       const ObservationData& enrichment_observation) {
+inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
+                                                const ObservationData& enrichment_observation) {
   StreamType enriched_stream = payload;
   FastFHIR::Builder builder(enriched_stream, FHIR_VERSION_R5);
 
@@ -83,8 +92,8 @@ inline EnrichResult<StreamType> enrich(const StreamType& payload,
 
 using StreamType = std::string;
 
-inline EnrichResult<StreamType> enrich(const StreamType& payload,
-                                       const ObservationData& enrichment_observation) {
+inline EnrichResult<StreamType> enrich_json(const StreamType& payload,
+                                            const ObservationData& enrichment_observation) {
   Timer timer;
   timer.start();
 
@@ -98,6 +107,106 @@ inline EnrichResult<StreamType> enrich(const StreamType& payload,
   bundle["entry"].push_back(nlohmann::json{{"resource", std::move(observation)}});
 
   StreamType enriched_stream = bundle.dump();
+
+  EnrichMetricsSummary summary;
+  summary.source_bytes = payload.size();
+  summary.enriched_bytes = enriched_stream.size();
+  summary.appended_observations = 1;
+  summary.duration_ns = timer.stop_ns();
+  return EnrichResult<StreamType>{std::move(enriched_stream), summary};
+}
+
+#elif defined(ARM_HL7V2)
+
+using StreamType = std::string;
+
+inline EnrichResult<StreamType> enrich_hl7v2(const StreamType& payload,
+                                             const ObservationData& enrichment_observation) {
+  Timer timer;
+  timer.start();
+
+  hl7v2::OruR01Message message;
+  assign::assign_observation(enrichment_observation, message);
+
+  StreamType enriched_stream = payload;
+  enriched_stream += message.dump();
+
+  EnrichMetricsSummary summary;
+  summary.source_bytes = payload.size();
+  summary.enriched_bytes = enriched_stream.size();
+  summary.appended_observations = 1;
+  summary.duration_ns = timer.stop_ns();
+  return EnrichResult<StreamType>{std::move(enriched_stream), summary};
+}
+
+#elif defined(ARM_GOOGLE_FHIR)
+
+using StreamType = std::string;
+
+inline uint32_t read_u32_le(const std::string& in, std::size_t offset) {
+  const auto b0 = static_cast<uint8_t>(in[offset + 0]);
+  const auto b1 = static_cast<uint8_t>(in[offset + 1]);
+  const auto b2 = static_cast<uint8_t>(in[offset + 2]);
+  const auto b3 = static_cast<uint8_t>(in[offset + 3]);
+  return static_cast<uint32_t>(b0) |
+         (static_cast<uint32_t>(b1) << 8) |
+         (static_cast<uint32_t>(b2) << 16) |
+         (static_cast<uint32_t>(b3) << 24);
+}
+
+inline std::string first_patient_id(const std::string& payload) {
+  std::size_t cursor = 0;
+  while (cursor + 5 <= payload.size()) {
+    const char record_type = payload[cursor];
+    const uint32_t record_size = read_u32_le(payload, cursor + 1);
+    cursor += 5;
+
+    if (cursor + record_size > payload.size()) {
+      break;
+    }
+
+    if (record_type == 'P') {
+      google::fhir::r4::core::Patient patient;
+      if (patient.ParseFromArray(payload.data() + cursor, static_cast<int>(record_size)) &&
+          patient.has_id()) {
+        return patient.id().value();
+      }
+    }
+
+    cursor += record_size;
+  }
+  return {};
+}
+
+inline void append_observation_record(std::string& payload, const std::string& observation_bytes) {
+  payload.push_back('O');
+  const uint32_t len = static_cast<uint32_t>(observation_bytes.size());
+  payload.push_back(static_cast<char>(len & 0xFFu));
+  payload.push_back(static_cast<char>((len >> 8) & 0xFFu));
+  payload.push_back(static_cast<char>((len >> 16) & 0xFFu));
+  payload.push_back(static_cast<char>((len >> 24) & 0xFFu));
+  payload.append(observation_bytes);
+}
+
+inline EnrichResult<StreamType> enrich_google_fhir(const StreamType& payload,
+                                                   const ObservationData& enrichment_observation) {
+  Timer timer;
+  timer.start();
+
+  google::fhir::r4::core::Observation observation;
+  const auto patient_id = first_patient_id(payload);
+  const std::string fallback_patient_id =
+      patient_id.empty() ? std::string("benchmark-enrich-patient") : patient_id;
+  assign::GoogleObservationTarget target{observation, fallback_patient_id};
+  assign::assign_observation(enrichment_observation, target);
+
+  std::string observation_bytes;
+  if (!observation.SerializeToString(&observation_bytes)) {
+    throw std::runtime_error("test_4::enrich_google_fhir failed to serialize Observation");
+  }
+
+  StreamType enriched_stream = payload;
+  append_observation_record(enriched_stream, observation_bytes);
 
   EnrichMetricsSummary summary;
   summary.source_bytes = payload.size();
