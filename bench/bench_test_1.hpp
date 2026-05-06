@@ -18,12 +18,21 @@ benchmark-control mechanism, not a recommended production integration pattern.
 #include <FF_Patient.hpp>
 #include <FF_Observation.hpp>
 
+#if defined(ARM_GOOGLE_FHIR)
+#include "proto/google/fhir/proto/r4/core/codes.pb.h"
+#include "proto/google/fhir/proto/r4/core/datatypes.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
+#endif
+
 #include <nlohmann/json.hpp>
 
+#include <ctime>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -33,6 +42,17 @@ benchmark-control mechanism, not a recommended production integration pattern.
 #include <vector>
 
 namespace bench::assign {
+
+#if defined(ARM_GOOGLE_FHIR)
+struct GooglePatientTarget {
+  google::fhir::r4::core::Patient& patient;
+};
+
+struct GoogleObservationTarget {
+  google::fhir::r4::core::Observation& observation;
+  std::string_view fallback_patient_id;
+};
+#endif
 
 namespace detail {
 
@@ -70,6 +90,116 @@ struct HL7v2Sink {
     has_open_observation = false;
   }
 };
+#endif
+
+#if defined(ARM_GOOGLE_FHIR)
+using GoogleAdministrativeGenderValue = google::fhir::r4::core::AdministrativeGenderCode_Value;
+using GoogleDatePrecision = google::fhir::r4::core::Date_Precision;
+using GoogleObservationStatusValue = google::fhir::r4::core::ObservationStatusCode_Value;
+
+inline std::optional<int64_t> google_birthdate_to_us(std::string_view birthdate) {
+  if (birthdate.size() < 10) {
+    return std::nullopt;
+  }
+
+  std::tm tm{};
+  tm.tm_year = std::atoi(std::string(birthdate.substr(0, 4)).c_str()) - 1900;
+  tm.tm_mon = std::atoi(std::string(birthdate.substr(5, 2)).c_str()) - 1;
+  tm.tm_mday = std::atoi(std::string(birthdate.substr(8, 2)).c_str());
+  tm.tm_hour = 0;
+  tm.tm_min = 0;
+  tm.tm_sec = 0;
+
+  const std::time_t epoch_seconds = timegm(&tm);
+  if (epoch_seconds < 0) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(epoch_seconds) * 1000000LL;
+}
+
+inline GoogleAdministrativeGenderValue google_map_gender(AdministrativeGender gender) {
+  switch (gender) {
+    case AdministrativeGender::Male:
+      return google::fhir::r4::core::AdministrativeGenderCode_Value_MALE;
+    case AdministrativeGender::Female:
+      return google::fhir::r4::core::AdministrativeGenderCode_Value_FEMALE;
+    case AdministrativeGender::Other:
+      return google::fhir::r4::core::AdministrativeGenderCode_Value_OTHER;
+    case AdministrativeGender::Unknown:
+    default:
+      return google::fhir::r4::core::AdministrativeGenderCode_Value_UNKNOWN;
+  }
+}
+
+inline GoogleObservationStatusValue google_map_observation_status(ObservationStatus status) {
+  switch (status) {
+    case ObservationStatus::Registered:
+      return google::fhir::r4::core::ObservationStatusCode_Value_REGISTERED;
+    case ObservationStatus::Preliminary:
+      return google::fhir::r4::core::ObservationStatusCode_Value_PRELIMINARY;
+    case ObservationStatus::Final:
+      return google::fhir::r4::core::ObservationStatusCode_Value_FINAL;
+    case ObservationStatus::Amended:
+      return google::fhir::r4::core::ObservationStatusCode_Value_AMENDED;
+    case ObservationStatus::Corrected:
+      return google::fhir::r4::core::ObservationStatusCode_Value_CORRECTED;
+    case ObservationStatus::Cancelled:
+      return google::fhir::r4::core::ObservationStatusCode_Value_CANCELLED;
+    case ObservationStatus::EnteredInError:
+      return google::fhir::r4::core::ObservationStatusCode_Value_ENTERED_IN_ERROR;
+    case ObservationStatus::Unknown:
+    default:
+      return google::fhir::r4::core::ObservationStatusCode_Value_UNKNOWN;
+  }
+}
+
+inline std::string google_subject_patient_id(const ReferenceData* subject,
+                                             std::string_view fallback_patient_id) {
+  if (subject && !subject->reference.empty()) {
+    const std::string_view ref = subject->reference;
+    constexpr std::string_view kPatientPrefix = "Patient/";
+    if (ref.substr(0, kPatientPrefix.size()) == kPatientPrefix && ref.size() > kPatientPrefix.size()) {
+      return std::string(ref.substr(kPatientPrefix.size()));
+    }
+    return std::string(ref);
+  }
+
+  if (!fallback_patient_id.empty()) {
+    return std::string(fallback_patient_id);
+  }
+  return {};
+}
+
+// Recursive helper to build generic FHIR extensions
+inline void google_build_extension(const ExtensionData& src, google::fhir::r4::core::Extension* pb_ext) {
+  if (!src.id.empty()) {
+    pb_ext->mutable_id()->set_value(std::string(src.id));
+  }
+
+  // Google FHIR requires a URL. Mocking one from your ext_ref integer.
+  pb_ext->mutable_url()->set_value("http://example.org/ext/" + std::to_string(src.ext_ref));
+
+  // Map the ChoiceEntry variant to Extension.value[x]
+  if (!src.value.is_empty()) {
+    auto* pb_val = pb_ext->mutable_value();
+    
+    if (std::holds_alternative<std::string_view>(src.value.value)) {
+      pb_val->mutable_string_value()->set_value(std::string(std::get<std::string_view>(src.value.value)));
+    } else if (std::holds_alternative<bool>(src.value.value)) {
+      pb_val->mutable_boolean()->set_value(std::get<bool>(src.value.value));
+    } else if (std::holds_alternative<int32_t>(src.value.value)) {
+      pb_val->mutable_integer()->set_value(std::get<int32_t>(src.value.value));
+    } else if (std::holds_alternative<double>(src.value.value)) {
+      // FHIR decimals map to string in protobuf to avoid precision loss
+      pb_val->mutable_decimal()->set_value(std::to_string(std::get<double>(src.value.value)));
+    }
+  }
+
+  // Handle nested extensions recursively
+  for (const auto& nested : src.extension) {
+    google_build_extension(nested, pb_ext->add_extension());
+  }
+}
 #endif
 
 inline std::string choice_suffix(RECOVERY_TAG tag) {
@@ -724,6 +854,10 @@ inline void assign_patient_contained(const PatientData& src, PatientStreamSink&)
     throw std::runtime_error("FastFHIR benchmark assignment: Patient.contained remap is not implemented for stream assignment");
   }
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_contained(const PatientData&, GooglePatientTarget&) {
+  // Patient.contained not supported in protobuf arm
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_contained(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "patient.contained", src.contained);
@@ -735,6 +869,10 @@ inline void assign_patient_id(const PatientData& src, Json& dst) { put_if_string
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_id(const PatientData& src, PatientStreamSink& dst) {
   if (!src.id.empty()) dst.handle[FastFHIR::Fields::PATIENT::ID] = src.id;
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_id(const PatientData& src, GooglePatientTarget& dst) {
+  if (!src.id.empty()) dst.patient.mutable_id()->set_value(std::string(src.id));
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_id(const PatientData& src, HL7v2Sink& dst) {
@@ -750,6 +888,10 @@ inline void assign_patient_implicit_rules(const PatientData& src, Json& dst) {
 inline void assign_patient_implicit_rules(const PatientData& src, PatientStreamSink& dst) {
   if (!src.implicitrules.empty()) dst.handle[FastFHIR::Fields::PATIENT::IMPLICIT_RULES] = src.implicitrules;
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_implicit_rules(const PatientData& src, GooglePatientTarget& dst) {
+  if (!src.implicitrules.empty()) dst.patient.mutable_implicit_rules()->set_value(std::string(src.implicitrules));
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_implicit_rules(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_string(dst, "patient.implicitRules", src.implicitrules);
@@ -762,6 +904,10 @@ inline void assign_patient_language(const PatientData& src, Json& dst) { put_if_
 inline void assign_patient_language(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::LANGUAGE, src.language);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_language(const PatientData& src, GooglePatientTarget& dst) {
+  if (!src.language.empty()) dst.patient.mutable_language()->set_value(std::string(src.language));
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_language(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_string(dst, "patient.language", src.language);
@@ -773,6 +919,10 @@ inline void assign_patient_active(const PatientData& src, Json& dst) { put_if_bo
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_active(const PatientData& src, PatientStreamSink& dst) {
   if (src.active != FF_NULL_UINT8) dst.handle[FastFHIR::Fields::PATIENT::ACTIVE] = (src.active != 0);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_active(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.active != FF_NULL_UINT8) dst.patient.mutable_active()->set_value(src.active != 0);
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_active(const PatientData& src, HL7v2Sink& dst) {
@@ -788,6 +938,10 @@ inline void assign_patient_gender(const PatientData& src, Json& dst) {
 inline void assign_patient_gender(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::GENDER, FF_AdministrativeGenderToString(src.gender));
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_gender(const PatientData& src, GooglePatientTarget& dst) {
+  dst.patient.mutable_gender()->set_value(google_map_gender(src.gender));
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_gender(const PatientData& src, HL7v2Sink& dst) {
   dst.message.pid.administrative_sex = bench::hl7v2::sex_code(src);
@@ -802,6 +956,15 @@ inline void assign_patient_birth_date(const PatientData& src, Json& dst) {
 inline void assign_patient_birth_date(const PatientData& src, PatientStreamSink& dst) {
   if (!src.birthdate.empty()) dst.handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = src.birthdate;
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_birth_date(const PatientData& src, GooglePatientTarget& dst) {
+  if (const auto birth_us = google_birthdate_to_us(src.birthdate)) {
+    auto* birth_date = dst.patient.mutable_birth_date();
+    birth_date->set_value_us(*birth_us);
+    birth_date->set_timezone("UTC");
+    birth_date->set_precision(GoogleDatePrecision::Date_Precision_DAY);
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_birth_date(const PatientData& src, HL7v2Sink& dst) {
   dst.message.pid.birth_date = bench::hl7v2::normalize_birthdate(src.birthdate);
@@ -813,6 +976,25 @@ inline void assign_patient_deceased(const PatientData& src, Json& dst) { write_c
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_deceased(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::PATIENT::DECEASED, src.deceased, "Patient.deceased");
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_deceased(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.deceased.is_empty()) return;
+
+  auto* pb_deceased = dst.patient.mutable_deceased();
+  
+  if (std::holds_alternative<bool>(src.deceased.value)) {
+    pb_deceased->mutable_boolean()->set_value(std::get<bool>(src.deceased.value));
+  } 
+  else if (std::holds_alternative<std::string_view>(src.deceased.value)) {
+    // Assuming string_view holds the dateTime string
+    if (const auto time_us = google_birthdate_to_us(std::get<std::string_view>(src.deceased.value))) {
+      auto* dt = pb_deceased->mutable_date_time();
+      dt->set_value_us(*time_us);
+      dt->set_timezone("UTC");
+      dt->set_precision(google::fhir::r4::core::DateTime_Precision_DAY);
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_deceased(const PatientData& src, HL7v2Sink& dst) {
@@ -828,6 +1010,19 @@ inline void assign_patient_multiple_birth(const PatientData& src, Json& dst) {
 inline void assign_patient_multiple_birth(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::PATIENT::MULTIPLE_BIRTH, src.multiplebirth, "Patient.multipleBirth");
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_multiple_birth(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.multiplebirth.is_empty()) return;
+
+  auto* pb_mb = dst.patient.mutable_multiple_birth();
+
+  if (std::holds_alternative<bool>(src.multiplebirth.value)) {
+    pb_mb->mutable_boolean()->set_value(std::get<bool>(src.multiplebirth.value));
+  } 
+  else if (std::holds_alternative<int32_t>(src.multiplebirth.value)) {
+    pb_mb->mutable_integer()->set_value(std::get<int32_t>(src.multiplebirth.value));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_multiple_birth(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_choice(dst, "patient.multipleBirth[x]", src.multiplebirth);
@@ -842,6 +1037,12 @@ inline void assign_patient_meta(const PatientData& src, Json& dst) {
 inline void assign_patient_meta(const PatientData& src, PatientStreamSink& dst) {
   if (src.meta) stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::META, *src.meta);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_meta(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.meta && !src.meta->lastupdated.empty()) {
+    dst.patient.mutable_meta()->mutable_last_updated()->set_value_us(0);  // Placeholder
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_meta(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "patient.meta", src.meta);
@@ -855,6 +1056,12 @@ inline void assign_patient_text(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_text(const PatientData& src, PatientStreamSink& dst) {
   if (src.text) stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::TEXT, *src.text);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_text(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.text && !src.text->div.empty()) {
+    dst.patient.mutable_text()->mutable_div()->set_value(std::string(src.text->div));
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_text(const PatientData& src, HL7v2Sink& dst) {
@@ -873,6 +1080,12 @@ inline void assign_patient_extension(const PatientData& src, Json& dst) {
 inline void assign_patient_extension(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::EXTENSION, src.extension);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_extension(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& ext : src.extension) {
+    google_build_extension(ext, dst.patient.add_extension());
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_extension(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "patient.extension", src.extension);
@@ -889,6 +1102,12 @@ inline void assign_patient_modifier_extension(const PatientData& src, Json& dst)
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_modifier_extension(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::MODIFIER_EXTENSION, src.modifierextension);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_modifier_extension(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& ext : src.modifierextension) {
+    google_build_extension(ext, dst.patient.add_modifier_extension());
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_modifier_extension(const PatientData& src, HL7v2Sink& dst) {
@@ -907,6 +1126,18 @@ inline void assign_patient_identifier(const PatientData& src, Json& dst) {
 inline void assign_patient_identifier(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::IDENTIFIER, src.identifier);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_identifier(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& identifier : src.identifier) {
+    if (!identifier.value.empty()) {
+      auto* pb_id = dst.patient.add_identifier();
+      pb_id->mutable_value()->set_value(std::string(identifier.value));
+      if (!identifier.system.empty()) {
+        pb_id->mutable_system()->set_value(std::string(identifier.system));
+      }
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_identifier(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "patient.identifier", src.identifier);
@@ -923,6 +1154,26 @@ inline void assign_patient_name(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_name(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::NAME, src.name);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_name(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.name.empty()) {
+    return;
+  }
+
+  const auto& name = src.name.front();
+  auto* out_name = dst.patient.add_name();
+  if (!name.text.empty()) {
+    out_name->mutable_text()->set_value(std::string(name.text));
+  }
+  if (!name.family.empty()) {
+    out_name->mutable_family()->set_value(std::string(name.family));
+  }
+  for (const auto& given : name.given) {
+    if (!given.empty()) {
+      out_name->add_given()->set_value(std::string(given));
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_name(const PatientData& src, HL7v2Sink& dst) {
@@ -952,6 +1203,18 @@ inline void assign_patient_telecom(const PatientData& src, Json& dst) {
 inline void assign_patient_telecom(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::TELECOM, src.telecom);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_telecom(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& telecom : src.telecom) {
+    if (!telecom.value.empty()) {
+      auto* pb_contact = dst.patient.add_telecom();
+      pb_contact->mutable_value()->set_value(std::string(telecom.value));
+      if (static_cast<int>(telecom.system) != 0) {
+        pb_contact->mutable_system()->set_value(static_cast<::google::fhir::r4::core::ContactPointSystemCode_Value>(static_cast<int>(telecom.system)));
+      }
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_telecom(const PatientData& src, HL7v2Sink& dst) {
   dst.message.pid.home_phone = bench::hl7v2::hl7_phone_xtn(src);
@@ -980,6 +1243,27 @@ inline void assign_patient_address(const PatientData& src, Json& dst) {
 inline void assign_patient_address(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::ADDRESS, src.address);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_address(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& address : src.address) {
+    auto* pb_addr = dst.patient.add_address();
+    if (!address.text.empty()) {
+      pb_addr->mutable_text()->set_value(std::string(address.text));
+    }
+    if (!address.city.empty()) {
+      pb_addr->mutable_city()->set_value(std::string(address.city));
+    }
+    if (!address.state.empty()) {
+      pb_addr->mutable_state()->set_value(std::string(address.state));
+    }
+    if (!address.postalcode.empty()) {
+      pb_addr->mutable_postal_code()->set_value(std::string(address.postalcode));
+    }
+    if (!address.country.empty()) {
+      pb_addr->mutable_country()->set_value(std::string(address.country));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_address(const PatientData& src, HL7v2Sink& dst) {
   dst.message.pid.patient_address = bench::hl7v2::hl7_address_xad(src);
@@ -1007,6 +1291,12 @@ inline void assign_patient_marital_status(const PatientData& src, PatientStreamS
     stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::MARITAL_STATUS, *src.maritalstatus);
   }
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_marital_status(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.maritalstatus && !src.maritalstatus->text.empty()) {
+    dst.patient.mutable_marital_status()->mutable_text()->set_value(std::string(src.maritalstatus->text));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_marital_status(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "patient.maritalStatus", src.maritalstatus);
@@ -1023,6 +1313,20 @@ inline void assign_patient_photo(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_photo(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::PHOTO, src.photo);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_photo(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& photo : src.photo) {
+    auto* pb_photo = dst.patient.add_photo();
+    if (!photo.contenttype.empty()) pb_photo->mutable_content_type()->set_value(std::string(photo.contenttype));
+    if (!photo.language.empty()) pb_photo->mutable_language()->set_value(std::string(photo.language));
+    if (!photo.data.empty()) pb_photo->mutable_data()->set_value(std::string(photo.data));
+    if (!photo.url.empty()) pb_photo->mutable_url()->set_value(std::string(photo.url));
+    if (photo.size != FF_NULL_UINT32) pb_photo->mutable_size()->set_value(photo.size);
+    if (!photo.hash.empty()) pb_photo->mutable_hash()->set_value(std::string(photo.hash));
+    if (!photo.title.empty()) pb_photo->mutable_title()->set_value(std::string(photo.title));
+    // Note: photo.creation omitted here; requires passing through google_birthdate_to_us() and assigning to DateTime
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_photo(const PatientData& src, HL7v2Sink& dst) {
@@ -1041,6 +1345,26 @@ inline void assign_patient_contact(const PatientData& src, Json& dst) {
 inline void assign_patient_contact(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::CONTACT, src.contact);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_contact(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& contact : src.contact) {
+    auto* pb_contact = dst.patient.add_contact();
+
+    if (contact.gender != AdministrativeGender::Unknown) {
+      pb_contact->mutable_gender()->set_value(google_map_gender(contact.gender));
+    }
+
+    if (contact.name) {
+      auto* pb_name = pb_contact->mutable_name();
+      if (!contact.name->text.empty()) pb_name->mutable_text()->set_value(std::string(contact.name->text));
+      if (!contact.name->family.empty()) pb_name->mutable_family()->set_value(std::string(contact.name->family));
+    }
+
+    if (contact.organization && !contact.organization->reference.empty()) {
+      pb_contact->mutable_organization()->mutable_organization_id()->set_value(std::string(contact.organization->reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_contact(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "patient.contact", src.contact);
@@ -1057,6 +1381,28 @@ inline void assign_patient_communication(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_communication(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::COMMUNICATION, src.communication);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_communication(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& comm : src.communication) {
+    auto* pb_comm = dst.patient.add_communication();
+
+    if (comm.preferred != FF_NULL_UINT8) {
+      pb_comm->mutable_preferred()->set_value(comm.preferred != 0);
+    }
+
+    if (comm.language) {
+      auto* pb_lang = pb_comm->mutable_language();
+      if (!comm.language->text.empty()) {
+        pb_lang->mutable_text()->set_value(std::string(comm.language->text));
+      }
+      if (!comm.language->coding.empty()) {
+        auto* pb_coding = pb_lang->add_coding();
+        pb_coding->mutable_system()->set_value(std::string(comm.language->coding.front().system));
+        pb_coding->mutable_code()->set_value(std::string(comm.language->coding.front().code));
+      }
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_communication(const PatientData& src, HL7v2Sink& dst) {
@@ -1076,6 +1422,15 @@ inline void assign_patient_general_practitioner(const PatientData& src, PatientS
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::GENERAL_PRACTITIONER,
                               src.generalpractitioner);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_general_practitioner(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& gp : src.generalpractitioner) {
+    if (!gp.reference.empty()) {
+      auto* pb_gp = dst.patient.add_general_practitioner();
+      pb_gp->mutable_practitioner_id()->set_value(std::string(gp.reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_patient_general_practitioner(const PatientData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "patient.generalPractitioner", src.generalpractitioner);
@@ -1091,6 +1446,13 @@ inline void assign_patient_managing_organization(const PatientData& src, Patient
   if (src.managingorganization) {
     stream_append_assigned_single(dst, FastFHIR::Fields::PATIENT::MANAGING_ORGANIZATION,
                                   *src.managingorganization);
+  }
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_managing_organization(const PatientData& src, GooglePatientTarget& dst) {
+  if (src.managingorganization && !src.managingorganization->reference.empty()) {
+    dst.patient.mutable_managing_organization()->mutable_organization_id()->set_value(
+        std::string(src.managingorganization->reference));
   }
 }
 #elif defined(ARM_HL7V2)
@@ -1109,6 +1471,22 @@ inline void assign_patient_link(const PatientData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_patient_link(const PatientData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::PATIENT::LINK, src.link);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_patient_link(const PatientData& src, GooglePatientTarget& dst) {
+  for (const auto& link : src.link) {
+    auto* pb_link = dst.patient.add_link();
+
+    if (link.other && !link.other->reference.empty()) {
+      pb_link->mutable_other()->mutable_patient_id()->set_value(std::string(link.other->reference));
+    }
+
+    if (static_cast<int>(link.type) != 0) {
+      pb_link->mutable_type()->set_value(
+          static_cast<::google::fhir::r4::core::LinkTypeCode_Value>(static_cast<int>(link.type))
+      );
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_patient_link(const PatientData& src, HL7v2Sink& dst) {
@@ -1133,6 +1511,10 @@ inline void assign_observation_contained(const ObservationData& src, PatientStre
     throw std::runtime_error("FastFHIR benchmark assignment: Observation.contained remap is not implemented for stream assignment");
   }
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_contained(const ObservationData&, GoogleObservationTarget&) {
+  // Observation.contained not supported in protobuf arm
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_contained(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.contained", src.contained);
@@ -1144,6 +1526,10 @@ inline void assign_observation_id(const ObservationData& src, Json& dst) { put_i
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_id(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.id.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ID] = src.id;
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_id(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (!src.id.empty()) dst.observation.mutable_id()->set_value(std::string(src.id));
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_id(const ObservationData& src, HL7v2Sink& dst) {
@@ -1159,6 +1545,12 @@ inline void assign_observation_meta(const ObservationData& src, Json& dst) {
 inline void assign_observation_meta(const ObservationData& src, PatientStreamSink& dst) {
   if (src.meta) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::META, *src.meta);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_meta(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.meta && !src.meta->lastupdated.empty()) {
+    dst.observation.mutable_meta()->mutable_last_updated()->set_value_us(0);  // Placeholder
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_meta(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.meta", src.meta);
@@ -1173,6 +1565,10 @@ inline void assign_observation_implicit_rules(const ObservationData& src, Json& 
 inline void assign_observation_implicit_rules(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.implicitrules.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::IMPLICIT_RULES] = src.implicitrules;
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_implicit_rules(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (!src.implicitrules.empty()) dst.observation.mutable_implicit_rules()->set_value(std::string(src.implicitrules));
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_implicit_rules(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_string(dst, "observation.implicitRules", src.implicitrules);
@@ -1184,6 +1580,10 @@ inline void assign_observation_language(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_language(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::LANGUAGE, src.language);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_language(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (!src.language.empty()) dst.observation.mutable_language()->set_value(std::string(src.language));
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_language(const ObservationData& src, HL7v2Sink& dst) {
@@ -1198,6 +1598,12 @@ inline void assign_observation_text(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_text(const ObservationData& src, PatientStreamSink& dst) {
   if (src.text) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::TEXT, *src.text);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_text(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.text && !src.text->div.empty()) {
+    dst.observation.mutable_text()->mutable_div()->set_value(std::string(src.text->div));
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_text(const ObservationData& src, HL7v2Sink& dst) {
@@ -1216,6 +1622,12 @@ inline void assign_observation_extension(const ObservationData& src, Json& dst) 
 inline void assign_observation_extension(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::EXTENSION, src.extension);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_extension(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& ext : src.extension) {
+    google_build_extension(ext, dst.observation.add_extension());
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_extension(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.extension", src.extension);
@@ -1232,6 +1644,12 @@ inline void assign_observation_modifier_extension(const ObservationData& src, Js
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_modifier_extension(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::MODIFIER_EXTENSION, src.modifierextension);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_modifier_extension(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& ext : src.modifierextension) {
+    google_build_extension(ext, dst.observation.add_modifier_extension());
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_modifier_extension(const ObservationData& src, HL7v2Sink& dst) {
@@ -1250,6 +1668,18 @@ inline void assign_observation_identifier(const ObservationData& src, Json& dst)
 inline void assign_observation_identifier(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::IDENTIFIER, src.identifier);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_identifier(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& identifier : src.identifier) {
+    if (!identifier.value.empty()) {
+      auto* pb_id = dst.observation.add_identifier();
+      pb_id->mutable_value()->set_value(std::string(identifier.value));
+      if (!identifier.system.empty()) {
+        pb_id->mutable_system()->set_value(std::string(identifier.system));
+      }
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_identifier(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.identifier", src.identifier);
@@ -1266,6 +1696,15 @@ inline void assign_observation_based_on(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_based_on(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::BASED_ON, src.basedon);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_based_on(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& ref : src.basedon) {
+    if (!ref.reference.empty()) {
+      auto* pb_ref = dst.observation.add_based_on();
+      pb_ref->mutable_procedure_id()->set_value(std::string(ref.reference));
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_based_on(const ObservationData& src, HL7v2Sink& dst) {
@@ -1284,6 +1723,15 @@ inline void assign_observation_part_of(const ObservationData& src, Json& dst) {
 inline void assign_observation_part_of(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PART_OF, src.partof);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_part_of(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& ref : src.partof) {
+    if (!ref.reference.empty()) {
+      auto* pb_ref = dst.observation.add_part_of();
+      pb_ref->mutable_observation_id()->set_value(std::string(ref.reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_part_of(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.partOf", src.partof);
@@ -1297,6 +1745,10 @@ inline void assign_observation_status(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_status(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::STATUS, FF_ObservationStatusToString(src.status));
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_status(const ObservationData& src, GoogleObservationTarget& dst) {
+  dst.observation.mutable_status()->set_value(google_map_observation_status(src.status));
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_status(const ObservationData& src, HL7v2Sink& dst) {
@@ -1317,6 +1769,30 @@ inline void assign_observation_category(const ObservationData& src, Json& dst) {
 inline void assign_observation_category(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::CATEGORY, src.category);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_category(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& category : src.category) {
+    if (!category.text.empty() || !category.coding.empty()) {
+      auto* pb_cat = dst.observation.add_category();
+      if (!category.text.empty()) {
+        pb_cat->mutable_text()->set_value(std::string(category.text));
+      }
+      if (!category.coding.empty()) {
+        const auto& c = category.coding.front();
+        auto* pb_coding = pb_cat->add_coding();
+        if (!c.code.empty()) {
+          pb_coding->mutable_code()->set_value(std::string(c.code));
+        }
+        if (!c.display.empty()) {
+          pb_coding->mutable_display()->set_value(std::string(c.display));
+        }
+        if (!c.system.empty()) {
+          pb_coding->mutable_system()->set_value(std::string(c.system));
+        }
+      }
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_category(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.category", src.category);
@@ -1330,6 +1806,25 @@ inline void assign_observation_code(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_code(const ObservationData& src, PatientStreamSink& dst) {
   if (src.code) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::CODE, *src.code);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_code(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.code) {
+    if (!src.code->text.empty()) {
+      dst.observation.mutable_code()->mutable_text()->set_value(std::string(src.code->text));
+    }
+    if (!src.code->coding.empty()) {
+      const auto& first_coding = src.code->coding.front();
+      if (!first_coding.code.empty()) {
+        auto* coding = dst.observation.mutable_code()->add_coding();
+        coding->mutable_system()->set_value(std::string(first_coding.system));
+        coding->mutable_code()->set_value(std::string(first_coding.code));
+        if (!first_coding.display.empty()) {
+          coding->mutable_display()->set_value(std::string(first_coding.display));
+        }
+      }
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_code(const ObservationData& src, HL7v2Sink& dst) {
@@ -1358,6 +1853,13 @@ inline void assign_observation_subject(const ObservationData& src, Json& dst) {
 inline void assign_observation_subject(const ObservationData& src, PatientStreamSink& dst) {
   if (src.subject) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SUBJECT, *src.subject);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_subject(const ObservationData& src, GoogleObservationTarget& dst) {
+  const auto patient_id = google_subject_patient_id(src.subject.get(), dst.fallback_patient_id);
+  if (!patient_id.empty()) {
+    dst.observation.mutable_subject()->mutable_patient_id()->set_value(patient_id);
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_subject(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.subject", src.subject);
@@ -1375,6 +1877,17 @@ inline void assign_observation_focus(const ObservationData& src, Json& dst) {
 inline void assign_observation_focus(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::FOCUS, src.focus);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_focus(const ObservationData& src, GoogleObservationTarget& dst) {
+  // Observation.focus references: protobuf Reference type requires specialized handling
+  for (const auto& focus : src.focus) {
+    if (!focus.reference.empty()) {
+      auto* pb_focus = dst.observation.add_focus();
+      // Populate reference ID field if available in protobuf
+      pb_focus->mutable_patient_id()->set_value(std::string(focus.reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_focus(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.focus", src.focus);
@@ -1389,6 +1902,12 @@ inline void assign_observation_encounter(const ObservationData& src, Json& dst) 
 inline void assign_observation_encounter(const ObservationData& src, PatientStreamSink& dst) {
   if (src.encounter) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::ENCOUNTER, *src.encounter);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_encounter(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.encounter && !src.encounter->reference.empty()) {
+    dst.observation.mutable_encounter()->mutable_encounter_id()->set_value(std::string(src.encounter->reference));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_encounter(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.encounter", src.encounter);
@@ -1401,6 +1920,24 @@ inline void assign_observation_effective(const ObservationData& src, Json& dst) 
 inline void assign_observation_effective(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::EFFECTIVE, src.effective, "Observation.effective");
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_effective(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.effective.is_empty()) return;
+
+  auto* pb_effective = dst.observation.mutable_effective();
+
+  // Handle DateTime variant
+  if (std::holds_alternative<std::string_view>(src.effective.value)) {
+    if (const auto time_us = google_birthdate_to_us(std::get<std::string_view>(src.effective.value))) {
+      auto* dt = pb_effective->mutable_date_time();
+      dt->set_value_us(*time_us);
+      dt->set_timezone("UTC");
+      dt->set_precision(google::fhir::r4::core::DateTime_Precision_SECOND);
+    }
+  }
+  // Handle Period variant (simplified: just store start date)
+  // Note: Full Period handling would require dedicated Period message
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_effective(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_choice(dst, "observation.effective[x]", src.effective);
@@ -1412,6 +1949,10 @@ inline void assign_observation_issued(const ObservationData& src, Json& dst) { p
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_issued(const ObservationData& src, PatientStreamSink& dst) {
   if (!src.issued.empty()) dst.handle[FastFHIR::Fields::OBSERVATION::ISSUED] = src.issued;
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_issued(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (!src.issued.empty()) dst.observation.mutable_issued()->set_value_us(0);  // Placeholder
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_issued(const ObservationData& src, HL7v2Sink& dst) {
@@ -1430,6 +1971,15 @@ inline void assign_observation_performer(const ObservationData& src, Json& dst) 
 inline void assign_observation_performer(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::PERFORMER, src.performer);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_performer(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& performer : src.performer) {
+    if (!performer.reference.empty()) {
+      auto* pb_perf = dst.observation.add_performer();
+      pb_perf->mutable_practitioner_id()->set_value(std::string(performer.reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_performer(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.performer", src.performer);
@@ -1441,6 +1991,52 @@ inline void assign_observation_value(const ObservationData& src, Json& dst) { wr
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_value(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::VALUE, src.value, "Observation.value");
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_value(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.value.is_empty()) return;
+
+  auto* pb_value = dst.observation.mutable_value();
+
+  switch (src.value.tag) {
+    case RECOVER_FF_STRING:
+      if (std::holds_alternative<std::string_view>(src.value.value)) {
+        pb_value->mutable_string_value()->set_value(
+            std::string(std::get<std::string_view>(src.value.value)));
+      }
+      break;
+      
+    case RECOVER_FF_INT32:
+      if (std::holds_alternative<int32_t>(src.value.value)) {
+        pb_value->mutable_integer()->set_value(std::get<int32_t>(src.value.value));
+      }
+      break;
+      
+    case RECOVER_FF_FLOAT64:
+      if (std::holds_alternative<double>(src.value.value)) {
+        // Store double as Quantity with numeric value
+        auto* qty = pb_value->mutable_quantity();
+        std::string decimal_str = std::to_string(std::get<double>(src.value.value)); 
+        qty->mutable_value()->set_value(decimal_str);
+      }
+      break;
+      
+    case RECOVER_FF_QUANTITY:
+      // If you are rebuilding a Quantity from a choice variant, you'll need the sub-fields.
+      // If your benchmark just mocks it:
+      pb_value->mutable_quantity()->mutable_value()->set_value("1.0"); 
+      break;
+      
+    case RECOVER_FF_BOOL:
+      if (std::holds_alternative<bool>(src.value.value)) {
+        pb_value->mutable_boolean()->set_value(std::get<bool>(src.value.value));
+      }
+      break;
+
+    // Add cases for CodeableConcept, Period, Range, etc.
+    default:
+      break;
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_value(const ObservationData& src, HL7v2Sink& dst) {
@@ -1484,6 +2080,12 @@ inline void assign_observation_data_absent_reason(const ObservationData& src, Pa
     stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DATA_ABSENT_REASON, *src.dataabsentreason);
   }
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_data_absent_reason(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.dataabsentreason && !src.dataabsentreason->text.empty()) {
+    dst.observation.mutable_data_absent_reason()->mutable_text()->set_value(std::string(src.dataabsentreason->text));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_data_absent_reason(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.dataAbsentReason", src.dataabsentreason);
@@ -1500,6 +2102,30 @@ inline void assign_observation_interpretation(const ObservationData& src, Json& 
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_interpretation(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::INTERPRETATION, src.interpretation);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_interpretation(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& interpretation : src.interpretation) {
+    if (!interpretation.text.empty() || !interpretation.coding.empty()) {
+      auto* pb_interp = dst.observation.add_interpretation();
+      if (!interpretation.text.empty()) {
+        pb_interp->mutable_text()->set_value(std::string(interpretation.text));
+      }
+      if (!interpretation.coding.empty()) {
+        const auto& c = interpretation.coding.front();
+        auto* pb_coding = pb_interp->add_coding();
+        if (!c.code.empty()) {
+          pb_coding->mutable_code()->set_value(std::string(c.code));
+        }
+        if (!c.display.empty()) {
+          pb_coding->mutable_display()->set_value(std::string(c.display));
+        }
+        if (!c.system.empty()) {
+          pb_coding->mutable_system()->set_value(std::string(c.system));
+        }
+      }
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_interpretation(const ObservationData& src, HL7v2Sink& dst) {
@@ -1518,6 +2144,16 @@ inline void assign_observation_note(const ObservationData& src, Json& dst) {
 inline void assign_observation_note(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::NOTE, src.note);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_note(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& note : src.note) {
+    if (!note.text.empty()) {
+      auto* pb_note = dst.observation.add_note();
+      pb_note->mutable_text()->set_value(std::string(note.text));
+      // Note: time field is not a simple string in protobuf Annotation; requires DateTime handling
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_note(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.note", src.note);
@@ -1531,6 +2167,12 @@ inline void assign_observation_body_site(const ObservationData& src, Json& dst) 
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_body_site(const ObservationData& src, PatientStreamSink& dst) {
   if (src.bodysite) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_SITE, *src.bodysite);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_body_site(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.bodysite && !src.bodysite->text.empty()) {
+    dst.observation.mutable_body_site()->mutable_text()->set_value(std::string(src.bodysite->text));
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_body_site(const ObservationData& src, HL7v2Sink& dst) {
@@ -1546,6 +2188,12 @@ inline void assign_observation_method(const ObservationData& src, Json& dst) {
 inline void assign_observation_method(const ObservationData& src, PatientStreamSink& dst) {
   if (src.method) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::METHOD, *src.method);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_method(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.method && !src.method->text.empty()) {
+    dst.observation.mutable_method()->mutable_text()->set_value(std::string(src.method->text));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_method(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.method", src.method);
@@ -1560,6 +2208,12 @@ inline void assign_observation_specimen(const ObservationData& src, Json& dst) {
 inline void assign_observation_specimen(const ObservationData& src, PatientStreamSink& dst) {
   if (src.specimen) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::SPECIMEN, *src.specimen);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_specimen(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.specimen && !src.specimen->reference.empty()) {
+    dst.observation.mutable_specimen()->mutable_specimen_id()->set_value(std::string(src.specimen->reference));
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_specimen(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.specimen", src.specimen);
@@ -1573,6 +2227,12 @@ inline void assign_observation_device(const ObservationData& src, Json& dst) {
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_device(const ObservationData& src, PatientStreamSink& dst) {
   if (src.device) stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::DEVICE, *src.device);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_device(const ObservationData& src, GoogleObservationTarget& dst) {
+  if (src.device && !src.device->reference.empty()) {
+    dst.observation.mutable_device()->mutable_device_id()->set_value(std::string(src.device->reference));
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_device(const ObservationData& src, HL7v2Sink& dst) {
@@ -1591,6 +2251,20 @@ inline void assign_observation_reference_range(const ObservationData& src, Json&
 inline void assign_observation_reference_range(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::REFERENCE_RANGE, src.referencerange);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_reference_range(const ObservationData& src, GoogleObservationTarget& dst) {
+  // Observation.referenceRange: Quantity/Decimal type requires specialized protobuf handling
+  // Simplified implementation storing unit information only
+  for (const auto& rr : src.referencerange) {
+    auto* pb_rr = dst.observation.add_reference_range();
+    if (rr.low && !rr.low->unit.empty()) {
+      pb_rr->mutable_low()->mutable_unit()->set_value(std::string(rr.low->unit));
+    }
+    if (rr.high && !rr.high->unit.empty()) {
+      pb_rr->mutable_high()->mutable_unit()->set_value(std::string(rr.high->unit));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_reference_range(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.referenceRange", src.referencerange);
@@ -1607,6 +2281,15 @@ inline void assign_observation_has_member(const ObservationData& src, Json& dst)
 #elif defined(ARM_FASTFHIR)
 inline void assign_observation_has_member(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::HAS_MEMBER, src.hasmember);
+}
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_has_member(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& member : src.hasmember) {
+    if (!member.reference.empty()) {
+      auto* pb_member = dst.observation.add_has_member();
+      pb_member->mutable_observation_id()->set_value(std::string(member.reference));
+    }
+  }
 }
 #elif defined(ARM_HL7V2)
 inline void assign_observation_has_member(const ObservationData& src, HL7v2Sink& dst) {
@@ -1625,6 +2308,15 @@ inline void assign_observation_derived_from(const ObservationData& src, Json& ds
 inline void assign_observation_derived_from(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::DERIVED_FROM, src.derivedfrom);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_derived_from(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& derived : src.derivedfrom) {
+    if (!derived.reference.empty()) {
+      auto* pb_derived = dst.observation.add_derived_from();
+      pb_derived->mutable_observation_id()->set_value(std::string(derived.reference));
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_derived_from(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.derivedFrom", src.derivedfrom);
@@ -1642,6 +2334,25 @@ inline void assign_observation_component(const ObservationData& src, Json& dst) 
 inline void assign_observation_component(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::COMPONENT, src.component);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_component(const ObservationData& src, GoogleObservationTarget& dst) {
+  for (const auto& component : src.component) {
+    auto* pb_comp = dst.observation.add_component();
+    if (component.code && !component.code->text.empty()) {
+      pb_comp->mutable_code()->mutable_text()->set_value(std::string(component.code->text));
+    }
+    if (component.code && !component.code->coding.empty()) {
+      const auto& coding = component.code->coding.front();
+      auto* pb_coding = pb_comp->mutable_code()->add_coding();
+      if (!coding.code.empty()) {
+        pb_coding->mutable_code()->set_value(std::string(coding.code));
+      }
+      if (!coding.display.empty()) {
+        pb_coding->mutable_display()->set_value(std::string(coding.display));
+      }
+    }
+  }
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_component(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.component", src.component);
@@ -1656,6 +2367,8 @@ inline void assign_observation_instantiates(const ObservationData& src, Json& ds
 inline void assign_observation_instantiates(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_choice_field(dst, FastFHIR::Fields::OBSERVATION::INSTANTIATES, src.instantiates, "Observation.instantiates");
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_instantiates(const ObservationData&, GoogleObservationTarget&) {}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_instantiates(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_choice(dst, "observation.instantiates[x]", src.instantiates);
@@ -1673,6 +2386,10 @@ inline void assign_observation_triggered_by(const ObservationData& src, Json& ds
 inline void assign_observation_triggered_by(const ObservationData& src, PatientStreamSink& dst) {
   stream_assign_array_offsets(dst, FastFHIR::Fields::OBSERVATION::TRIGGERED_BY, src.triggeredby);
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_triggered_by(const ObservationData&, GoogleObservationTarget&) {
+  // Observation.triggeredBy: field not present in this protobuf Observation definition
+}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_triggered_by(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_vector(dst, "observation.triggeredBy", src.triggeredby);
@@ -1689,6 +2406,8 @@ inline void assign_observation_body_structure(const ObservationData& src, Patien
     stream_append_assigned_single(dst, FastFHIR::Fields::OBSERVATION::BODY_STRUCTURE, *src.bodystructure);
   }
 }
+#elif defined(ARM_GOOGLE_FHIR)
+inline void assign_observation_body_structure(const ObservationData&, GoogleObservationTarget&) {}
 #elif defined(ARM_HL7V2)
 inline void assign_observation_body_structure(const ObservationData& src, HL7v2Sink& dst) {
   hl7_mark_if_pointer(dst, "observation.bodyStructure", src.bodystructure);
@@ -1828,6 +2547,8 @@ inline void assign_patient(const PatientData& src, Target& dst) {
   }
   detail::PatientStreamSink sink{*builder, dst};
   detail::assign_patient_common(src, sink);
+#elif defined(ARM_GOOGLE_FHIR)
+  detail::assign_patient_common(src, dst);
 #elif defined(ARM_HL7V2)
   detail::HL7v2Sink sink{dst};
   detail::assign_patient_common(src, sink);
@@ -1849,6 +2570,8 @@ inline void assign_observation(const ObservationData& src, Target& dst) {
   }
   detail::PatientStreamSink sink{*builder, dst};
   detail::assign_observation_common(src, sink);
+#elif defined(ARM_GOOGLE_FHIR)
+  detail::assign_observation_common(src, dst);
 #elif defined(ARM_HL7V2)
   detail::HL7v2Sink sink{dst};
   sink.begin_observation();

@@ -3,6 +3,7 @@
 #include "harness.hpp"
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -10,6 +11,9 @@
 
 #if defined(ARM_JSON)
 #include <simdjson.h>
+#elif defined(ARM_GOOGLE_FHIR)
+#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
 #endif
 
 namespace bench::test_2 {
@@ -36,6 +40,9 @@ struct MaterializedTree {
   #elif defined(ARM_JSON)
   std::unique_ptr<simdjson::dom::parser> parser;
   simdjson::dom::element root;
+  #elif defined(ARM_GOOGLE_FHIR)
+  std::vector<google::fhir::r4::core::Patient> patients;
+  std::vector<google::fhir::r4::core::Observation> observations;
   #elif defined(ARM_HL7V2)
   std::vector<Hl7Segment> segments;
   #endif  
@@ -118,6 +125,106 @@ inline MaterializedTree materialize(const StreamType& payload) {
   tree.root = doc.value_unsafe();
   touch_tree(tree.root, tree.touched_nodes);
   tree.ok = true;
+  return tree;
+}
+
+#elif defined(ARM_GOOGLE_FHIR)
+
+using StreamType = std::string;
+
+inline uint32_t decode_u32_le(const char* p) {
+  return static_cast<uint32_t>(static_cast<unsigned char>(p[0])) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[1])) << 8) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[2])) << 16) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[3])) << 24);
+}
+
+inline void touch_patient_tree(const google::fhir::r4::core::Patient& patient,
+                               std::size_t& touched_nodes) {
+  if (patient.has_id()) {
+    ++touched_nodes;
+  }
+  if (patient.has_active()) {
+    ++touched_nodes;
+  }
+  if (patient.has_gender()) {
+    ++touched_nodes;
+  }
+  if (patient.has_birth_date()) {
+    ++touched_nodes;
+  }
+  for (const auto& name : patient.name()) {
+    ++touched_nodes;
+    if (name.has_text()) {
+      ++touched_nodes;
+    }
+    if (name.has_family()) {
+      ++touched_nodes;
+    }
+    touched_nodes += static_cast<std::size_t>(name.given_size());
+  }
+}
+
+inline void touch_observation_tree(const google::fhir::r4::core::Observation& observation,
+                                   std::size_t& touched_nodes) {
+  if (observation.has_id()) {
+    ++touched_nodes;
+  }
+  if (observation.has_status()) {
+    ++touched_nodes;
+  }
+  if (observation.has_code() && observation.code().has_text()) {
+    ++touched_nodes;
+  }
+  if (observation.has_subject() && observation.subject().has_patient_id()) {
+    ++touched_nodes;
+  }
+}
+
+inline MaterializedTree materialize(const StreamType& payload) {
+  MaterializedTree tree;
+
+  std::size_t pos = 0;
+  while (pos + 5 <= payload.size()) {
+    const char record_type = payload[pos];
+    const uint32_t record_len = decode_u32_le(payload.data() + pos + 1);
+    pos += 5;
+
+    if (pos + record_len > payload.size()) {
+      return tree;
+    }
+
+    const char* record_data = payload.data() + pos;
+    pos += record_len;
+
+    if (record_type == 'P') {
+      google::fhir::r4::core::Patient patient;
+      if (!patient.ParseFromArray(record_data, static_cast<int>(record_len))) {
+        return tree;
+      }
+      touch_patient_tree(patient, tree.touched_nodes);
+      tree.patients.push_back(std::move(patient));
+      continue;
+    }
+
+    if (record_type == 'O') {
+      google::fhir::r4::core::Observation observation;
+      if (!observation.ParseFromArray(record_data, static_cast<int>(record_len))) {
+        return tree;
+      }
+      touch_observation_tree(observation, tree.touched_nodes);
+      tree.observations.push_back(std::move(observation));
+      continue;
+    }
+
+    return tree;
+  }
+
+  if (pos != payload.size()) {
+    return tree;
+  }
+
+  tree.ok = !tree.patients.empty() || !tree.observations.empty();
   return tree;
 }
 
