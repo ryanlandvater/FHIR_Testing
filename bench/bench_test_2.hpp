@@ -28,6 +28,7 @@ inline MetricEvent materialize_metric(std::string_view arm, std::int64_t duratio
 
 struct MaterializedTree {
   #if defined(ARM_FASTFHIR)
+  // Keep parser heap-owned so Node lifetimes stay valid with minimal copy/move constraints.
   std::unique_ptr<FastFHIR::Parser> parser;
   FastFHIR::Reflective::Node root;
   #elif defined(ARM_JSON)
@@ -37,6 +38,7 @@ struct MaterializedTree {
   std::vector<google::fhir::r4::core::Patient> patients;
   std::vector<google::fhir::r4::core::Observation> observations;
   #elif defined(ARM_HL7V2)
+  // parse_batch returns ParsedMessage; preserve parsed ASTs without re-materializing strings.
   std::vector<hl7v2::ParsedMessage> messages;
   #endif  
   std::size_t touched_nodes = 0;
@@ -232,6 +234,7 @@ inline MaterializedTree materialize(const StreamType& payload) {
     return tree;
   }
 
+  // Move parsed messages into tree storage to avoid extra copies.
   for (auto& msg : parsed_messages) {
     touch_tree(msg, tree.touched_nodes);
     tree.messages.push_back(std::move(msg));

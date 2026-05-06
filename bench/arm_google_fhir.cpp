@@ -11,6 +11,7 @@
 #define ARM_GOOGLE_FHIR
 #include "bench_test_1.hpp"
 #include "bench_test_2.hpp"
+#include "bench_test_3.hpp"
 #undef ARM_GOOGLE_FHIR
 
 namespace bench {
@@ -71,10 +72,12 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture) {
   out.metrics.push_back(test_2::materialize_metric("google_fhir", test2_timer.stop_ns()));
   (void)materialized;
 
-  // Stage 3 remains intentionally stubbed in this protobuf arm pass.
-  out.metrics.push_back({"google_fhir", Stage::Test3Query, 0});
+  Timer test3_timer;
+  test3_timer.start();
+  const auto summary = test_3::query(payload);
+  out.metrics.push_back({"google_fhir", Stage::Test3Query, test3_timer.stop_ns()});
 
-  out.queried_value = "google_fhir_protobuf_stage1";
+  out.queried_value = test_3::format_query_summary(summary);
   out.reconstructed_bundle_json = "protobuf_payload_bytes=" + std::to_string(payload.size());
   return out;
 }

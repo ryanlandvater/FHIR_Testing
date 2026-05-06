@@ -14,6 +14,9 @@
 #include <FastFHIR.hpp>
 #elif defined(ARM_JSON)
 #include <simdjson.h>
+#elif defined(ARM_GOOGLE_FHIR)
+#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
 #endif
 
 namespace bench::test_3 {
@@ -215,6 +218,7 @@ inline std::optional<detail::ValueKind> value_kind_from_choice_tag(RECOVERY_TAG 
 static inline QuerySummary query(std::string_view payload) {
   detail::QueryAccumulator acc;
 
+  // Keep parser function-local in the query path to avoid persistent heap state.
   FastFHIR::Parser parser(payload.data(), payload.size());
   const auto root_node = parser.root();
   if (!(root_node && root_node.is<FastFHIR::RESOURCETYPE::BUNDLE>())) {
@@ -422,6 +426,107 @@ static inline QuerySummary query(const std::string& payload) {
 #undef TEST3_JSON_KEY_PATIENT
 #undef TEST3_JSON_KEY_OBSERVATION
 
+#elif defined(ARM_GOOGLE_FHIR)
+
+inline uint32_t decode_u32_le_t3(const char* p) {
+  return static_cast<uint32_t>(static_cast<unsigned char>(p[0])) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[1])) << 8) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[2])) << 16) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[3])) << 24);
+}
+
+static inline QuerySummary query(const std::string& payload) {
+  detail::QueryAccumulator acc;
+
+  // Hoist outside the loop for memory reuse.
+  google::fhir::r4::core::Patient patient;
+  google::fhir::r4::core::Observation observation;
+
+  std::size_t pos = 0;
+  while (pos + 5 <= payload.size()) {
+    const char record_type = payload[pos];
+    const uint32_t record_len = decode_u32_le_t3(payload.data() + pos + 1);
+    pos += 5;
+
+    if (pos + record_len > payload.size()) {
+      break;
+    }
+
+    const char* record_data = payload.data() + pos;
+    pos += record_len;
+
+    if (record_type == 'P') {
+      patient.Clear();
+      if (patient.ParseFromArray(record_data, static_cast<int>(record_len))) {
+        std::string bd;
+        if (patient.has_birth_date()) {
+          // Google FHIR stores dates as epoch microseconds.
+          // Using to_string to mimic extraction cost without full ISO8601 formatting overhead.
+          bd = std::to_string(patient.birth_date().value_us());
+        }
+        acc.note_patient(bd);
+      }
+    } else if (record_type == 'O') {
+      observation.Clear();
+      if (observation.ParseFromArray(record_data, static_cast<int>(record_len))) {
+        acc.note_observation();
+
+        if (observation.has_code()) {
+          bool matched = false;
+          for (const auto& coding : observation.code().coding()) {
+            if (detail::is_loinc_match(coding.system().value(), coding.code().value())) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) acc.note_loinc_2085_9();
+        }
+
+        if (observation.has_value()) {
+          const auto& val = observation.value();
+          if (val.has_quantity()) {
+            acc.note_observation_value(detail::ValueKind::Quantity);
+          } else if (val.has_codeable_concept()) {
+            acc.note_observation_value(detail::ValueKind::CodeableConcept);
+          } else if (val.has_string_value()) {
+            acc.note_observation_value(detail::ValueKind::String);
+          }
+          // Note: FHIR R4 Observation.value[x] does not natively use "valueCode"
+          // so there is no .has_code() equivalent here in Google FHIR.
+        }
+
+        if (observation.has_effective()) {
+          const auto& eff = observation.effective();
+          if (eff.has_date_time()) {
+            acc.note_effective_datetime();
+          } else if (eff.has_period()) {
+            acc.note_effective_period();
+          }
+        }
+
+        if (observation.has_issued()) {
+          acc.note_issued();
+        }
+
+        for (const auto& comp : observation.component()) {
+          if (comp.has_value()) {
+            const auto& cval = comp.value();
+            if (cval.has_quantity()) {
+              acc.note_component_value(detail::ValueKind::Quantity);
+            } else if (cval.has_codeable_concept()) {
+              acc.note_component_value(detail::ValueKind::CodeableConcept);
+            } else if (cval.has_string_value()) {
+              acc.note_component_value(detail::ValueKind::String);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return acc.finalize();
+}
+
 #elif defined(ARM_HL7V2)
 
 #define TEST3_HL7_PATIENT_SEG "PID|"
@@ -453,6 +558,8 @@ inline std::string_view segment_field(std::string_view seg, std::size_t one_base
 
 static inline QuerySummary query(const std::string& payload) {
   QuerySummary summary;
+
+  // Query directly from raw HL7 segment lines to keep this arm allocation-light.
 
   std::size_t patient_count = 0;
   std::size_t observation_count = 0;
