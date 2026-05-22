@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "fastfhir_runtime",
+    deps = [
+        "@fastfhir//:fastfhir",
+        "@fastfhir//:fastfhir_ingestor",
+    ],
+)
+
+cc_library(
+    name = "google_fhir_runtime",
+    deps = [
+        "@google_absl_headers//:headers",
+        "@google_fhir_runtime_dylib//:google_fhir_bundled_dylib",
+        "@google_fhir_fastbuild_bin//:r4_proto_headers",
+        "@google_protobuf_headers//:headers",
+    ],
+    linkopts = [
+        "-framework CoreFoundation",
+    ],
+)

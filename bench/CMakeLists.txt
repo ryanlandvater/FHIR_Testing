@@ -109,6 +109,7 @@ find_library(FASTFHIR_INGESTOR_LIBRARY
 )
 
 add_library(bench_core INTERFACE)
+target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
 target_include_directories(bench_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(bench_core INTERFACE ${FASTFHIR_INCLUDE_DIR})
 target_include_directories(bench_core INTERFACE ${FASTFHIR_GENERATED_INCLUDE_DIR})

@@ -4,6 +4,8 @@
 **Reference**: `FastFHIR Benchmarking Study Design V1.1.md`  
 **Status**: 🚧 In Progress
 
+**Validation note**: simdjson ingest behavior in this workspace has been profile-sensitive. Treat Release-class consumer builds as the validation baseline for CAPACITY-sensitive runs until Bazel parity is re-verified. The confirmed CMake-side ingest fix was consumer compile-definition parity with `ff_ingest`, specifically `SIMDJSON_THREADS_ENABLED=1`.
+
 ---
 
 ## Overview

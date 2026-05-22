@@ -15,7 +15,9 @@ FASTFHIR_INSTALL="${REPO_ROOT}/local"
 FASTFHIR_STAMP="${FASTFHIR_INSTALL}/.fastfhir_install_stamp"
 FASTFHIR_DEFAULT_REPO="${FASTFHIR_DEFAULT_REPO:-https://github.com/ryanlandvater/FastFHIR.git}"
 FASTFHIR_SIMDJSON_HEADER="${FASTFHIR_BUILD}/_deps/simdjson-src/include/simdjson.h"
-BUILD_DIR="${REPO_ROOT}/build/bench"
+BENCH_BAZEL_BUILD_ROOT="${EXTERNAL_DIR}/bazel-bench-build"
+BENCH_BAZEL_OUTPUT_BASE="${BENCH_BAZEL_BUILD_ROOT}/output-base"
+BENCH_BAZEL_REPOSITORY_CACHE="${BENCH_BAZEL_BUILD_ROOT}/repository-cache"
 SYNTHEA_DIR="${REPO_ROOT}/datasets/synthea"
 SYNTHEA_DATA_URL="${SYNTHEA_DATA_URL:-https://synthetichealth.github.io/synthea-sample-data/downloads/latest/synthea_sample_data_fhir_latest.zip}"
 THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
@@ -25,6 +27,8 @@ FORCE_BENCH_REBUILD="${FORCE_BENCH_REBUILD:-0}"
 GOOGLE_FHIR_ENABLE="${GOOGLE_FHIR_ENABLE:-1}"
 GOOGLE_FHIR_DIR="${EXTERNAL_DIR}/google-fhir"
 GOOGLE_FHIR_BUILD="${EXTERNAL_DIR}/google-fhir-build"
+GOOGLE_FHIR_HEADERS="${EXTERNAL_DIR}/google-fhir-headers"
+GOOGLE_FHIR_ARTIFACTS="${EXTERNAL_DIR}/google-fhir-artifacts"
 GOOGLE_FHIR_STAMP="${FASTFHIR_INSTALL}/.google_fhir_build_stamp"
 GOOGLE_FHIR_DEFAULT_REPO="${GOOGLE_FHIR_DEFAULT_REPO:-https://github.com/google/fhir.git}"
 GOOGLE_FHIR_SYNC_REMOTE="${GOOGLE_FHIR_SYNC_REMOTE:-0}"
@@ -72,7 +76,40 @@ cleanup_google_fhir_artifacts() {
   rm -rf "${GOOGLE_FHIR_OUTPUT_BASE}" "${GOOGLE_FHIR_REPOSITORY_CACHE}"
   rm -rf "${GOOGLE_FHIR_DIR}/bazel-bin" "${GOOGLE_FHIR_DIR}/bazel-out" "${GOOGLE_FHIR_DIR}/bazel-testlogs"
   find "${GOOGLE_FHIR_DIR}" -maxdepth 1 -type l -name 'bazel-*' -delete 2>/dev/null || true
+  rm -rf "${GOOGLE_FHIR_HEADERS}" "${GOOGLE_FHIR_ARTIFACTS}"
   rm -rf "${GOOGLE_FHIR_BUILD}"
+}
+
+stage_google_fhir_runtime_artifacts() {
+  local proto_src="${GOOGLE_FHIR_OUTPUT_BASE}/external/com_google_protobuf/src"
+  local absl_src="${GOOGLE_FHIR_OUTPUT_BASE}/external/com_google_absl"
+  local dylib_src="${GOOGLE_FHIR_OUTPUT_BASE}/execroot/com_google_fhir/bazel-out/darwin_arm64-fastbuild/bin/cc/google/fhir/liblibgoogle_fhir_bundled.dylib"
+  local proto_dest="${GOOGLE_FHIR_HEADERS}/protobuf"
+  local absl_dest="${GOOGLE_FHIR_HEADERS}/absl"
+  local dylib_dest_dir="${GOOGLE_FHIR_ARTIFACTS}/lib"
+  local dylib_dest="${dylib_dest_dir}/liblibgoogle_fhir_bundled.dylib"
+
+  if [[ ! -f "${dylib_src}" ]]; then
+    echo -e "${RED}Error: Google FHIR dylib not found at ${dylib_src}${NC}" >&2
+    return 1
+  fi
+
+  echo -e "${YELLOW}Staging Google FHIR dependency headers for Bazel sandbox...${NC}"
+  rm -rf "${GOOGLE_FHIR_HEADERS}"
+  mkdir -p "${proto_dest}" "${absl_dest}"
+  rsync -a --include='*/' --include='*.h' --include='*.inc' --include='*.proto' --exclude='*' \
+    "${proto_src}/" "${proto_dest}/"
+  rsync -a --include='*/' --include='*.h' --include='*.inc' --include='*.def' --exclude='*' \
+    "${absl_src}/" "${absl_dest}/"
+  echo -e "${GREEN}Header staging complete: ${GOOGLE_FHIR_HEADERS}${NC}"
+
+  echo -e "${YELLOW}Staging relocatable Google FHIR runtime dylib...${NC}"
+  rm -rf "${GOOGLE_FHIR_ARTIFACTS}"
+  mkdir -p "${dylib_dest_dir}"
+  cp "${dylib_src}" "${dylib_dest}"
+  chmod u+w "${dylib_dest}"
+  install_name_tool -id "@rpath/liblibgoogle_fhir_bundled.dylib" "${dylib_dest}"
+  echo -e "${GREEN}Runtime dylib staging complete: ${dylib_dest}${NC}"
 }
 
 trap cleanup_google_fhir_artifacts EXIT
@@ -609,9 +646,12 @@ EOF
 
     popd >/dev/null
     echo "${GOOGLE_FHIR_BUILD_FINGERPRINT}" > "${GOOGLE_FHIR_STAMP}"
+
   else
     echo -e "${GREEN}Google FHIR build is up to date; skipping rebuild.${NC}"
   fi
+
+  stage_google_fhir_runtime_artifacts
 
   if [[ "${TEST_GOOGLE_FHIR_COMPONENTS}" == "1" ]]; then
     echo -e "${YELLOW}Step 2C: Testing Google FHIR components individually...${NC}"
@@ -683,40 +723,59 @@ fi
 echo -e "${GREEN}Synthea JSON is ready for runtime ingestion by bench_harness.${NC}"
 
 # ============================================================================
-# Step 4: Configure and Build Benchmark
+# Step 4: Build benchmark targets with Bazel
 # ============================================================================
-echo -e "${YELLOW}Step 4: Building benchmark harness...${NC}"
+echo -e "${YELLOW}Step 4: Building benchmark harness with Bazel...${NC}"
 
-mkdir -p "${BUILD_DIR}"
+BAZELISK_BIN="$(ensure_bazelisk)"
+mkdir -p "${BENCH_BAZEL_OUTPUT_BASE}" "${BENCH_BAZEL_REPOSITORY_CACHE}"
 
 if [[ "${FORCE_BENCH_REBUILD}" == "1" ]]; then
-  rm -rf "${BUILD_DIR}"
-  mkdir -p "${BUILD_DIR}"
+  rm -rf "${BENCH_BAZEL_OUTPUT_BASE}" "${BENCH_BAZEL_REPOSITORY_CACHE}"
+  mkdir -p "${BENCH_BAZEL_OUTPUT_BASE}" "${BENCH_BAZEL_REPOSITORY_CACHE}"
 fi
 
-cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
-  -DFASTFHIR_ROOT="${FASTFHIR_DIR}" \
-  -DFASTFHIR_INSTALL_PREFIX="${FASTFHIR_INSTALL}" \
-  -DFASTFHIR_BUILD_DIR="${FASTFHIR_BUILD}" \
-  -DBENCH_ENABLE_HL7PARSER="${HL7PARSER_ENABLE}" \
-  -DHL7PARSER_ROOT="${HL7PARSER_DIR}"
+BENCH_BAZEL_FLAGS=(
+  "--enable_bzlmod=false"
+  "--output_base=${BENCH_BAZEL_OUTPUT_BASE}"
+  "--repository_cache=${BENCH_BAZEL_REPOSITORY_CACHE}"
+  "--noshow_progress"
+)
 
-if ! cmake --build "${BUILD_DIR}" --parallel "${THREADS}"; then
-  echo -e "${RED}Benchmark build failed${NC}"
+pushd "${REPO_ROOT}" >/dev/null
+export USE_BAZEL_VERSION="${GOOGLE_FHIR_BAZEL_VERSION}"
+
+if ! "${BAZELISK_BIN}" build \
+  "${BENCH_BAZEL_FLAGS[@]}" \
+  --compilation_mode=opt \
+  --jobs="${THREADS}" \
+  //bench:bench_harness //bench:bench_timing_conformance; then
+  echo -e "${RED}Benchmark Bazel build failed${NC}"
+  popd >/dev/null
   exit 1
 fi
 
 if [[ "${TEST_BENCH_COMPONENTS}" == "1" ]]; then
   echo -e "${YELLOW}Step 4B: Testing benchmark components individually...${NC}"
-  cmake --build "${BUILD_DIR}" --target bench_harness --parallel "${THREADS}"
-  cmake --build "${BUILD_DIR}" --target bench_timing_conformance --parallel "${THREADS}"
+  if ! "${BAZELISK_BIN}" test \
+    "${BENCH_BAZEL_FLAGS[@]}" \
+    --compilation_mode=opt \
+    --test_output=errors \
+    --jobs="${THREADS}" \
+    //bench:timing_conformance_test; then
+    echo -e "${RED}Benchmark Bazel tests failed${NC}"
+    popd >/dev/null
+    exit 1
+  fi
 fi
+
+popd >/dev/null
 
 echo -e "${GREEN}=== Setup Complete ===${NC}"
 echo ""
 echo "Run the benchmark:"
 echo "  cd ${REPO_ROOT}"
-echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./build/bench/bench/bench_harness"
+echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./bazel-bin/bench/bench_harness"
 echo ""
 echo "Run validation test:"
-echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./build/bench/bench/bench_timing_conformance"
+echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./bazel-bin/bench/bench_timing_conformance"

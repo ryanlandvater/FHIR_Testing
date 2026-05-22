@@ -6,20 +6,21 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #if defined(ARM_FASTFHIR)
 #include <FF_Bundle.hpp>
-#define BENCH_TEST4_ENRICH_FN enrich_fastfhir
+#define BENCH_TEST_4_ENRICH_FN enrich_fastfhir
 #elif defined(ARM_JSON)
 #include <nlohmann/json.hpp>
-#define BENCH_TEST4_ENRICH_FN enrich_json
+#define BENCH_TEST_4_ENRICH_FN enrich_json
 #elif defined(ARM_HL7V2)
 #include "hl7v2_message.hpp"
-#define BENCH_TEST4_ENRICH_FN enrich_hl7v2
+#define BENCH_TEST_4_ENRICH_FN enrich_hl7v2
 #elif defined(ARM_GOOGLE_FHIR)
 #include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
 #include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
-#define BENCH_TEST4_ENRICH_FN enrich_google_fhir
+#define BENCH_TEST_4_ENRICH_FN enrich_google_fhir
 #endif
 
 #include "bench_test_1.hpp"
@@ -178,14 +179,14 @@ inline std::string first_patient_id(const std::string& payload) {
   return {};
 }
 
-inline void append_observation_record(std::string& payload, const std::string& observation_bytes) {
-  payload.push_back('O');
-  const uint32_t len = static_cast<uint32_t>(observation_bytes.size());
+inline void append_record(std::string& payload, char record_type, const std::string& record_bytes) {
+  payload.push_back(record_type);
+  const uint32_t len = static_cast<uint32_t>(record_bytes.size());
   payload.push_back(static_cast<char>(len & 0xFFu));
   payload.push_back(static_cast<char>((len >> 8) & 0xFFu));
   payload.push_back(static_cast<char>((len >> 16) & 0xFFu));
   payload.push_back(static_cast<char>((len >> 24) & 0xFFu));
-  payload.append(observation_bytes);
+  payload.append(record_bytes);
 }
 
 inline EnrichResult<StreamType> enrich_google_fhir(const StreamType& payload,
@@ -193,20 +194,78 @@ inline EnrichResult<StreamType> enrich_google_fhir(const StreamType& payload,
   Timer timer;
   timer.start();
 
+  // Materialize all protobuf records first, then mutate and re-serialize the full stream.
+  std::vector<google::fhir::r4::core::Patient> patients;
+  std::vector<google::fhir::r4::core::Observation> observations;
+  std::vector<std::pair<char, std::size_t>> record_order;
+
+  patients.reserve(256);
+  observations.reserve(1024);
+  record_order.reserve(2048);
+
+  std::size_t cursor = 0;
+  while (cursor + 5 <= payload.size()) {
+    const char record_type = payload[cursor];
+    const uint32_t record_size = read_u32_le(payload, cursor + 1);
+    cursor += 5;
+
+    if (cursor + record_size > payload.size()) {
+      throw std::runtime_error("test_4::enrich_google_fhir encountered truncated protobuf record");
+    }
+
+    const char* record_ptr = payload.data() + cursor;
+    if (record_type == 'P') {
+      google::fhir::r4::core::Patient patient;
+      if (!patient.ParseFromArray(record_ptr, static_cast<int>(record_size))) {
+        throw std::runtime_error("test_4::enrich_google_fhir failed to parse Patient record");
+      }
+      patients.push_back(std::move(patient));
+      record_order.push_back({'P', patients.size() - 1});
+    } else if (record_type == 'O') {
+      google::fhir::r4::core::Observation observation;
+      if (!observation.ParseFromArray(record_ptr, static_cast<int>(record_size))) {
+        throw std::runtime_error("test_4::enrich_google_fhir failed to parse Observation record");
+      }
+      observations.push_back(std::move(observation));
+      record_order.push_back({'O', observations.size() - 1});
+    } else {
+      throw std::runtime_error("test_4::enrich_google_fhir encountered unknown protobuf record type");
+    }
+
+    cursor += record_size;
+  }
+
   google::fhir::r4::core::Observation observation;
-  const auto patient_id = first_patient_id(payload);
+  std::string patient_id;
+  for (const auto& patient : patients) {
+    if (patient.has_id()) {
+      patient_id = patient.id().value();
+      break;
+    }
+  }
   const std::string fallback_patient_id =
       patient_id.empty() ? std::string("benchmark-enrich-patient") : patient_id;
   assign::GoogleObservationTarget target{observation, fallback_patient_id};
   assign::assign_observation(enrichment_observation, target);
 
-  std::string observation_bytes;
-  if (!observation.SerializeToString(&observation_bytes)) {
-    throw std::runtime_error("test_4::enrich_google_fhir failed to serialize Observation");
-  }
+  observations.push_back(std::move(observation));
+  record_order.push_back({'O', observations.size() - 1});
 
-  StreamType enriched_stream = payload;
-  append_observation_record(enriched_stream, observation_bytes);
+  StreamType enriched_stream;
+  enriched_stream.reserve(payload.size() + 512);
+  for (const auto& [record_type, idx] : record_order) {
+    std::string record_bytes;
+    if (record_type == 'P') {
+      if (!patients[idx].SerializeToString(&record_bytes)) {
+        throw std::runtime_error("test_4::enrich_google_fhir failed to serialize Patient record");
+      }
+    } else {
+      if (!observations[idx].SerializeToString(&record_bytes)) {
+        throw std::runtime_error("test_4::enrich_google_fhir failed to serialize Observation record");
+      }
+    }
+    append_record(enriched_stream, record_type, record_bytes);
+  }
 
   EnrichMetricsSummary summary;
   summary.source_bytes = payload.size();

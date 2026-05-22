@@ -58,7 +58,7 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   out.queried_value = test_3::format_query_summary(query_summary);
   out.reconstructed_bundle_json = payload;
 
-  auto enrich_result = test_4::BENCH_TEST4_ENRICH_FN(payload, enrichment_observation_fixture());
+  auto enrich_result = test_4::BENCH_TEST_4_ENRICH_FN(payload, enrichment_observation_fixture());
   out.metrics.push_back(test_4::enrich_metric("hl7v2", enrich_result.summary.duration_ns));
   out.enriched_stream = std::move(enrich_result.enriched_stream);
   out.enrich_metrics_summary = test_4::format_enrich_summary(enrich_result.summary);

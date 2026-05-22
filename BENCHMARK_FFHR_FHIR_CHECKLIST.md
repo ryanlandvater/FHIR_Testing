@@ -41,3 +41,7 @@ Status legend: [ ] Not Started, [~] In Progress, [x] Done, [!] Blocked
 - Current query requirement is birthDate plus LOINC 2085-9 observation match check.
 - Current serialization scope includes Patient, Observation, Encounter, Condition.
 - HL7v2 enablement is now in progress; this checklist tracks active migration from two-arm to three-arm runtime.
+- simdjson ingest behavior is profile-sensitive in this workspace: Release-class consumer builds are the validation baseline for CAPACITY-sensitive runs.
+- The confirmed CMake-side ingest fix was consumer compile-definition parity with `ff_ingest`, specifically `SIMDJSON_THREADS_ENABLED=1`.
+- Failed detours to avoid repeating: do not patch benchmark ingestion through `ff_ingest`, and do not assume PIC/PIE tweaks are the root cause.
+- Bazel runs are currently not the authoritative validation baseline until runtime parity is re-confirmed.

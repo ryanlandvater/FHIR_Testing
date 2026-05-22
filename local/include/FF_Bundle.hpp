@@ -12,20 +12,17 @@ struct BundleentryresponseData;
 struct BundleentrysearchData;
 struct BundlelinkData;
 
-struct BundleentryresponseData {
+struct BundlelinkData {
     std::string_view id;
     std::vector<ExtensionData> extension;
     std::vector<ExtensionData> modifierextension;
-    std::string_view status;
-    std::string_view location;
-    std::string_view etag;
-    std::string_view lastmodified;
-    ResourceReference outcome = {};
+    std::string_view relation;
+    std::string_view url;
 };
 
-Size SIZE_FF_BUNDLE_ENTRY_RESPONSE(const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
-Offset STORE_FF_BUNDLE_ENTRY_RESPONSE(BYTE* const __base, Offset start_off, const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
-BundleentryresponseData FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
+Size SIZE_FF_BUNDLE_LINK(const BundlelinkData& data, uint32_t __version = FHIR_VERSION_R5);
+Offset STORE_FF_BUNDLE_LINK(BYTE* const __base, Offset start_off, const BundlelinkData& data, uint32_t __version = FHIR_VERSION_R5);
+BundlelinkData FF_DESERIALIZE_BUNDLE_LINK(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
 struct BundleentryrequestData {
     std::string_view id;
@@ -55,17 +52,20 @@ Size SIZE_FF_BUNDLE_ENTRY_SEARCH(const BundleentrysearchData& data, uint32_t __v
 Offset STORE_FF_BUNDLE_ENTRY_SEARCH(BYTE* const __base, Offset start_off, const BundleentrysearchData& data, uint32_t __version = FHIR_VERSION_R5);
 BundleentrysearchData FF_DESERIALIZE_BUNDLE_ENTRY_SEARCH(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
-struct BundlelinkData {
+struct BundleentryresponseData {
     std::string_view id;
     std::vector<ExtensionData> extension;
     std::vector<ExtensionData> modifierextension;
-    std::string_view relation;
-    std::string_view url;
+    std::string_view status;
+    std::string_view location;
+    std::string_view etag;
+    std::string_view lastmodified;
+    ResourceReference outcome = {};
 };
 
-Size SIZE_FF_BUNDLE_LINK(const BundlelinkData& data, uint32_t __version = FHIR_VERSION_R5);
-Offset STORE_FF_BUNDLE_LINK(BYTE* const __base, Offset start_off, const BundlelinkData& data, uint32_t __version = FHIR_VERSION_R5);
-BundlelinkData FF_DESERIALIZE_BUNDLE_LINK(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
+Size SIZE_FF_BUNDLE_ENTRY_RESPONSE(const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
+Offset STORE_FF_BUNDLE_ENTRY_RESPONSE(BYTE* const __base, Offset start_off, const BundleentryresponseData& data, uint32_t __version = FHIR_VERSION_R5);
+BundleentryresponseData FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
 struct BundleentryData {
     std::string_view id;
@@ -103,11 +103,11 @@ Offset STORE_FF_BUNDLE(BYTE* const __base, Offset start_off, const BundleData& d
 BundleData FF_DESERIALIZE_BUNDLE(const BYTE* const __base, Offset __offset, Size __size, uint32_t __version);
 
 namespace FastFHIR {
-template<> struct TypeTraits<BundleentryresponseData> {
-    static constexpr auto recovery = RECOVER_FF_BUNDLE_ENTRY_RESPONSE;
-    static Size size(const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_ENTRY_RESPONSE(d, v); }
-    static void store(BYTE* const base, Offset off, const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_ENTRY_RESPONSE(base, off, d, v); }
-    static BundleentryresponseData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(base, off, size, v); }
+template<> struct TypeTraits<BundlelinkData> {
+    static constexpr auto recovery = RECOVER_FF_BUNDLE_LINK;
+    static Size size(const BundlelinkData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_LINK(d, v); }
+    static void store(BYTE* const base, Offset off, const BundlelinkData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_LINK(base, off, d, v); }
+    static BundlelinkData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_LINK(base, off, size, v); }
 };
 } // namespace FastFHIR
 
@@ -130,11 +130,11 @@ template<> struct TypeTraits<BundleentrysearchData> {
 } // namespace FastFHIR
 
 namespace FastFHIR {
-template<> struct TypeTraits<BundlelinkData> {
-    static constexpr auto recovery = RECOVER_FF_BUNDLE_LINK;
-    static Size size(const BundlelinkData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_LINK(d, v); }
-    static void store(BYTE* const base, Offset off, const BundlelinkData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_LINK(base, off, d, v); }
-    static BundlelinkData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_LINK(base, off, size, v); }
+template<> struct TypeTraits<BundleentryresponseData> {
+    static constexpr auto recovery = RECOVER_FF_BUNDLE_ENTRY_RESPONSE;
+    static Size size(const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { return SIZE_FF_BUNDLE_ENTRY_RESPONSE(d, v); }
+    static void store(BYTE* const base, Offset off, const BundleentryresponseData& d, uint32_t v = FHIR_VERSION_R5) { STORE_FF_BUNDLE_ENTRY_RESPONSE(base, off, d, v); }
+    static BundleentryresponseData read(const BYTE* const base, Offset off, Size size, uint32_t v) { return FF_DESERIALIZE_BUNDLE_ENTRY_RESPONSE(base, off, size, v); }
 };
 } // namespace FastFHIR
 

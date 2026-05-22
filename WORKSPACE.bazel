@@ -1,0 +1,81 @@
+workspace(name = "fhir_testing")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+http_archive(
+    name = "nlohmann_json",
+    urls = ["https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz"],
+    sha256 = "d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d",
+    strip_prefix = "json",
+    build_file_content = """
+cc_library(
+    name = "json",
+    hdrs = glob(["single_include/**/*.hpp", "single_include/**/*.h"]),
+    includes = ["single_include"],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
+new_local_repository(
+    name = "google_fhir_fastbuild_bin",
+    path = ".external/google-fhir-build/output-base/execroot/com_google_fhir/bazel-out/darwin_arm64-fastbuild/bin",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "r4_proto_headers",
+    hdrs = glob(["proto/**/*.h", "proto/**/*.pb.h"]),
+    includes = ["."],
+    deps = [
+        "@google_absl_headers//:headers",
+        "@google_protobuf_headers//:headers",
+    ],
+)
+""",
+)
+
+new_local_repository(
+    name = "google_fhir_runtime_dylib",
+    path = ".external/google-fhir-artifacts/lib",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_import(
+    name = "google_fhir_bundled_dylib",
+    shared_library = "liblibgoogle_fhir_bundled.dylib",
+)
+""",
+)
+
+new_local_repository(
+    name = "google_protobuf_headers",
+    path = ".external/google-fhir-headers/protobuf",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = glob(["**/*.h", "**/*.proto"]),
+    textual_hdrs = glob(["**/*.inc"]),
+    includes = ["."],
+)
+""",
+)
+
+new_local_repository(
+    name = "google_absl_headers",
+    path = ".external/google-fhir-headers/absl",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = glob(["absl/**/*.h"]),
+    textual_hdrs = glob(["absl/**/*.inc", "absl/**/*.def"]),
+    includes = ["."],
+)
+""",
+)
+

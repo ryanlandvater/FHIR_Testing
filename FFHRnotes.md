@@ -140,29 +140,40 @@ Fix needed upstream:
 
 Confirmed diagnosis in this consumer (2026-05-05):
 
-- `ff_ingest` and `bench_harness` loaded the same `libfastfhir_ingestor.dylib`, but behavior diverged by caller build profile.
+- `ff_ingest` and `bench_harness` can load the same `libfastfhir_ingestor.dylib`, but behavior still diverges when the consumer executable is compiled with a different simdjson compile-definition set.
 - `bench_harness` in Debug produced repeated root-path failures at parser allocation:
   - `simdjson allocate failed before root parse: CAPACITY...`
   - with sane request sizes (for example ~1.09 MB, ~2.91 MB).
-- Rebuilding `bench_harness` in Release (`-O3 -DNDEBUG`) removed CAPACITY skips for patient files and loaded the expected patient set.
+- A minimal consumer executable linked against `libfastfhir_ingestor.dylib` reproduced the same CAPACITY failure until it was compiled with `SIMDJSON_THREADS_ENABLED=1`, matching the working `ff_ingest` build.
+- After adding `SIMDJSON_THREADS_ENABLED=1` to the benchmark consumer target, the same in-process ingest path successfully parsed the previously failing Synthea patient file and `bench_harness` loaded the expected patient set.
 
 What did *not* fix it during validation:
 
 - Forcing per-file compile flags on `synthea_fixture.cpp` alone did not eliminate CAPACITY failures in Debug benchmark builds.
 - Forcing `target_compile_options(bench_harness PRIVATE -O3 -DNDEBUG -fPIE)` while still configuring the project as Debug did not eliminate CAPACITY failures.
+- Linking the bundled `libsimdjson.a` directly into the benchmark consumer did not eliminate CAPACITY failures by itself.
+- Position-independent-code guesses (`-fPIC`/`-fPIE`) were a dead-end for this specific failure.
 
 What consistently reproduced success:
 
-- Building and running benchmark in Release profile end-to-end (same profile class as the working `ff_ingest` tool build).
+- Building and running the consumer with the same effective simdjson compile definition as `ff_ingest`: `SIMDJSON_THREADS_ENABLED=1`.
+- Release-class consumer builds remain the validation baseline for parity-sensitive ingest testing in this workspace.
 
 Implication:
 
-- The failure mode is not "bad file size passed in"; it is compile-profile mismatch at the install boundary (caller/toolchain parity issue).
+- The failure mode is not "bad file size passed in"; it is a consumer/build-contract mismatch at the install boundary.
+- Matching the shared library alone is insufficient if the consumer compiles against the headers with different simdjson configuration macros.
 
 Impact:
 
 - Integration can appear compile/link-correct but fail at runtime on valid payloads.
 - Downstream consumers can misdiagnose this as data-size or parser-limit failure.
+
+Warning for future agents:
+
+- Do not route benchmark ingestion through `ff_ingest` to paper over this failure. That changes benchmark behavior instead of fixing the consumer build contract.
+- Do not assume PIC/PIE or ad hoc linker changes are the root cause just because `ff_ingest` works.
+- First compare the working tool's compile definitions against the failing consumer. In this case the decisive mismatch was `SIMDJSON_THREADS_ENABLED=1`.
 
 Fix needed upstream:
 
@@ -179,6 +190,8 @@ Consumer requirements to avoid this failure mode during development:
 - Treat profile parity as mandatory for ingest validation:
   - Debug consumer must validate against Debug-built FastFHIR artifacts.
   - Release/RelWithDebInfo consumer must validate against Release-class FastFHIR artifacts.
+- Treat compile-definition parity as mandatory too:
+  - consumer targets that include FastFHIR ingest headers must inherit the same required simdjson defines as the working FastFHIR ingest toolchain.
 - Do not treat Debug-consumer + Release-library ingest behavior as authoritative.
 - Keep two lanes in CI/local scripts:
   - logic lane (Debug allowed),

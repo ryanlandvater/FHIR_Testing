@@ -59,13 +59,13 @@ export SYNTHEA_DATA_URL=https://github.com/synthetichealth/synthea-sample-data/a
 ## Run Benchmark
 
 ```bash
-DYLD_LIBRARY_PATH=local/lib ./build/bench/bench/bench_harness
+DYLD_LIBRARY_PATH=local/lib ./bazel-bin/bench/bench_harness
 ```
 
 With PostgreSQL persistence:
 
 ```bash
-DYLD_LIBRARY_PATH=local/lib ./build/bench/bench/bench_harness \
+DYLD_LIBRARY_PATH=local/lib ./bazel-bin/bench/bench_harness \
   --db "host=localhost port=5432 dbname=fhir_benchmark user=postgres password=postgres"
 ```
 
@@ -78,7 +78,13 @@ arm,stage,duration_ns,target_mb,patients_in_bundle
 ## Validate
 
 ```bash
-DYLD_LIBRARY_PATH=local/lib ./build/bench/bench/bench_timing_conformance
+DYLD_LIBRARY_PATH=local/lib ./bazel-bin/bench/bench_timing_conformance
+```
+
+Or run as a Bazel test:
+
+```bash
+bazel test //bench:timing_conformance_test
 ```
 
 ## Analyze
@@ -88,3 +94,21 @@ Use `notebooks/benchmark_results.ipynb`.
 ## Notes
 
 API limitations and fallback decisions are documented in `FFHRnotes.md`.
+
+## Warning: FastFHIR Ingest Consumer Build Contract
+
+If `ff_ingest` works on a Synthea JSON file but `bench_harness` fails with `simdjson Exception: CAPACITY`, do not assume the file is too large and do not patch around it by calling `ff_ingest` from the benchmark.
+
+The benchmark consumer must compile with the same required simdjson configuration as the working FastFHIR ingest toolchain. In this workspace the decisive fix was:
+
+```cmake
+target_compile_definitions(bench_core INTERFACE SIMDJSON_THREADS_ENABLED=1)
+```
+
+What future agents should not do first:
+
+- Do not add an `ff_ingest` fallback inside benchmark code.
+- Do not treat `-fPIC` or `-fPIE` as the root cause without proving it.
+- Do not assume matching `libfastfhir_ingestor.dylib` paths alone is sufficient.
+
+Use `FFHRnotes.md` as the authoritative incident log for this failure mode.

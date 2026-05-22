@@ -1,0 +1,64 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "bench_core_common",
+    srcs = [
+        "arm_fastfhir.cpp",
+        "arm_json_fhir.cpp",
+        "synthea_fixture.cpp",
+    ],
+    hdrs = [
+        "bench_test_1.hpp",
+        "bench_test_2.hpp",
+        "bench_test_3.hpp",
+        "bench_test_4.hpp",
+        "harness.hpp",
+        "hl7v2_message.hpp",
+    ],
+    deps = [
+        "//:fastfhir_runtime",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "bench_core_harness",
+    srcs = [
+        "arm_google_fhir.cpp",
+        "arm_hl7v2.cpp",
+    ],
+    deps = [
+        ":bench_core_common",
+        "//:google_fhir_runtime",
+    ],
+)
+
+cc_binary(
+    name = "bench_harness",
+    srcs = ["main.cpp"],
+    data = ["enrich.json"],
+    deps = [
+        ":bench_core_harness",
+    ],
+    linkopts = [
+        "-Wl,-rpath,/Users/RyanLandvater/Programming_Projects/FHIR_Testing/.external/google-fhir-artifacts/lib",
+    ],
+)
+
+cc_binary(
+    name = "bench_timing_conformance",
+    srcs = ["timing_conformance_test.cpp"],
+    data = ["enrich.json"],
+    deps = [
+        ":bench_core_common",
+    ],
+)
+
+cc_test(
+    name = "timing_conformance_test",
+    srcs = ["timing_conformance_test.cpp"],
+    data = ["enrich.json"],
+    deps = [
+        ":bench_core_common",
+    ],
+)

@@ -6,6 +6,8 @@ This document summarizes the implementation, execution, and validation of a comp
 
 **Status**: 🟡 **In Progress: Google FHIR Stage 1 Live; Stages 2/3 Stubbed**
 
+**Validation note**: The historical CMake success path in this document should be read as Release-class consumer behavior. Bazel runtime parity is currently not equivalent and still needs separate confirmation. For the CMake consumer, the decisive ingest fix was compile-definition parity with `ff_ingest` (`SIMDJSON_THREADS_ENABLED=1`), not an `ff_ingest` benchmark fallback.
+
 ---
 
 ## Implementation Phases
@@ -110,7 +112,7 @@ This document summarizes the implementation, execution, and validation of a comp
 | Ingestor linker errors | Symbol not exported in libfastfhir.dylib | Pivoted to struct-based Builder (fully public API) |
 | Directory detection | Synthea files at datasets/synthea/, not datasets/synthea/fhir/ | Added fallback logic in main.cpp |
 
-**Outcome**: Clean build of all targets (bench_harness, bench_timing_conformance)
+**Outcome**: Clean build of all targets (bench_harness, bench_timing_conformance) in the CMake flow; do not infer Bazel runtime parity from this line alone
 
 **Upstream Findings**: Documented in [FFHRnotes.md](FFHRnotes.md)
 
@@ -123,6 +125,8 @@ This document summarizes the implementation, execution, and validation of a comp
 ```bash
 ./build/bench/bench/bench_harness
 ```
+
+**Note**: This section reflects the historical CMake path. The current Bazel harness should be treated separately because it still crashes in the HL7 enrich path during runtime validation.
 
 ---
 
