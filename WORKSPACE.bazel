@@ -1,4 +1,4 @@
-workspace(name = "fhir_testing")
+workspace(name = "fastfhir_benchmarking")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
@@ -75,6 +75,21 @@ cc_library(
     hdrs = glob(["absl/**/*.h"]),
     textual_hdrs = glob(["absl/**/*.inc", "absl/**/*.def"]),
     includes = ["."],
+)
+""",
+)
+
+new_local_repository(
+    name = "libpq_win",
+    path = "C:/PROGRA~1/POSTGR~1/16",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "libpq",
+    hdrs = glob(["include/*.h"]),
+    includes = ["include"],
+    linkopts = ["C:/PROGRA~1/POSTGR~1/16/lib/libpq.lib"],
 )
 """,
 )

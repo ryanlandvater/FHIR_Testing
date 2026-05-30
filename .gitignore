@@ -1,6 +1,13 @@
 # macOS
 .DS_Store
 
+# Bazel build artifacts
+/bazel-bin/
+/bazel-out/
+/bazel-testlogs/
+/bazel-fastfhir-benchmark/
+MODULE.bazel.lock
+
 # Python/Jupyter
 .ipynb_checkpoints/
 __pycache__/

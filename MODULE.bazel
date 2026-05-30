@@ -1,5 +1,5 @@
 module(
-    name = "fhir_testing",
+    name = "fastfhir_benchmarking",
     version = "0.1.0",
 )
 
