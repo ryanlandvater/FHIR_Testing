@@ -105,13 +105,14 @@ static inline QuerySummary query(const std::string& payload);
 static inline QuerySummary query(const std::string& payload);
 ```
 
-- **Parser**: None — no `parse_batch()` call. Scans the raw concatenated payload line-by-line via `\r` splitting, using `segment_field()` (a lightweight `|`-delimited field extractor) to pull specific fields on demand
-- **Walk**: Scans each line looking for `PID|` and `OBX|` prefixes:
-  - `PID|` → increments patient count, extracts PID-7 (birthdate) via `segment_field(seg, 8)` (1-based)
-  - `OBX|` → increments observation count, extracts OBX-3 (code), OBX-2 (value type), OBX-5 (value) via `segment_field()`
-- **LOINC matching**: Checks if OBX-3 starts with `"2085-9"` (LOINC cholesterol code)
-- **Value classification**: Uses OBX-2 value type field: `NM` → Quantity, `CE` → CodeableConcept, `ST` → String, `CWE` → Code
-- **Cost model**: Single-pass line scan with on-demand field extraction — zero heap allocations for parsing, intentionally lighter than materialize(). This models the common EHR pattern of streaming through HL7v2 messages without loading the full parse tree into memory.
+- **Parser**: `hl7v2::parse_batch(payload)` — builds the full 4-level `MessageTree` AST (Segment → Field → Component → Subcomponent), matching the parse-before-query cost model of all other arms
+- **Walk**: Iterates parsed messages and their segments, using typed views for field access:
+  - `PID` segments → `hl7v2::PidView` → extracts `birth_date()` (PID-7)
+  - `OBX` segments → `hl7v2::ObxView` → extracts `observation_id()` (OBX-3.1), `value_type()` (OBX-2), `value()` (OBX-5)
+- **LOINC matching**: Compares `ObxView::observation_id()` (first component of OBX-3) directly against `"2085-9"`
+- **Value classification**: Maps OBX-2 value type field to `ValueKind`: `NM` → Quantity, `CE` → CodeableConcept, `ST` → String, `CWE` → Code
+- **Cost model**: Full HL7v2 parse (message boundary scan + `\r` → `|` → `^` → `&` hierarchical splitting) + segment iteration + typed view access. Equivalent in structure to the FFHR/JSON/Google FHIR test 3 paths (parse → walk → extract).
+- **Limitation**: `effective`, `issued`, and `component` fields are stored in ZFX custom segments and are not extracted by the query — these `QuerySummary` counters remain zero for the HL7v2 arm.
 
 ## Key Design Decisions
 

@@ -39,10 +39,11 @@ self-contained with its own MSH segment.
   stream into a 4-level `MessageTree` AST per message (`Segment → Field →
   Component → Subcomponent`), then walks every syntactic node counting
   `touched_nodes`. Full parse + tree walk cost.
-- **Test 3**: `test_3::query(payload)` — scans the raw concatenated payload
-  line-by-line, using `segment_field()` for on-demand field extraction
-  (no parse tree allocated). Extracts patient count, birthdate, LOINC matches,
-  and observation value type classification.
+- **Test 3**: `test_3::query(payload)` — calls `hl7v2::parse_batch()` to build
+  the full `MessageTree` AST, then iterates segments using typed views
+  (`PidView`, `ObxView`) to extract patient count, birthdate, LOINC matches,
+  and observation value type classification. This matches the parse-before-query
+  cost model of all other arms.
 - **Test 4**: `test_4::enrich_hl7v2(payload, obs)` — appends a new ORU^R01
   message to the payload string.
 

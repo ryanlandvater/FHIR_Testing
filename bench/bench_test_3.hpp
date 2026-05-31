@@ -529,106 +529,55 @@ static inline QuerySummary query(const std::string& payload) {
 
 #elif defined(ARM_HL7V2)
 
-#define TEST3_HL7_PATIENT_SEG "PID|"
-#define TEST3_HL7_OBS_SEG "OBX|"
-#define TEST3_HL7_FIELD_VALUE_TYPE 3
-#define TEST3_HL7_FIELD_CODE 4
-#define TEST3_HL7_FIELD_VALUE 6
-#define TEST3_HL7_FIELD_BIRTHDATE 8
-
-// Returns the one_based_index-th pipe-delimited field of a raw HL7 segment line
-// (1 = segment ID, 2 = first data field, etc.).
-inline std::string_view segment_field(std::string_view seg, std::size_t one_based_index) {
-  std::size_t field = 1;
-  std::size_t start = 0;
-  for (std::size_t i = 0; i <= seg.size(); ++i) {
-    if (i == seg.size() || seg[i] == '|') {
-      if (field == one_based_index) {
-        return seg.substr(start, i - start);
-      }
-      ++field;
-      start = i + 1;
-      if (field > one_based_index) {
-        break;
-      }
-    }
-  }
-  return {};
-}
-
 static inline QuerySummary query(const std::string& payload) {
-  QuerySummary summary;
+  // ── Parse into full MessageTree ──────────────────────────────────────
+  // Matches the cost model of all other arms: parse first, then query.
+  // Previously this arm used a raw line scan (no parse cost), which made
+  // HL7v2 test 3 results unfairly faster than FFHR / JSON / Google FHIR.
+  auto messages = hl7v2::parse_batch(payload);
 
-  // Query directly from raw HL7 segment lines to keep this arm allocation-light.
+  detail::QueryAccumulator acc;
 
-  std::size_t patient_count = 0;
-  std::size_t observation_count = 0;
-  std::size_t cholesterol_matches = 0;
-  std::size_t value_present = 0;
-  std::size_t value_quantity = 0;
-  std::size_t value_codeableconcept = 0;
-  std::size_t value_string = 0;
-  std::size_t value_code = 0;
-  std::string birthdate;
+  for (const auto& msg : messages) {
+    for (const auto& seg : msg.tree.segments) {
+      if (seg.name == "PID") {
+        hl7v2::PidView pid(seg);
+        acc.note_patient(pid.birth_date());
+      } else if (seg.name == "OBX") {
+        acc.note_observation();
 
-  std::size_t line_start = 0;
-  while (line_start < payload.size()) {
-    const auto line_end = payload.find('\r', line_start);
-    const auto end = line_end == std::string::npos ? payload.size() : line_end;
-    const std::string_view seg(payload.data() + line_start, end - line_start);
+        hl7v2::ObxView obx(seg);
 
-    if (seg.size() >= 4 && seg.substr(0, 4) == TEST3_HL7_PATIENT_SEG) {
-      ++patient_count;
-      if (birthdate.empty()) {
-        const auto bd = segment_field(seg, TEST3_HL7_FIELD_BIRTHDATE);
-        birthdate.assign(bd.data(), bd.size());
-      }
-    } else if (seg.size() >= 4 && seg.substr(0, 4) == TEST3_HL7_OBS_SEG) {
-      ++observation_count;
-      const auto id         = segment_field(seg, TEST3_HL7_FIELD_CODE);
-      const auto value_type = segment_field(seg, TEST3_HL7_FIELD_VALUE_TYPE);
-      const auto value      = segment_field(seg, TEST3_HL7_FIELD_VALUE);
-      if (id.rfind("2085-9", 0) == 0) {
-        ++cholesterol_matches;
-      }
-      if (!value.empty()) {
-        ++value_present;
-      }
-      if (value_type == "NM") {
-        ++value_quantity;
-      } else if (value_type == "CE") {
-        ++value_codeableconcept;
-      } else if (value_type == "ST") {
-        ++value_string;
-      } else if (value_type == "CWE") {
-        ++value_code;
+        // LOINC 2085-9 match: OBX-3 observation_id is the first component
+        // of the OBX-3 field (built by observation_code_id() during Test 1).
+        const auto obs_id = obx.observation_id();
+        if (obs_id == kCholesterolLoincCode) {
+          acc.note_loinc_2085_9();
+        }
+
+        // ── Value classification (OBX-2 value type → ValueKind) ──────────
+        const auto vt = obx.value_type();
+        const auto val = obx.value();
+        if (!val.empty()) {
+          if (vt == "NM") {
+            acc.note_observation_value(detail::ValueKind::Quantity);
+          } else if (vt == "CE") {
+            acc.note_observation_value(detail::ValueKind::CodeableConcept);
+          } else if (vt == "ST") {
+            acc.note_observation_value(detail::ValueKind::String);
+          } else if (vt == "CWE") {
+            acc.note_observation_value(detail::ValueKind::Code);
+          }
+        }
+        // Note: effective, issued, and component fields are not extractable
+        // from native OBX segments — they are stored in ZFX custom segments.
+        // These QuerySummary counters remain at zero for the HL7v2 arm.
       }
     }
-
-    if (line_end == std::string::npos) {
-      break;
-    }
-    line_start = line_end + 1;
   }
 
-  summary.patients = patient_count;
-  summary.birthdate = std::move(birthdate);
-  summary.observations = observation_count;
-  summary.loinc_2085_9_matches = cholesterol_matches;
-  summary.obs_value_present = value_present;
-  summary.obs_value_quantity = value_quantity;
-  summary.obs_value_codeableconcept = value_codeableconcept;
-  summary.obs_value_string = value_string;
-  summary.obs_value_code = value_code;
-  return summary;
+  return acc.finalize();
 }
-
-#undef TEST3_HL7_PATIENT_SEG
-#undef TEST3_HL7_OBS_SEG
-#undef TEST3_HL7_FIELD_VALUE_TYPE
-#undef TEST3_HL7_FIELD_CODE
-#undef TEST3_HL7_FIELD_VALUE
-#undef TEST3_HL7_FIELD_BIRTHDATE
 
 #endif
 
