@@ -106,17 +106,17 @@ These resources are referenced in `harness.hpp` but are **not actively serialize
 #include "proto/google/fhir/proto/r4/core/resources/bundle_and_contained_resource.pb.h"
 ```
 
-**Confirmed Resources** (from CMakeLists.txt static proto libs):
-1. **Patient** (`libpatient_proto.a`)
-2. **Observation** (`libobservation_proto.a`)
-3. **Bundle** + contained resources (`libbundle_and_contained_resource_proto.a`)
+**Confirmed Resources** (from Bazel proto targets):
+1. **Patient** (`patient_cc_proto`)
+2. **Observation** (`observation_cc_proto`)
+3. **Bundle** + contained resources (`bundle_and_contained_resource_cc_proto`)
 
 ### Supporting Proto Libraries
-From `CMakeLists.txt` GOOGLE_FHIR_STATIC_LIBS section:
-- `libdatatypes_proto.a` — FHIR primitive and complex data types
-- `libcodes_proto.a` — Administrative codes (e.g., gender, status enums)
-- `libvaluesets_proto.a` — Code systems and value sets
-- `libannotations_proto.a` — FHIR metadata/reflection support
+From Bazel build targets in `bench/BUILD.bazel`:
+- `datatypes_cc_proto` — FHIR primitive and complex data types
+- `codes_cc_proto` — Administrative codes (e.g., gender, status enums)
+- `valuesets_cc_proto` — Code systems and value sets
+- `annotations_cc_proto` — FHIR metadata/reflection support
 
 ### Estimated Full Coverage
 Based on the Google FHIR GitHub repository (https://github.com/google/fhir), the full library likely supports all R4 core resources matching FHIR specification (similar breadth to FastFHIR). However:

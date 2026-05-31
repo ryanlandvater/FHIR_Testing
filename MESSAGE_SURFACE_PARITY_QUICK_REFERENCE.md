@@ -102,7 +102,7 @@ Untested:    Encounter, Condition, Procedure, Medication, CarePlan,
 find .external/google-fhir/cc/google/fhir/proto/r4/core/resources/ -name "*.proto"
 
 # Check which are linked in benchmark
-grep -l "patient\|observation\|bundle\|..." CMakeLists.txt
+grep -l "patient\|observation\|bundle\|..." BUILD.bazel
 ```
 
 ---

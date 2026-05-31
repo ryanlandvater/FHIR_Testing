@@ -1,0 +1,18 @@
+diff --git a/proto/google/fhir/proto/BUILD b/proto/google/fhir/proto/BUILD
+deleted file mode 100644
+--- a/proto/google/fhir/proto/BUILD
++++ /dev/null
+@@ -1,1 +0,0 @@
+-# Removed so custom root BUILD can own proto_library rules
+diff --git a/proto/google/fhir/proto/r4/core/BUILD b/proto/google/fhir/proto/r4/core/BUILD
+deleted file mode 100644
+--- a/proto/google/fhir/proto/r4/core/BUILD
++++ /dev/null
+@@ -1,1 +0,0 @@
+-# Removed so custom root BUILD can own proto_library rules
+diff --git a/proto/google/fhir/proto/r4/core/resources/BUILD b/proto/google/fhir/proto/r4/core/resources/BUILD
+deleted file mode 100644
+--- a/proto/google/fhir/proto/r4/core/resources/BUILD
++++ /dev/null
+@@ -1,1 +0,0 @@
+-# Removed so custom root BUILD can own proto_library rules

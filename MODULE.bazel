@@ -4,6 +4,7 @@ module(
 )
 
 bazel_dep(name = "fastfhir", version = "2026.0.0")
+bazel_dep(name = "protobuf", version = "27.0", repo_name = "com_google_protobuf")
 
 local_path_override(
     module_name = "fastfhir",

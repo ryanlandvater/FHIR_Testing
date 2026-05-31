@@ -19,67 +19,6 @@ cc_library(
 )
 
 new_local_repository(
-    name = "google_fhir_fastbuild_bin",
-    path = ".external/google-fhir-build/output-base/execroot/com_google_fhir/bazel-out/darwin_arm64-fastbuild/bin",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "r4_proto_headers",
-    hdrs = glob(["proto/**/*.h", "proto/**/*.pb.h"]),
-    includes = ["."],
-    deps = [
-        "@google_absl_headers//:headers",
-        "@google_protobuf_headers//:headers",
-    ],
-)
-""",
-)
-
-new_local_repository(
-    name = "google_fhir_runtime_dylib",
-    path = ".external/google-fhir-artifacts/lib",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-cc_import(
-    name = "google_fhir_bundled_dylib",
-    shared_library = "liblibgoogle_fhir_bundled.dylib",
-)
-""",
-)
-
-new_local_repository(
-    name = "google_protobuf_headers",
-    path = ".external/google-fhir-headers/protobuf",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "headers",
-    hdrs = glob(["**/*.h", "**/*.proto"]),
-    textual_hdrs = glob(["**/*.inc"]),
-    includes = ["."],
-)
-""",
-)
-
-new_local_repository(
-    name = "google_absl_headers",
-    path = ".external/google-fhir-headers/absl",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "headers",
-    hdrs = glob(["absl/**/*.h"]),
-    textual_hdrs = glob(["absl/**/*.inc", "absl/**/*.def"]),
-    includes = ["."],
-)
-""",
-)
-
-new_local_repository(
     name = "libpq_win",
     path = "C:/PROGRA~1/POSTGR~1/16",
     build_file_content = """

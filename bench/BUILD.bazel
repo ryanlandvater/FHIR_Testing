@@ -51,7 +51,6 @@ cc_binary(
     defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
     copts = ["-I/opt/homebrew/opt/libpq/include"],
     linkopts = [
-        "-Wl,-rpath,/Users/RyanLandvater/Programming_Projects/FastFHIR-benchmarking/.external/google-fhir-artifacts/lib",
         "-L/opt/homebrew/opt/libpq/lib",
         "-lpq",
     ],
@@ -71,11 +70,10 @@ cc_binary(
     srcs = ["main.cpp"],
     data = ["enrich.json"],
     deps = [
-        ":bench_core_common",
-        ":bench_core_hl7v2",
+        ":bench_core_harness",
         "@libpq_win//:libpq",
     ],
-    defines = ["HAVE_LIBPQ", "HAVE_HL7V2"],
+    defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
 )
 
 cc_test(

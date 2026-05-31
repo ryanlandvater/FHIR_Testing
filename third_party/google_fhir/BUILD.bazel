@@ -1,0 +1,132 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ── FHIR custom annotations ──────────────────────────────────────────────
+# strip_import_prefix removes the package path so the import path matches
+# what Google FHIR proto files reference internally.
+
+proto_library(
+    name = "fhir_annotations_proto",
+    srcs = ["proto/google/fhir/proto/annotations.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = ["@com_google_protobuf//:descriptor_proto"],
+)
+
+cc_proto_library(
+    name = "fhir_annotations_cc_proto",
+    deps = [":fhir_annotations_proto"],
+)
+
+# ── R4 codes ─────────────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_codes_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/codes.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [":fhir_annotations_proto"],
+)
+
+cc_proto_library(
+    name = "r4_codes_cc_proto",
+    deps = [":r4_codes_proto"],
+)
+
+# ── R4 valuesets ─────────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_valuesets_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/valuesets.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [
+        ":fhir_annotations_proto",
+        ":r4_codes_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "r4_valuesets_cc_proto",
+    deps = [":r4_valuesets_proto"],
+)
+
+# ── R4 extensions ────────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_extensions_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/extensions.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [
+        ":fhir_annotations_proto",
+        ":r4_codes_proto",
+        ":r4_datatypes_proto",
+    ],
+)
+
+# ── R4 datatypes ─────────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_datatypes_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/datatypes.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [
+        ":fhir_annotations_proto",
+        ":r4_codes_proto",
+        ":r4_valuesets_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "r4_datatypes_cc_proto",
+    deps = [":r4_datatypes_proto"],
+)
+
+# ── R4 Observation ───────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_observation_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/resources/observation.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [
+        ":fhir_annotations_proto",
+        ":r4_codes_proto",
+        ":r4_datatypes_proto",
+        "@com_google_protobuf//:any_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "r4_observation_cc_proto",
+    deps = [":r4_observation_proto"],
+)
+
+# ── R4 Patient ───────────────────────────────────────────────────────────
+
+proto_library(
+    name = "r4_patient_proto",
+    srcs = ["proto/google/fhir/proto/r4/core/resources/patient.proto"],
+    strip_import_prefix = "/third_party/google_fhir",
+    deps = [
+        ":fhir_annotations_proto",
+        ":r4_codes_proto",
+        ":r4_datatypes_proto",
+        "@com_google_protobuf//:any_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "r4_patient_cc_proto",
+    deps = [":r4_patient_proto"],
+)
+
+# ── Umbrella target ──────────────────────────────────────────────────────
+
+cc_library(
+    name = "r4_core_protos",
+    deps = [
+        ":r4_codes_cc_proto",
+        ":r4_datatypes_cc_proto",
+        ":r4_observation_cc_proto",
+        ":r4_patient_cc_proto",
+    ],
+)

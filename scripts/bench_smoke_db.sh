@@ -25,12 +25,9 @@ EXPECTED_STAGE_KEYS=(
   "json_fhir:stage3_query"
 )
 
-BENCH_BIN="./build/bench/bench_harness"
-if [[ ! -x "$BENCH_BIN" && -x ./build/bench/bench/bench_harness ]]; then
-  BENCH_BIN="./build/bench/bench/bench_harness"
-fi
+BENCH_BIN="./bazel-bin/bench/bench_harness"
 if [[ ! -x "$BENCH_BIN" ]]; then
-  echo "bench_harness missing; build first with cmake --build build --target bench_harness" >&2
+  echo "bench_harness missing; build first with 'bazel build //bench:bench_harness'" >&2
   exit 1
 fi
 
@@ -44,7 +41,7 @@ docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -f /docker-entry
 
 LOG_FILE="$(mktemp /tmp/bench_smoke_db.XXXXXX)"
 echo "Running bench_harness (targets=${TARGETS_MB}, iterations=${ITERATIONS}, runs=${RUNS})..."
-DYLD_LIBRARY_PATH=local/lib "$BENCH_BIN" \
+"$BENCH_BIN" \
   --iterations "$ITERATIONS" \
   --runs "$RUNS" \
   --warmup-iterations 0 \

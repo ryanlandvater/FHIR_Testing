@@ -1,0 +1,30 @@
+diff --git a/proto/google/fhir/proto/annotations.proto b/proto/google/fhir/proto/annotations.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/annotations.proto
+@@ -0,0 +1,0 @@
+diff --git a/proto/google/fhir/proto/r4/core/codes.proto b/proto/google/fhir/proto/r4/core/codes.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/r4/core/codes.proto
+@@ -0,0 +1,0 @@
+diff --git a/proto/google/fhir/proto/r4/core/valuesets.proto b/proto/google/fhir/proto/r4/core/valuesets.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/r4/core/valuesets.proto
+@@ -0,0 +1,0 @@
+diff --git a/proto/google/fhir/proto/r4/core/datatypes.proto b/proto/google/fhir/proto/r4/core/datatypes.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/r4/core/datatypes.proto
+@@ -0,0 +1,0 @@
+diff --git a/proto/google/fhir/proto/r4/core/resources/observation.proto b/proto/google/fhir/proto/r4/core/resources/observation.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/r4/core/resources/observation.proto
+@@ -0,0 +1,0 @@
+diff --git a/proto/google/fhir/proto/r4/core/resources/patient.proto b/proto/google/fhir/proto/r4/core/resources/patient.proto
+new file mode 100644
+--- /dev/null
++++ b/proto/google/fhir/proto/r4/core/resources/patient.proto
+@@ -0,0 +1,0 @@

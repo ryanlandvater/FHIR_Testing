@@ -522,7 +522,7 @@ grep -r "cc_proto_library" .external/google-fhir/BUILD | \
 ```
 
 **Step 4: Identify Missing Targets**
-Compare Step 2 list with CMakeLists.txt linked libraries.
+Compare Step 2 list with BUILD.bazel targets.
 
 ### 3.2 Output Format
 

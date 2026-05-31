@@ -517,66 +517,8 @@ else
   echo -e "${YELLOW}Step 1C: HL7 parser routine disabled (set HL7PARSER_ENABLE=1 to enable).${NC}"
 fi
 
-FASTFHIR_BUILD_FINGERPRINT="rev=${FASTFHIR_SOURCE_REV};profile=us;shared=ON;ingestor=ON"
-NEEDS_FASTFHIR_BUILD=1
-
-if [[ "${FORCE_FASTFHIR_REBUILD}" == "1" ]]; then
-  echo -e "${YELLOW}Forced FastFHIR rebuild requested.${NC}"
-elif [[ -f "${FASTFHIR_STAMP}" && \
-        -f "${FASTFHIR_INSTALL}/include/FastFHIR.hpp" && \
-        -f "${FASTFHIR_INSTALL}/lib/libfastfhir.dylib" && \
-  -f "${FASTFHIR_INSTALL}/generated_src/FF_Recovery.hpp" ]]; then
-  EXISTING_STAMP="$(cat "${FASTFHIR_STAMP}")"
-  if [[ "${EXISTING_STAMP}" == "${FASTFHIR_BUILD_FINGERPRINT}" ]]; then
-    NEEDS_FASTFHIR_BUILD=0
-  fi
-fi
-
-if [[ "${NEEDS_FASTFHIR_BUILD}" == "0" && ! -f "${FASTFHIR_SIMDJSON_HEADER}" ]]; then
-  echo -e "${YELLOW}FastFHIR build tree is missing bundled simdjson headers; rebuilding FastFHIR to restore build artifacts.${NC}"
-  NEEDS_FASTFHIR_BUILD=1
-fi
-
-# ============================================================================
-# Step 2: Build and Install FastFHIR
-# ============================================================================
-echo -e "${YELLOW}Step 2: Building FastFHIR...${NC}"
-
-if [[ "${NEEDS_FASTFHIR_BUILD}" == "1" ]]; then
-  mkdir -p "${FASTFHIR_BUILD}" "${FASTFHIR_INSTALL}"
-
-  cmake -S "${FASTFHIR_DIR}" -B "${FASTFHIR_BUILD}" \
-    -G "Ninja" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DFASTFHIR_RUN_GENERATOR=OFF \
-    -DFASTFHIR_PRODUCTION_PROFILE=us \
-    -DFASTFHIR_BUILD_SHARED=ON \
-    -DFASTFHIR_BUILD_INGESTOR=ON \
-    -DCMAKE_INSTALL_PREFIX="${FASTFHIR_INSTALL}"
-
-  if ! cmake --build "${FASTFHIR_BUILD}" --parallel "${THREADS}"; then
-    echo -e "${RED}FastFHIR build failed${NC}"
-    exit 1
-  fi
-
-  if ! cmake --install "${FASTFHIR_BUILD}"; then
-    echo -e "${RED}FastFHIR install failed${NC}"
-    exit 1
-  fi
-
-  echo "${FASTFHIR_BUILD_FINGERPRINT}" > "${FASTFHIR_STAMP}"
-else
-  echo -e "${GREEN}FastFHIR install is up to date; skipping rebuild/codegen.${NC}"
-fi
-
-# Stage generated headers to include/ for consumer use
-if [[ -d "${FASTFHIR_DIR}/generated_src" ]]; then
-  mkdir -p "${FASTFHIR_INSTALL}/generated_src"
-  cp "${FASTFHIR_DIR}/generated_src"/*.hpp "${FASTFHIR_INSTALL}/include/" 2>/dev/null || true
-  cp "${FASTFHIR_DIR}/generated_src"/*.hpp "${FASTFHIR_INSTALL}/generated_src/" 2>/dev/null || true
-fi
-
-echo -e "${GREEN}FastFHIR built and installed to ${FASTFHIR_INSTALL}${NC}"
+# FastFHIR is resolved via Bazel local_path_override in MODULE.bazel.
+# Bazel handles building FastFHIR from source as a module dependency.
 
 # ============================================================================
 # Step 2B: Build Google FHIR components in .external
@@ -775,7 +717,7 @@ echo -e "${GREEN}=== Setup Complete ===${NC}"
 echo ""
 echo "Run the benchmark:"
 echo "  cd ${REPO_ROOT}"
-echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./bazel-bin/bench/bench_harness"
+echo "  ./bazel-bin/bench/bench_harness"
 echo ""
 echo "Run validation test:"
-echo "  DYLD_LIBRARY_PATH=${FASTFHIR_INSTALL}/lib ./bazel-bin/bench/bench_timing_conformance"
+echo "  ./bazel-bin/bench/bench_timing_conformance"
