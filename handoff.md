@@ -532,6 +532,122 @@ interacting) rather than the per-unit rate.
 
 ---
 
+## SESSION CONTINUITY — test 5 restructure to macro parity (START HERE)
+
+**Written 2026-08-26 (end of session, context window low).** This section is
+the complete handoff for the NEXT session: what the plan is, what exists, what
+is broken mid-flight, and the exact next steps. Read this first.
+
+### The goal
+
+Restructure the corruption/recovery test (test 5) into the repo's macro-parity
+architecture, per Ryan's design:
+
+- **`bench/bench_test_5.hpp`** — shared, macro-guarded header (D1: per-arm
+  inline namespace; each arm TU defines `ARM_*` and includes it), with THREE
+  polymorphic functions per format:
+  1. `calc_stream_hash(wire) → StreamFingerprint` — structural fingerprint of
+     a CLEAN stream: every recoverable unit's `(offset, tag)` + a SHA-256
+     digest of the unit list (the report-integrity stamp).
+  2. `corrupt_stream(wire, k, seed) → damaged wire` — flip k random STRUCTURAL
+     bits in the format's own syntax region.
+  3. `recover_stream(corrupted) → StreamFingerprint` — resync from the
+     corrupted bytes ONLY; returns the recovered units.
+- **`bench/bench_test_5.cpp`** — the driver: links the four arm TUs and
+  dispatches FOUR INDEPENDENT process modes: `--hash`, `--corrupt`,
+  `--recover`, `--check`.
+- **The check** (third process, holds the baseline): (a) report integrity —
+  re-derive `recover_stream`'s digest from its reported units; (b) content
+  verification — every recovered unit must exist in the baseline with the SAME
+  offset and tag (`recovered ⊆ baseline`); (c) `% = 100 · |recovered ∩
+  baseline| / |baseline|`. This fixes the recovery-test flaws C/F (content-
+  verified, not header-only) and is where the cross-validated EDGE recovery
+  (IN-G2) plugs in.
+
+`bench/bench_test_5.hpp` is ALREADY WRITTEN (this session) — the design in
+code, per-arm implementations for all four formats, `StreamFingerprint`,
+`UnitRef`, the three functions. It is not yet wired into the arms and not yet
+compiled.
+
+### Current state — what is committed vs broken
+
+**Committed (benchmark repo, clean at `0acb8ab` + `8dd2463`):**
+- Instrument G suite (`bench/resilience_test.cpp`, 4 tests + recovery probe).
+- Recovery comparison across 4 formats (`bench/corruption_probe.cpp`,
+  `scripts/recovery_sweep.py`, `results/recovery_curve.csv`, `fig8_recovery`).
+- The recovery-test methodology flaws A–F documented (do-not-cite; fig8
+  carries the caveat). The cross-validated edge-recovery design (IN-G2).
+- Upstream findings filed in `../FastFHIR/TASKS.md`: CAPI-9 (datetime
+  as<string_view> contract), CAPI-10 (compact write-once), CAPI-11 (raw
+  packed slot in ChoiceEntry), CAPI-12 (no sealed-array append), CAPI-13
+  (Parser ctor SEGV — **FIXED**: FF_HEADER::validate_full bounds-checks
+  CHECKSUM_OFFSET; the `FastFHIR::Recovery` class shipped), CAPI-14 (POCO
+  string_view dangles), plus the top-of-file P0 (abstraction-typed
+  amend/append).
+
+**Uncommitted / broken mid-flight (START HERE):**
+- **`../FastFHIR` does not compile.** Ryan's in-flight refactor of
+  `src/FF_Parser.cpp` `recover_bundle_entries()` uses undeclared members —
+  `tag_at`, `next_valid_resource_of`, `header_pointers_safe`,
+  `scan_all_resources` — and `s.tag_conflicts`, none of which exist in
+  `include/FF_Parser.hpp`'s `Recovery` declaration (which currently has
+  `next_valid_resource`, `valid_resources`, `recover_bundle_entries`; the
+  `Stats` struct has entries/recovered/resyncs/**units** — `units` was added,
+  `tag_conflicts` was NOT). The refactor's intent: tag-constrained resync —
+  sweep for a block whose tag matches the PARENT slot's expected type (the
+  cross-validation design). DO NOT rewrite it — declare the missing members
+  to match Ryan's in-progress intent.
+- **`bench/bench_test_5.hpp`** — created, unwired, uncompiled.
+- **`src/FF_Parser.cpp`** — my `s.units.emplace_back(...)` additions are in
+  the intact + resync paths (compile-blocked by the refactor; the fallback
+  whole-stream scan does NOT yet record units).
+- The four arm `.cpp` files — NOT yet edited (need `#include
+  "bench_test_5.hpp"` after `bench_test_4.hpp`).
+- `bench_test_5.cpp` (driver), BUILD target, `recovery_sweep.py` migration —
+  NOT started.
+
+### Next steps (in order)
+
+1. **Get `../FastFHIR` compiling**: add the missing declarations to
+   `Recovery` in `include/FF_Parser.hpp` matching the in-progress
+   `FF_Parser.cpp` — `tag_at(Offset)`, `next_valid_resource_of(Offset,
+   RECOVERY_TAG)` (tag-constrained sweep), `header_pointers_safe()`,
+   `scan_all_resources()`, and the `tag_conflicts` field in `Stats`. Build
+   `bazel build -c opt //bench:corruption_probe` until green.
+2. Wire `bench_test_5.hpp` into the four arm TUs (`#include "bench_test_5.hpp"`
+   after `bench_test_4.hpp`, before `#undef ARM_*`).
+3. Write `bench/bench_test_5.cpp` — the driver: `--hash` (calc + write
+   fingerprint file: count + units + digest), `--corrupt` (write damaged),
+   `--recover` (report recovered fingerprint), `--check` (baseline vs
+   recovered: subset + digest-integrity + %). It calls the four
+   `bench::test_5::<arm_ns>::` function sets; links `:bench_core_harness` +
+   `:bench_provenance`.
+4. `bench/BUILD.bazel`: add `bench_test_5.hpp` to the shared hdrs; new
+   `bench_test_5` binary target (replaces `corruption_probe`).
+5. Migrate `scripts/recovery_sweep.py` to the new modes: `--hash` once per
+   format; per (format, k, trial): `--corrupt` → `--recover` → `--check`
+   (three subprocesses; the recoverer never sees the baseline).
+6. Re-run the sweep, re-render `fig8_recovery`, re-examine the curves —
+   this is where the FFHR vs JSON comparison gets its honest content-verified
+   numbers and where the edge-recovery differentiator shows.
+
+### Facts to re-anchor (commands)
+
+- Artifacts: `./bazel-bin/bench/bench_harness --dump-artifacts artifacts` →
+  `artifacts/{fastfhir,json,google_fhir,hl7v2}.bin` (one bundle's Test-1 wire
+  payload per arm; `ArmRunResult.test1_payload`).
+- Recovery units: entries for FFHR/JSON/protobuf; segments for HL7v2.
+- Sweep: `.venv/bin/python scripts/recovery_sweep.py` →
+  `results/recovery_curve.csv`; figures via `scripts/plot_benchmarks.py`.
+- Standing instructions: **do NOT call rebuild_index** (user's repeated
+  instruction; the `.arbiter` trees are stale by choice). `../FastFHIR` is its
+  own git repo, kept uncommitted by documented convention. Qualifiers for any
+  resilience artifact: malformed-not-hostile, integrity-not-authenticity.
+- The recovery-test flaws (A–F) and the edge-recovery design are documented
+  in the § Test 5 section above — re-read before touching the recovery code.
+
+---
+
 ## Release artifacts
 
 The user-facing requirement: **the FastFHIR README should cite an artifact, not
