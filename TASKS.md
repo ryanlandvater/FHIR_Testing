@@ -678,10 +678,12 @@ Ordered by what unblocks the most.
       vs % recoverable — now a FOUR-FORMAT comparison with corruption and
       recovery as INDEPENDENT processes (`bench/corruption_probe.cpp`
       --corrupt/--count/--recover + `scripts/recovery_sweep.py`). Medians:
-      FastFHIR ~100% through 128 bits (70% at 512); HL7v2 94% even at 512
-      (segments — a different unit, stated on the figure); JSON 72%;
+      FastFHIR 91.6% at 128 bits / 70.3% at 512; HL7v2 94% even at 512
+      (segments — a different unit, stated on the figure); JSON 71.6%;
       protobuf TLV collapses (46% at 64, 9.6% at 512 — a bad length header
-      derails the chain). Curve: `results/recovery_curve.csv` +
+      derails the chain). Adjacent-damage double-counting in the FFHR resync
+      was found and fixed (each resync target counts once) — it had masked
+      ~8.5% losses at 128 bits. Curve: `results/recovery_curve.csv` +
       `fig8_recovery`. Harness gained `--dump-artifacts` (one bundle's
       Test-1 wire payload per arm). Two upstream findings from the probe:
       **CAPI-13** (Parser ctor SEGVs on a corrupted header — the probe

@@ -205,103 +205,12 @@ std::vector<std::size_t> hl7v2_structural_positions(const std::vector<uint8_t> &
 #if defined(PROBE_HAS_FASTFHIR)
 std::size_t fastfhir_recover(const std::vector<uint8_t> &b)
 {
-  auto valid_validation = [&](std::size_t off)
-  {
-    if (off > b.size() || b.size() - off < 8)
-      return false;
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i)
-      v |= static_cast<uint64_t>(b[off + i]) << (8 * i);
-    return v == static_cast<uint64_t>(off);
-  };
-  auto known_resource_tag = [&](std::size_t off)
-  {
-    if (off > b.size() || b.size() - off < 10)
-      return false;
-    const uint16_t tag = static_cast<uint16_t>(b[off + 8]) |
-                         static_cast<uint16_t>(b[off + 9] << 8);
-    return tag == static_cast<uint16_t>(RECOVER_FF_PATIENT) ||
-           tag == static_cast<uint16_t>(RECOVER_FF_OBSERVATION) ||
-           tag == static_cast<uint16_t>(RECOVER_FF_CONDITION) ||
-           tag == static_cast<uint16_t>(RECOVER_FF_ENCOUNTER) ||
-           tag == static_cast<uint16_t>(RECOVER_FF_PROCEDURE);
-  };
-  auto read_u64 = [&](std::size_t off)
-  {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i)
-      v |= static_cast<uint64_t>(b[off + i]) << (8 * i);
-    return v;
-  };
-  auto block_ok = [&](uint64_t off)
-  {
-    return off == FF_NULL_OFFSET ||
-           (static_cast<std::size_t>(off) <= b.size() &&
-            b.size() - static_cast<std::size_t>(off) >= 10 &&
-            valid_validation(static_cast<std::size_t>(off)));
-  };
-  std::size_t recovered = 0;
-
-  // Header pointer fields (CAPI-13: the Parser ctor SEGVs on in-bounds-but-
-  // garbage offsets; pre-validate before constructing).
-  const bool header_safe = b.size() >= 54 && block_ok(read_u64(16)) &&
-                           block_ok(read_u64(26)) && block_ok(read_u64(34)) &&
-                           block_ok(read_u64(42));
-  if (header_safe)
-  {
-    const auto root = static_cast<std::size_t>(read_u64(16));
-    if (root <= b.size() && b.size() - root >= 10 && valid_validation(root))
-    {
-      try
-      {
-        FastFHIR::Parser p(b.data(), b.size());
-        auto root_node = p.root();
-        if (root_node && root_node.is<FastFHIR::RESOURCETYPE::BUNDLE>())
-        {
-          auto entries = root_node[FastFHIR::Fields::BUNDLE::ENTRY];
-          if (entries)
-          {
-            const auto n = entries.as_node().size();
-            for (std::size_t i = 0; i < n; ++i)
-            {
-              auto resource = entries[i][FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
-              if (!resource)
-                continue;
-              const auto slot = static_cast<std::size_t>(resource.absolute_offset());
-              if (slot > b.size() || b.size() - slot < 8)
-                continue;
-              const auto target = static_cast<std::size_t>(LOAD_U64(b.data() + slot));
-              if (target > b.size() || b.size() - target < 10)
-                continue;
-              if (valid_validation(target) && known_resource_tag(target))
-              {
-                ++recovered;
-                continue;
-              }
-              // Resync: scan forward for the next self-consistent block.
-              for (std::size_t p2 = target + 10; p2 <= b.size() && b.size() - p2 >= 10; ++p2)
-              {
-                if (valid_validation(p2) && known_resource_tag(p2))
-                {
-                  ++recovered;
-                  break;
-                }
-              }
-            }
-            return recovered;
-          }
-        }
-      }
-      catch (const std::exception &)
-      {
-      }
-    }
-  }
-  // Header/root unsafe: whole-stream scan for self-consistent resource blocks.
-  for (std::size_t off = 0; off <= b.size() && b.size() - off >= 10; ++off)
-    if (valid_validation(off) && known_resource_tag(off))
-      ++recovered;
-  return recovered;
+  // The recovery routine lives in the LIBRARY (FastFHIR::Recovery): a scanner
+  // view that never dereferences header fields at construction, resyncs at the
+  // next self-consistent VALIDATION word, and dedupes adjacent-damage resync
+  // targets. The probe only drives it -- the bytes are the only input.
+  FastFHIR::Recovery rec(b.data(), b.size());
+  return rec.recover_bundle_entries().recovered;
 }
 #endif
 
