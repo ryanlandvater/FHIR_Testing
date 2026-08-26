@@ -167,9 +167,18 @@ inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
 // 2. corrupt_stream -- polymorphic structural corruption
 // ---------------------------------------------------------------------------
 #if defined(ARM_FASTFHIR)
+// Syntactic elements ONLY, per Ryan (2026-08-26): the self-corrective scheme
+// is structural, so corruption targets (1) the stream FF_HEADER, (2) each
+// block's VALIDATION word + RECOVERY_TAG, (3) the POINTER SLOTS -- the vtable
+// fields holding child offsets (the edges the recovery cross-validates).
+// Scalar VALUES (string payloads, numbers, codes) are NEVER corrupted: they
+// are not part of the corrective scheme and could not be repaired even by
+// perfect structural recovery. Leaf-data slots (string/code slots) are also
+// excluded -- a broken string reference has no cross-validation to heal it.
 inline std::vector<uint8_t> corrupt_stream(const std::vector<uint8_t>& wire,
                                            std::size_t k, unsigned seed) {
   std::vector<std::size_t> positions;
+  // 1. FF_HEADER region (stream-level syntax).
   for (std::size_t i = 0; i < 54 && i < wire.size(); ++i)
     positions.push_back(i);
   FastFHIR::Parser p(wire.data(), wire.size());
@@ -181,12 +190,36 @@ inline std::vector<uint8_t> corrupt_stream(const std::vector<uint8_t>& wire,
       auto resource = entries[i][FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
       if (!resource)
         continue;
+      // 3. The entry array's pointer slot for this resource (the edge
+      //    entry -> resource, cross-validated by the walk).
       const auto slot = static_cast<std::size_t>(resource.absolute_offset());
       if (slot > wire.size() || wire.size() - slot < 8)
         continue;
+      for (std::size_t j = 0; j < 8 && slot + j < wire.size(); ++j)
+        positions.push_back(slot + j);
+      // 2+3. The resource block: VALIDATION + RECOVERY_TAG header, then each
+      //      pointer-field slot (block/array/resource/choice references).
       const auto target = static_cast<std::size_t>(LOAD_U64(wire.data() + slot));
-      for (std::size_t j = 0; j < 10 && target + j < wire.size(); ++j)
+      if (target > wire.size() || wire.size() - target < 10)
+        continue;
+      for (std::size_t j = 0; j < 10; ++j)
         positions.push_back(target + j);
+      auto node = resource.as_node();
+      if (node) {
+        for (const auto& f : node.fields()) {
+          const bool pointer_kind =
+              f.kind == FF_FIELD_BLOCK || f.kind == FF_FIELD_ARRAY ||
+              f.kind == FF_FIELD_RESOURCE || f.kind == FF_FIELD_CHOICE;
+          if (!pointer_kind)
+            continue;
+          // Choice slots store offset + variant tag (10 bytes); others store
+          // an 8-byte offset.
+          const std::size_t slot_len = (f.kind == FF_FIELD_CHOICE) ? 10 : 8;
+          const std::size_t fslot = target + f.field_offset;
+          for (std::size_t j = 0; j < slot_len && fslot + j < wire.size(); ++j)
+            positions.push_back(fslot + j);
+        }
+      }
     }
   }
   auto damaged = wire;

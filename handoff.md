@@ -550,7 +550,14 @@ architecture, per Ryan's design:
      a CLEAN stream: every recoverable unit's `(offset, tag)` + a SHA-256
      digest of the unit list (the report-integrity stamp).
   2. `corrupt_stream(wire, k, seed) → damaged wire` — flip k random STRUCTURAL
-     bits in the format's own syntax region.
+     bits in the format's own syntax region. **FFHR branch (Ryan 2026-08-26):
+     SYNTACTIC ELEMENTS ONLY** — FF_HEADER, block VALIDATION words +
+     RECOVERY_TAGs, and the POINTER SLOTS (vtable fields holding child
+     offsets — block/array/resource/choice references, the edges the recovery
+     cross-validates) plus the entry array's resource slots. Scalar VALUES
+     (string payloads, numbers, codes) and leaf-data slots (string/code
+     slots) are NEVER corrupted — they are not part of the self-corrective
+     scheme, and a broken leaf reference has no cross-validation to heal it.
   3. `recover_stream(corrupted) → StreamFingerprint` — resync from the
      corrupted bytes ONLY; returns the recovered units.
 - **`bench/bench_test_5.cpp`** — the driver: links the four arm TUs and
