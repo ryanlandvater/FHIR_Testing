@@ -1,5 +1,10 @@
 # Instrument G — Resilience & Integrity Suite (design spec)
 
+> ✅ **SHIPPED 2026-08-26** — implemented as
+> [`bench/resilience_test.cpp`](bench/resilience_test.cpp), all four tests
+> passing (truncation, bit-flip, type-confusion, concurrent build). This
+> document remains the spec/record; the tracker is TASKS.md **IN-G**.
+
 > **This is a design specification, not a task list.** The only backlog is
 > [`TASKS.md`](TASKS.md); this document is what **IN-G** there points at. Four
 > tests that exercise FastFHIR's structural integrity guarantees under

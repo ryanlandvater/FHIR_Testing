@@ -1,0 +1,785 @@
+# FastFHIR-benchmark — Task Backlog
+
+**This file is the only backlog.** Everything else is a companion of a different
+kind, and none of them carry open work items:
+
+| Document | Kind | Role |
+|---|---|---|
+| [`handoff.md`](handoff.md) | **claim register + instrument design** | maps every § Why FastFHIR? claim to the instrument that validates it |
+| [`notes.md`](notes.md) | **field report** | what was silently broken during the port, and how it was found |
+| [`TODO.md`](TODO.md) | **design spec for Instrument G** | the four resilience tests, in detail — not a second task list |
+| `../FastFHIR/TASKS.md` | upstream backlog | our API asks live there as **CAPI-1…CAPI-6** |
+
+If a task exists, it is below. If a design exists, it is in one of those.
+
+---
+
+## Decisions — standing, do not re-litigate
+
+Recorded because each of these has already cost a wrong turn, and because a
+benchmark that changes its own rules mid-flight cannot be audited.
+
+### D1 — The macro-guarded assignment layer is the parity architecture
+
+**Decided by Ryan, 2026-08-26. Paramount requirement.**
+
+Every field is written by one `assign_<resource>_<field>()` per arm, selected by
+`#if defined(ARM_FASTFHIR) / ARM_JSON / ARM_GOOGLE_FHIR / ARM_HL7V2`
+([`bench/bench_test_1.hpp:94-3461`](bench/bench_test_1.hpp:94)). A reviewer can
+read all four implementations of the same field side by side in one file and
+check that they do equivalent work. **That auditability is the point of the
+design and it outranks every other consideration**, including line count.
+
+Consequences that follow, and are therefore also decided:
+
+- **The per-arm inline namespace is mandatory**, not hygiene. One type name with
+  four definitions across four TUs is an ODR violation, and it was the root
+  cause of every "impossible" crash during the port (notes.md §1).
+- ~~notes.md §1's "serious alternative" — arms as templates or classes over a
+  shared interface, compiled once~~ — **rejected.** It trades the side-by-side
+  audit for a smaller ODR surface; the ODR surface is already closed by the
+  namespaces. Do not propose it again.
+- ASan in CI is the compensating control for keeping the pattern (HY-1).
+
+### D2 — `value[x]` is tiered, not stripped
+
+**Decided 2026-08-26**, after checking what the other formats can actually do
+rather than assuming.
+
+The open question was whether protobuf and HL7v2 can represent FHIR choice types
+at all, and whether `value[x]` should be dropped from the comparison and claimed
+as a FastFHIR-only capability. **Both can represent it. Verified:**
+
+| Arm | Native choice representation | Evidence |
+|---|---|---|
+| Google protobuf | `ValueX` message with a `oneof choice` over 11 variants | `third_party/google_fhir/proto/google/fhir/proto/r4/core/resources/observation.proto:159-176` |
+| HL7v2 | OBX-2 value type (`NM`/`ST`/`CWE`/`CE`/`SN`) selecting the type of OBX-5 | [`bench/hl7v2_message.hpp:71`](bench/hl7v2_message.hpp:71); the arm already switches on the tag at [`bench/bench_test_1.hpp:2785`](bench/bench_test_1.hpp:2785) |
+| simdjson/nlohmann | `valueQuantity` / `valueString` / … natively | `write_choice`, [`bench/bench_test_1.hpp:2725`](bench/bench_test_1.hpp:2725) |
+| FastFHIR | `ChoiceEntry` + `RECOVERY_TAG` | blocked across arenas — CAPI-3 |
+
+**So the blocker is ours, not theirs.** No arm is short of a representation; the
+FastFHIR `ChoiceEntry` carries a source-arena offset that cannot cross arenas
+(notes.md §4), so the harness blanks the field in *all four* arms to keep the
+inputs byte-identical. Stripping `value[x]` and claiming it as a differentiator
+would assert a capability gap that **does not exist**, which is the exact
+opposite of auditable.
+
+The measured surface is therefore tiered, and **no `value[x]` number is ever
+reported without its tier**:
+
+| Tier | Variants | Arms that carry it losslessly | Status |
+|---|---|---|---|
+| **S** — scalar | `valueString`, `valueBoolean`, `valueInteger`, `valueDecimal` (and `valueCode` when it resolves to a dictionary index) | all four | unblocked; only the HL7v2 arm still mocks it (PA-2) |
+| **B** — block | `valueQuantity`, `valueCodeableConcept`, `valueReference`, `valueCoding`, `valueAddress`, `valueRange`, `valueRatio`, `valuePeriod`, `valueSampledData` | FastFHIR, JSON, protobuf in full; HL7v2 for `Quantity` (NM+OBX-6) and `CodeableConcept`/`Coding` (CWE) only — `Range`/`Ratio`/`SampledData` degrade, **and that lossiness is a result to report** | blocked on CAPI-3 |
+| **X** — choice-bearing extensions | `_valueString` and other `_`-prefixed primitive extensions; unknown extensions inside a choice | FastFHIR only — protobuf JSON does not implement the model at all | belongs to **Instrument F**, never to a timing row |
+
+**Corpus census (342 Synthea fixtures, 246,878 choice occurrences, 2026-08-26):**
+
+| Variant | Count | Share | Tier |
+|---|---|---|---|
+| `valueQuantity` | 142,517 | 57.7 % | B |
+| `valueCodeableConcept` | 86,421 | 35.0 % | B |
+| `valueReference` | 4,845 | 2.0 % | B |
+| `valueInteger` | 4,396 | 1.8 % | S |
+| `valueString` | 4,331 | 1.8 % | S |
+| `valueBoolean` | 1,680 | 0.7 % | S |
+| `valueDecimal` | 1,344 | 0.5 % | S |
+| `valueCoding` | 672 | 0.3 % | B |
+| `valueCode` | 336 | 0.1 % | S *or* B — portable only when the payload is a dictionary index (MSB clear) |
+| `valueAddress` | 336 | 0.1 % | B |
+
+**Tier S is 4.8 % of the choice surface; Tier B is 95.1 %.**
+
+**So Tier S is a correctness win, not a coverage win.** Fixing PA-2 removes a
+false blanket statement ("no arm serializes `value[x]`") and exercises the
+machinery end to end, but it leaves **95 % of the choice surface unmeasured**.
+Do not let it read as "`value[x]` is now covered". CAPI-3 is the real unblock,
+and this census is the argument for its priority.
+
+Tier X is where the genuine differentiator lives (README § 2.4, § 5.4). It is a
+**conformance** result, not a speed result, and it is provable without any
+timing methodology to defend — which makes it the strongest artifact available.
+
+### D3 — Serialization model: field-by-field for all four arms
+
+**Decided 2026-08-26**, resolving the open choice in notes.md §3.
+
+notes.md §3 offered whole-object serialization for every arm as its
+recommendation. **Rejected on two grounds:**
+
+1. **HL7v2 has no whole-object serializer.** There is no generic "serialize this
+   FHIR resource" path in v2.x — an ORU^R01 is built segment by segment by
+   definition. Whole-object parity is therefore impossible for one of the four
+   arms, and an option that only three arms can take is not a parity model.
+2. It conflicts with **D1**.
+
+So: **one canonical parity field set, written field by field, by every arm,
+through the macro layer.** The FastFHIR arm's current `append_obj(item.patient)`
+(notes.md §3) is a temporary deviation — it writes every POCO field while the
+others write ~25 — and it must be replaced by field-by-field assembly, which is
+blocked on **CAPI-1** upstream (no public API for inline-block arrays).
+
+A separate, clearly labelled **native whole-object row** may be reported
+alongside, per arm that offers one (`append_obj`, `SerializeToString`,
+`json::dump`). It is a different measurement and never shares a table cell with
+a parity row.
+
+### D4 — Test 2 is random access; the materialize walk is retired
+
+**Decided 2026-08-26 (Ryan).** The former Test 2 (materialize) measured a full
+traversal in LAYOUT order — a contiguous tape's best case and an offset-indexed
+layout's worst — and **no consumer reads a bundle in write order**: you jump to
+the resources you care about. It was replaced by the random-access probe
+(IN-B, formerly Test 5) as **the** Test 2: pick N random `Bundle.entry`
+ordinals, navigate to each from the root, read the resource's id. Every lookup
+pays its own path cost — that asymmetry *is* the WF-1.1 claim (O(1) jump vs
+O(N) scan), and it is what real medical-data retrieval does.
+
+Consequences:
+
+- The stage string is **`test_2_random_access`**, deliberately NOT reusing
+  `test_2_materialize` — legacy CSVs remain distinguishable, and the plot
+  script drops their rows with a "pre-D4 data" skip rather than mislabelling
+  them.
+- PA-5 (node-count normalization) is **resolved by retirement**; PA-11's
+  walk analysis is retained as the record of why the walk was wrong evidence.
+- Test 2 runs **before Test 4** in every arm (the in-place enrich, PA-9, would
+  otherwise move the ordinal space under it).
+
+---
+
+## Progress log
+
+Newest first. One line per change, with what it did and did not settle.
+
+- **2026-08-26 (later)** — **JSON arm serializes effectiveDateTime correctly —
+      the Test 3 FF↔JSON gate is now clean on every census field.** The hydrated
+      `ChoiceEntry` for a datetime choice carries the RAW 63-bit packed slot as
+      `uint64_t`; `write_choice` emitted it as a JSON number
+      (`"effectiveDateTime":1619552459707908099`), which the census's
+      `is_string()` check counted as 0 (FF 692 vs JSON 0). The JSON arm now
+      decodes through `FF_UNPACK_DATETIME` + `FF_FORMAT_DATETIME` (the
+      `FF_DATETIME` type path) and emits canonical ISO-8601 — matching
+      print_json on the FF side. Filed upstream as **CAPI-11** (ChoiceEntry
+      exposes the raw slot, undocumented). The remaining exit-2 causes are now
+      only the HL7v2 arm's coverage gaps (PA-6).
+- **2026-08-26 (later)** — **Compact stream runs tests 1–4 (test_*_compact).**
+      The FF arm compacts once per sample, then runs random access and the
+      census over the compact archive (`test_2_compact` / `test_3_compact`)
+      with the same lens reads — the claim under test: the reader is
+      layout-agnostic, so compact ≈ standard speed. The compact census must
+      answer identically to the standard one (mismatch warns). Measured at
+      4 MB: random access 1.26× and query 2.3× slower than standard — a fixed
+      parser/root cost in the dense compact root that may amortize at scale.
+      **Test 4 compact cannot exist**: the API refuses to open a Builder on a
+      compact archive — compact is write-once. Filed upstream as **CAPI-10**;
+      the row is skipped with a once-per-run note, by design.
+- **2026-08-26 (later)** — **Test 3's FF query is lens-based now (PA-7 scope
+      shrinks).** The FF arm read every observation via
+      `as<ObservationData>()`, deserializing the whole POCO — including fields
+      the census never classifies — which cancelled the O(1) per-field access
+      Test 2 demonstrates. Rewritten to read only `code.coding[*]` (index-walked,
+      no `entries()` allocation), the `value`/`effective` choice tags, `issued`
+      presence, and `component[*].value` tags, all through node lenses. Counts
+      are byte-identical to the POCO path (verified against the parity gate).
+      Measured: FF Test 3 **20.9 µs vs JSON 161 µs at 4 MB (7.7×)** and
+      **116 µs vs 242 µs at 16 MB (2.1×)** — was ~parity (0.90×). One trap:
+      `issued` is a packed date/time slot, and `as<std::string_view>()` on it
+      throws ("Node is not a string or code") — presence-only reads are the
+      census's need anyway. `birthDate` still pays `print_json` (CAPI-4).
+- **2026-08-26 (later)** — **Compact archive size lands in Test 1 (IN-E,
+      partial).** The FastFHIR arm emits `test_1_compact` —
+      `Compactor::archive()` size — gated on losslessness: the compact stream
+      must re-parse to JSON semantically identical to the standard stream's
+      (nlohmann comparison, not string equality — layouts may legitimately
+      reorder fields), or the row is withheld with a loud warning. `fig2`
+      plots it (dashed) against the JSON baseline. Verified at 4 MB: compact
+      257,646 B vs standard FFHR 505,670 B vs JSON 231,274 B; gate passed.
+      Still IN-E: the full size table (gzip(JSON), protobuf, sparse/dense
+      separation).
+- **2026-08-26 (later)** — **D4: Test 2 is random access; the materialize walk is
+      retired.** The former Test 2 was a layout-order full traversal — a tape's
+      best case, a query's worst. The random-access probe (IN-B, ex-Test 5) took
+      the slot: [`bench/bench_test_2.hpp`](bench/bench_test_2.hpp), stage
+      `test_2_random_access`, all four arms, cross-arm byte gate (exit 2 on
+      mismatch). Legacy `test_2_materialize` rows are dropped with a "pre-D4
+      data" skip; the plot script's 2×2 grids now fit the four stages exactly
+      (which also fixed a silent test-5 truncation in fig1/fig5). Verified:
+      build green, conformance passes, 4 MB smoke run — all arms emitted
+      identical 72,000-byte accumulators (2000 reads × 36-char ids).
+- **2026-08-26** — Filed six public-API asks upstream as
+  `../FastFHIR/TASKS.md` **CAPI-1…CAPI-6** (inline-block array writer;
+  validator vs deserializer disagreement; cross-arena `ChoiceEntry`; packed
+  date/time reader; `TypeTraits<std::string>`; stale doc comment). Filed two
+  claims-alignment items as **I3.6** (the orjson citation cites a result that
+  does not exist) and **I3.7** (the −66 % compact figure predates the
+  compaction data-loss fix by four months and no test pins it). **Not
+  committed** — `../FastFHIR` is a symlinked live tree.
+- **2026-08-26** — **Scaled the sweep to real bundles and attributed the Test 2
+  gap.** Two findings. (1) `--bundle-max-mb` never meant bundle size — it counts
+  ingested source, so the old "256 MB" runs were **8 MiB bundles** (PA-13). At
+  `--bundle-targets-mb 4096` the FastFHIR stream is **316 MiB** (929 patients,
+  6.2 GB RSS), which is the first time this repo has measured a bundle at the
+  scale its docs claim. (2) The Test 2 gap is ~35% API overhead — 18.5% from
+  `entries()` allocating per array, 16.6% from the reflective `strlen` — with a
+  ~1.94x residual that is **not yet attributed**. Filed CAPI-8 upstream. The
+  ratio is flat at 2.4-3.1x across a 300x range of bundle size and narrows
+  slightly at the top (3.07 -> 2.42), so it is a constant factor, not a scaling
+  divergence. Serialize at 316 MiB: FastFHIR **1.95 GB/s** vs the JSON arm's
+  0.375 GB/s.
+- **2026-08-26** — **Violins and the speedup panel restored.** The pre-IN-0
+  notebook had grouped violin plots and a speedup chart; dropping them in the
+  rewrite lost the run-to-run spread, which is the thing that says whether a gap
+  between two arms means anything. Both are back in the script
+  (`fig5_distribution`, `fig6_speedup`). The speedup panel is a lollipop
+  anchored at 1.0 rather than bars — on a log axis a bar length is arbitrary,
+  and distance from parity is the quantity that matters. **Sub-parity results
+  are drawn and labelled like any other**; a speedup chart that only shows wins
+  is advertising. Current medians: FastFHIR wins 9 of 12 arm×stage comparisons
+  (4.91x vs simdjson on serialize *while writing 2.2x more bytes*; 53x on
+  enrich), loses Test 2 to simdjson (0.37x, cause measured in PA-11), and is
+  within noise on Test 3 vs JSON (0.90x) and Test 4 vs HL7v2 (0.95x).
+- **2026-08-26** — **Figures.** [`scripts/plot_benchmarks.py`](scripts/plot_benchmarks.py)
+  renders five figures + a table view from the CSV (or Postgres) and stamps every
+  one with provenance, the applicable caveats, and **PROVISIONAL — NOT AN
+  ARTIFACT** when the gate fails; [`notebooks/benchmark_results.ipynb`](notebooks/benchmark_results.ipynb)
+  is now a thin wrapper that shells out to it rather than a second copy of the
+  plotting logic. Palette validated (worst adjacent CVD ΔE 9.1; two slots below
+  3:1 contrast, so direct labels + table view are mandatory, not decoration).
+  Building them surfaced **PA-11** (Test 2 is a full-traversal measurement, not a
+  zero-copy one — 2,396 heap allocations in the FastFHIR walk, and simdjson
+  isn't materializing anything) and **PA-12** (`target_mb` controls nothing
+  below ~4 MB). Filed **CAPI-7** upstream. Also caught and fixed a walk I broke
+  mid-session in the JSON arm — the `[warn] materialize touched 0 nodes` guard
+  from HY-2 is what would have caught it, and it is not wired to fail the run.
+- **2026-08-26** — **IN-0 landed.** Wire bytes (`bytes_in`/`bytes_out`) in the
+  CSV and PG schema, `bench/provenance.hpp` + `provenance.json` with a refusal
+  gate, `provenance_test` green (11 checks). Building it surfaced three things
+  the harness could not previously see: the FastFHIR arm emits **2.2x** the
+  JSON arm's wire bytes at Test 1 (PA-1, now quantified); its Test-4 enrich
+  **shares the source arena** and mutates in place, so `source_bytes` was being
+  read post-append (fixed; asymmetry filed as PA-9); and one appended
+  Observation costs it **28 KB** against 198–502 bytes elsewhere (PA-10).
+  Did **not** settle: no size number is publishable yet — PA-1 is open, and the
+  profile on this machine is ambiguous until pinned with `--profile`.
+- **2026-08-26** — Censused `value[x]` across the full 342-fixture corpus:
+  Tier B is **95.1 %** of 246,878 occurrences, Tier S only 4.8 %. This
+  demoted PA-2 from "the quick win that unblocks `value[x]`" to "a correctness
+  fix covering 5 % of it", and promoted CAPI-3 to the dominant upstream
+  dependency. Sequencing in handoff.md amended to match.
+- **2026-08-26** — Recorded D1/D2/D3. D2 required checking the protobuf and
+  HL7v2 choice representations rather than assuming they were absent; both are
+  present, which changed the design from "strip and claim" to "tier and
+  report".
+- **2026-08-26** — `TODO.md` re-scoped as the design spec for **Instrument G**
+  and unblocked (its blocker was PORT, closed 2026-08-25).
+- **2026-08-25** — PORT closed. Harness builds and runs; 161 metric rows;
+  numbers deliberately unpublished (notes.md §8).
+
+---
+
+## ✅ PORT — restore the build against the FastFHIR public API redesign
+
+**Opened** 2026-08-24 · **Closed** 2026-08-25 · **Status** DONE
+
+`bazel build -c opt //bench:all` is green, `//bench:timing_conformance_test`
+passes, and a 1–16 MB sweep produces 161 metric rows. Exit code 2 signals a
+cross-arm parity mismatch, not a crash.
+
+| ID | What it was | Resolution |
+|---|---|---|
+| PORT-1 | `Builder::set_root` / `finalize` private | `make_stream()` + `seal_stream()` in `harness.hpp` wrap `FF_StreamSetRoot` / `FF_StreamFinalize`. |
+| PORT-2 | `Ingest::SourceType` gone | `FF_SOURCE_FHIR_JSON`; `extension_filter` pinned to `FILTER_ALL_KNOWN`; `payload_capacity` passed so simdjson parses in place. |
+| PORT-3 | Code enums unprefixed | `FF_`-prefixed throughout; `FF_UNSET` still falls through to each arm's `default:` — see PA-4. |
+| PORT-4 | `*ToString` removed | `serialize_<Enum>()`. |
+| PORT-5 | `ExtensionData::ext_ref` | → `::url`, null is `FF_NULL_UINT32`. |
+| PORT-6 | Attachment `data`/`hash` | now `unique_ptr`, null-checked. |
+| PORT-7 | Hand-rolled CODE encoding | routed through `ENCODE_FF_CODE`. Never executes on this corpus — every code is a dictionary hit. |
+| PORT-8 | `TypeTraits<std::string>` undefined | date/time POCO fields assigned as `string_view`. Filed upstream as CAPI-5. |
+| PORT-9 | Re-validate | conformance green; numbers not published — notes.md §8. |
+
+---
+
+## ▶ PA — parity repair
+
+**Status** OPEN · **Blocks** publishing any number
+
+- [ ] **PA-1. Test 1 is not at parity.** The FastFHIR arm serializes every POCO
+      field via `append_obj`; the other three write the ~25 fields the macro
+      layer covers. Per **D3**, converge on field-by-field for all four.
+      *Blocked on upstream CAPI-1* — there is no public API for writing an
+      inline-block array such as `Observation.category`. Until it lands, state
+      the asymmetry wherever a Test 1 number appears (the bias runs *against*
+      FastFHIR, which is the safe direction, but it is still not parity).
+      **Now quantified (IN-0, 2026-08-26):** on a 1 MB bundle the FastFHIR arm
+      emits **232,534 wire bytes vs the JSON arm's 105,637** — 2.2x — for the
+      same clinical content. Before the byte columns existed this gap was
+      invisible. No size comparison is publishable until PA-1 closes.
+- [ ] **PA-2. Tier S of `value[x]` is mocked in the HL7v2 arm.** Per **D2**,
+      Tier S needs no upstream change: OBX-2/OBX-5 can carry the real scalar.
+      [`bench/bench_test_1.hpp:2785-2810`](bench/bench_test_1.hpp:2785) writes a
+      hardcoded `"1"` for every variant. Write the actual value, then Tier S is
+      measured at four-arm parity. Do this early — it is the only part of
+      `value[x]` not blocked on anything — but **report it as 4.8 % of the
+      choice surface** (D2 census), never as "`value[x]` is covered".
+- [ ] **PA-3. Tier B of `value[x]` is blanked in every arm.** `sanitize_choice`
+      at [`bench/harness.hpp:538`](bench/harness.hpp:538) zeroes non-portable
+      choices at hydration so no arm corrupts its stream. *Blocked on upstream
+      CAPI-3.* Note the fix belongs at **hydration** (deep-copy the block from
+      the source `Parser` into the destination builder), **not** in the
+      assignment sink — handoff.md's sequencing said "assignment sink" and that
+      is the wrong place; it would tie the fix to D3's outcome for no reason.
+      **This is the high-value item, not PA-2:** it is 95.1 % of the choice
+      surface on the shipped corpus (D2 census), including every `valueQuantity`
+      and `valueCodeableConcept`.
+- [ ] **PA-4. `FF_UNSET` is handled by a per-arm `default:`.** Decide what an
+      unset gender/status means in each format and apply it identically.
+- [x] **PA-5. Normalize Test 2.** ✅ **RESOLVED 2026-08-26 by D4** — the walk
+      is retired; Test 2 is now random access and carries `ops` = field reads,
+      with the cross-arm byte gate enforcing identical work (exit 2 on
+      mismatch). The old node-count divergence (4,443 / 8,327 / 8,008 / 9,539
+      for identical content) is history.
+- [ ] **PA-6. HL7v2 arm does not report `obs_issued_present`,
+      `obs_component_value_*`, or `obs_effective_datetime`.** This is the
+      remaining exit-2 mismatch: a real coverage gap in the arm, not a harness
+      fault. (`obs_effective_datetime` was previously masked — the JSON
+      baseline itself counted 0; fixed 2026-08-26.)
+- [ ] **PA-7. Test 3 penalises the FastFHIR arm.** ✎ **Scope shrank 2026-08-26:**
+      the query no longer materializes whole observations (lens reads), so the
+      `print_json` penalty now applies only to `Patient.birthDate` — a per-patient
+      cost, not per-observation. `read_text_field()` goes through `print_json`
+      for packed date/time because no zero-copy public reader exists. *Filed
+      upstream as CAPI-4.* Until it lands, subtract or disclose the cost.
+- [x] **PA-11. Test 2 does not measure what the charts imply, and the arms are
+      not doing comparable work.** ✅ **RESOLVED 2026-08-26 by D4** — Test 2 is
+      now random access (IN-B), which is the claim-appropriate measurement; the
+      analysis below is retained as the record of why the walk was wrong
+      evidence. Normalized per node on an 8 MB target bundle (former Test 2):
+
+      | Arm | nodes | duration | ns/node | what it actually does |
+      |---|---:|---:|---:|---|
+      | json_fhir | 29,956 | 140 µs | **4.7** | parse to a contiguous tape, scan it — no objects, no per-element allocation |
+      | fastfhir | 15,920 | 442 µs | **27.8** | mmap + reflective walk — **2,396 heap allocations** (`BENCH_ARRAYS=1`) |
+      | google_fhir | 34,387 | 1,679 µs | **48.8** | real materialization into C++ message objects |
+      | hl7v2 | 29,005 | 1,799 µs | **62.0** | segment scan into parsed structs |
+
+      Three separate problems, all of which have to be stated wherever Test 2
+      appears: (a) `entries()` returns an owning `vector<Node>` — one allocation
+      per array node, the documented exception to the zero-allocation read path,
+      and a full walk is nothing *but* array materialization; (b) the reflective
+      key API charges a `strlen` per field, ~13% of the walk (upstream CAPI-7);
+      (c) **simdjson is not materializing anything** — its tape is an index, so
+      "materialize" means categorically different work in each arm. Test 2 is a
+      *full-traversal throughput* measurement, and § Why FastFHIR? does not make
+      a full-traversal claim. **Do not present it as evidence for or against
+      zero-copy** — that is IN-B and IN-D.
+
+      **Cause attributed 2026-08-26** by two controlled variants of the same walk
+      through the same public API, at a 128 MB target:
+
+      | walk | median | vs current |
+      |---|---:|---:|
+      | `entries()` — current | 5.32 ms | — |
+      | `node[i]` index walk, no vector | 4.33 ms | **-18.5%** |
+      | index walk + no `strlen` | 3.45 ms | **-35.1%** |
+      | simdjson baseline | 1.78 ms | |
+
+      So ~35% of the gap is the two API artifacts (`BENCH_INDEX_WALK=1`,
+      `BENCH_NO_STRLEN=1` reproduce it) and a **~1.94x residual remains**. The
+      residual is *not yet measured*: the working hypothesis is pointer-chasing
+      versus a linear tape scan (FastFHIR reaches children by offset into the
+      arena; simdjson scans contiguous memory with perfect prefetch) plus the
+      indirect call through `ParserOps` on every lookup. A `sample` profile of
+      the whole harness shows **no FastFHIR frames in the top-of-stack at all**,
+      consistent with it winning the stages that dominate wall time but not an
+      isolation of the walk. Settling the residual needs a walk-only binary — do
+      that before quoting a cause.
+
+      **Split measurement, 2026-08-26 (`BENCH_SPLIT=1`), target 2048 — this is
+      the finding that reframes Test 2.** Separating "make the bytes addressable"
+      from "walk every node":
+
+      | | FastFHIR | simdjson |
+      |---|---:|---:|
+      | open / parse | **7.4 µs** | **27.4 ms** |
+      | walk | 84.78 ms | 7.14 ms |
+      | nodes | 3,095,160 | 5,852,922 |
+      | ns per node | 27.39 | 1.22 |
+
+      **FastFHIR makes a 141 MiB stream addressable 3,696x faster** — 7 µs
+      against 27 ms — and that is the zero-copy claim, measured, holding exactly
+      as advertised. It then walks 22.5x slower per node. Test 2 is ~100% walk
+      for FastFHIR (the open is 0.009% of its time) and 79% parse for simdjson,
+      so the stage as defined hands FastFHIR a 3,700x win and then buries it
+      under the one operation it is worst at. Confirmed at target 4096: JSON
+      parse 56.5 ms, FastFHIR open still ~7 µs.
+
+      **Crossover: FastFHIR is ahead until you touch ~35% of the document**
+      (1.09M of 3.10M nodes). No realistic query touches 35% of a bundle, which
+      is precisely why § Why FastFHIR? claims random access and not traversal —
+      and why IN-B/IN-D are the instruments that would show it.
+
+      **The ratio is flat across a 300x range of bundle size** (2.1-3.0x from
+      0.5 MiB to 140 MiB of JSON wire), so this is a constant factor, not an
+      asymptotic divergence, and no crossover appears at scale. `entries()`
+      returning a non-allocating view would retire the 18.5%; filed as CAPI-8.
+- [ ] **PA-13. `--bundle-max-mb` does not name the bundle size — it is off by
+      ~20-30x.** The accumulator counts `p.patient.memory.size()`, the **ingested
+      source** arena ([`bench/main.cpp:477`](bench/main.cpp:477)) — a whole
+      Synthea bundle, every resource type — while the arms serialize only the
+      Patient + Observation subset. Measured 2026-08-26:
+
+      | `--bundle-targets-mb` | patients | JSON wire | FastFHIR wire | peak RSS |
+      |---:|---:|---:|---:|---:|
+      | 256 | 65 | 8.2 MiB | 17.7 MiB | — |
+      | 1024 | 272 | 33.4 MiB | 72.0 MiB | 4.2 GB |
+      | 2048 | 437 | 71.7 MiB | 153.8 MiB | 4.4 GB |
+      | 4096 | 929 | 140.0 MiB | **300.1 MiB** | 6.2 GB |
+
+      So **"256 MB" was an 8 MiB bundle**, and every sweep range this repo has
+      ever quoted meant something ~25x smaller than it said. A true 256 MiB
+      *JSON* bundle needs `--bundle-targets-mb 7500` and ~11 GB RSS; a 256 MiB
+      *FastFHIR* stream is reached at 4096. Fix the flag to mean produced wire
+      bytes (calibrate bytes-per-patient once at startup, then accumulate against
+      that) and until then **quote wire bytes, never the target**. The figures
+      already use measured bytes on the x-axis for exactly this reason.
+- [ ] **PA-12. `target_mb` does not control the workload below ~4 MB.** The
+      fixture accumulates patients until the total exceeds the target, and one
+      Synthea patient is ~3 MB ingested — so every target under ~4 MB yields a
+      bundle of exactly one randomly chosen patient. In one run the 1 MB target
+      produced 273 KB of FastFHIR wire and the 2 MB target produced 130 KB: the
+      smaller request produced the larger bundle. Every duration-vs-size curve
+      below 4 MB was plotting against noise, which is why the plots now use
+      measured wire bytes as x. Fix the ladder (start at ~4 MB, or accumulate to
+      a byte target rather than a patient count).
+- [ ] **PA-9. Test 4 is not the same operation in the FastFHIR arm.**
+      `FastFHIR::Memory` holds a `shared_ptr<FF_Memory_t>`, so
+      `StreamType enriched_stream = payload` shares the arena and the enrich
+      **mutates the source in place**, while the other three arms build a
+      separate buffer. Found 2026-08-26 by IN-0: `source_bytes` was being read
+      after the append, so FastFHIR's appended-bytes delta was always 0 and its
+      Test-4 `bytes_in` disagreed with its own Test-1 `bytes_out`. The read
+      order is fixed ([`bench/bench_test_4.hpp:105`](bench/bench_test_4.hpp:105));
+      **the asymmetry is not.** In-place append is the feature (WF-4.1), so the
+      fix is not to force a deep copy — it is to report the two shapes as
+      different measurements, and to note that FastFHIR's timer also starts
+      after its copy while the JSON arm's starts before its parse.
+- [ ] **PA-10. Enrich cost is wildly uneven and now visible.** ✎ **Investigated
+      2026-08-26 — the API cannot do the in-place append.** All three public
+      paths for "append one element to an existing sealed array" fail:
+      `MutableEntry[n]` past the end throws `out_of_range`; `insert_at_field`
+      refuses an already-assigned slot; README Example 3's array append is
+      unvalidated (works only on absent slots). Filed upstream as **CAPI-12**.
+      Until it lands, the FF arm MUST re-serialize the bundle root — the delta
+      is O(entry-array), and the claim waits on CAPI-12 + IN-D.
+- [ ] **PA-8. Cross-arm validation must cover every arm.**
+      [`bench/main.cpp:95`](bench/main.cpp:95) compares FastFHIR↔JSON and
+      JSON↔HL7v2 only. Nothing has ever checked the Google arm, which is how a
+      `birthdate` microsecond-epoch mismatch survived undetected (notes.md §5b).
+
+---
+
+## ▶ IN — instruments for the claim register
+
+Designs live in [`handoff.md`](handoff.md); this is the tracker. Each instrument
+is a separate narrow binary, **not** another stage on the 4×4 grid. The existing
+four-arm × four-stage harness stays as a smoke and regression rig.
+
+Ordered by what unblocks the most.
+
+- [x] **IN-0. Emit size and provenance.** ✅ **DONE 2026-08-26.**
+      - CSV is now `arm,test,duration_ns,bytes_in,bytes_out,target_mb,patients_in_bundle`.
+        `MetricEvent` carries wire bytes per stage
+        ([`bench/harness.hpp:51`](bench/harness.hpp:51)); all four arms populate
+        them **after** `stop_ns()`, never inside the window. 0 means "not
+        applicable to this stage" and a serialize stage reporting 0 warns.
+      - `EnrichMetricsSummary`'s `source_bytes`/`enriched_bytes` — computed
+        since the port and never read — now reach the results via a new
+        `enrich_metric(arm, summary)` overload.
+      - PG: `bytes_in`/`bytes_out` on `benchmark_results`; `benchmark_runs`
+        gains `fastfhir_sha`, `fastfhir_dirty`, `production_profile`,
+        `compilation_mode`, `corpus_sha256`, `benchmark_sha`, `seed`.
+      - [`bench/provenance.hpp`](bench/provenance.hpp): collects every field
+        handoff.md requires, prints a summary on **every** run, and
+        `--results-dir DIR` writes `provenance.json` — refusing (exit 3) when
+        the record is incomplete. Self-contained SHA-256 (no crypto dep) for the
+        corpus digest, memoized on (count, bytes, newest mtime).
+      - [`bench/provenance_test.cpp`](bench/provenance_test.cpp): 11 checks —
+        FIPS 180-4 vectors plus every refusal path. `bazel test
+        //bench:provenance_test`.
+      - **Two gates bite in practice, both deliberately:** a non-`opt` build
+        cannot produce an artifact (the Debug trap, enforced), and an ambiguous
+        profile is rejected — this machine has three CMake caches carrying two
+        different profile values, so `--profile` must pin it.
+- [ ] **IN-F. Preservation matrix** (WF-2.2, 2.3, 2.4, 5.4). No new arms, no
+      timing methodology to defend, validates four claims at once, and carries
+      Tier X of **D2**. Round-trip each corpus document JSON → library → JSON,
+      diff, classify every difference as preserved / reordered / coerced /
+      **lost**. Include `MessageToJsonString` as a column — README § 5.4 names
+      it. *Do this before any new timing work.*
+- [ ] **IN-A. Receiver-side throughput + orjson arm** (WF-1.3). Retires the
+      uncited citation (upstream I3.6). Two rows per arm, not one: **time to
+      addressable** and **time to all fields materialized** — `orjson.loads()`
+      is eager and mmap+header-validate is lazy, and collapsing that asymmetry
+      into a single ratio flatters FastFHIR. Warm the interpreter; keep process
+      start out of the window and say so.
+- [ ] **IN-D. Bytes touched** (WF-4.1). `mincore` resident pages + `getrusage`
+      minor faults for one `Patient.id` read from a large bundle; pages dirtied
+      by an enrich. A flat line against a linear one is a stronger artifact than
+      any nanosecond ratio, and much harder to argue with. **Strong candidate to
+      cite upstream in place of a throughput number.**
+- [x] **IN-B. Random-access curve** (WF-1.1) — **PROBE LANDED 2026-08-26**,
+      `BENCH_RANDOM_ACCESS=N`. Still needs wiring into the CSV/figures to be an
+      instrument, but the measurement exists and it is the most important number
+      this repo has produced.
+
+      **Method.** Pick N random `Bundle.entry` indices, navigate to each **from
+      the root**, read the resource's `id`. Every lookup pays its own path cost.
+      The JSON arm gets the fairest implementation available (array lookup
+      hoisted out of the loop); `at(i)` remains O(i) because a simdjson DOM has
+      no O(1) index — which is precisely the "O(N) linear scanning" WF-1.1 claims
+      to bypass. **Both arms return an identical accumulator at every size**, so
+      they demonstrably read the same fields.
+
+      | bundle entries | FastFHIR ns/read | simdjson ns/read | ratio |
+      |---:|---:|---:|---:|
+      | 5,844 | 92.6 | 5,913 | 64x |
+      | 24,661 | 342.0 | 38,225 | 112x |
+      | 105,202 | 929.2 | 366,602 | 395x |
+      | 226,925 | 791.5 | 2,030,842 | **2,566x** |
+
+      **simdjson grows linearly with entry count; FastFHIR does not.** That is
+      WF-1.1, measured, and it is the mirror image of Test 2: read in layout
+      order and the tape wins 22x, read out of order and FastFHIR wins 2,566x.
+      FastFHIR is not perfectly flat (92.6 -> 791.5 ns as entries grow 39x)
+      because random access into a larger arena costs more cache and TLB misses
+      — honest, and worth saying rather than claiming a flat line.
+
+      **The counterpoint that must be reported with it:** a simdjson DOM is not
+      built for indexed access, and a real consumer wanting many random lookups
+      would build an index once and amortize. Estimated crossover — *not yet
+      measured, do not quote* — JSON pays ~34 ms (parse + index build) then
+      ~100 ns/lookup; FastFHIR pays 7.4 us then ~782 ns/lookup; they meet near
+      **~50,000 lookups** into a 141 MiB bundle. Measure it before publishing;
+      an unmeasured crossover is exactly the kind of number this repo exists to
+      stop.
+
+- [x] **IN-B2. Random access is a real stage — and it is Test 2 (D4)** —
+      ✅ **2026-08-26.**
+      [`bench/bench_test_2.hpp`](bench/bench_test_2.hpp), macro-guarded per arm
+      with the mandatory inline namespace (D1), emitting to the CSV and PG like
+      any other stage. `MetricEvent` gained `ops` (units of work), so the stage
+      reports **ns/read** — the normalization PA-5 asked for and never had
+      anywhere to live. `fig3_random_access` and a notebook section ship with
+      it. **The former Test 2 (materialize) was retired the same day — D4.**
+
+      | bundle | FastFHIR | simdjson | protobuf | HL7v2 | FF vs simdjson |
+      |---|---:|---:|---:|---:|---:|
+      | ~0.5 MiB | 49.5 ns | 877 ns | 1,271 ns | 126,300 ns | **18x** |
+      | ~2 MiB | 62.1 ns | 6,125 ns | 7,360 ns | 450,647 ns | **99x** |
+      | ~10 MiB | 227.5 ns | 43,387 ns | 50,178 ns | 1,914,388 ns | **191x** |
+      | ~36 MiB | 344.9 ns | 295,397 ns | 322,183 ns | 10,519,591 ns | **856x** |
+
+      **The cross-arm byte gate is the reason to trust this**, and it earned its
+      keep immediately — it caught three real bugs before any number was
+      reported: the HL7v2 probe splitting on `\n` when v2 terminates segments
+      with `\r`; a wrong PID field index (`parse_segment_line` keeps the segment
+      name in `Segment::name`, so PID-3 is `fields[2]`); and **the probe running
+      after Test 4**, whose in-place enrich (PA-9) had the FastFHIR arm reading
+      1,474 entries against the others' 1,473. It now runs before Test 4 in
+      every arm.
+
+      **Still open:** HL7v2 addresses *messages* (5) where the others address
+      *resources* (1,473) — a v2 batch has no resource-level index. Its number
+      is a different operation and is captioned as such rather than dropped. The
+      indexed-JSON counterpoint is still unmeasured; the ~50k-read crossover
+      estimate must not be quoted until it is.
+
+- [ ] **IN-B3. Measure the indexed-JSON counterpoint.** Build the index once,
+      amortize it over N reads, and find the real crossover. Until this exists,
+      Test 2 shows a scan-based consumer, not the best a JSON consumer can do.
+
+- [ ] **IN-C. Allocation gate** (WF-1.2, WF-3.4). Count, do not time. Assert
+      exactly 0 for navigation and reflection, exactly 1 per `entries()` call.
+      A `bazel test` target that fails the build when violated, not a metric row.
+- [ ] **IN-E. Size table** (WF-1.4). **Partial: 2026-08-26** — the harness now
+      emits `test_1_compact` (FastFHIR compact archive size, gated on
+      losslessness; the gate itself is the "quote no compact number until the
+      compact export re-parses identically" rule from handoff.md). Still to
+      do: gzip(JSON), gzip(protobuf), and the sparse vs dense corpus split —
+      the −66 % claim is scoped to sparse resources and must never be blended
+      into one headline. See also upstream I3.7:
+      the published −66 % may itself be a lossy measurement, so **do not
+      reproduce that number here as a baseline to compare against**.
+- [x] **IN-G. Resilience & integrity suite** (WF-3.1, 3.2, 3.3, and WF-4.2's
+      correctness half) — ✅ **SHIPPED 2026-08-26** as
+      [`bench/resilience_test.cpp`](bench/resilience_test.cpp), all four tests
+      (truncation, bit-flip, type confusion, concurrent build). Run from the
+      repo root: `./bazel-bin/bench/resilience_test` (bazel run changes cwd and
+      loses the corpus). Verified on a real Synthea patient: truncation
+      rejected at every structural cut; VALIDATION flips fail
+      `validate_FFHR_stream`; RECOVERY_TAG flips refuse typed reads; payload
+      flips leave structure intact and are caught by the real SHA-256 footer
+      (the ingest's null hasher is re-sealed with `bench::provenance::sha256`);
+      concurrent `append_obj` (8×25) validates with all blocks reachable.
+      Qualifiers preserved: malformed-not-hostile (G1), integrity-not-
+      authenticity. Test 4's "blocked on IN-H" note was stale — the suite
+      exercises the library's `claim_space` directly, not the arm's parallel
+      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
+- [ ] **IN-H. Thread-scaling curve** (WF-4.2). *Blocked:* the parallel path in
+      [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is
+      commented out, so this repo currently exercises only the serial path and
+      proves nothing either way. Re-enable before designing the instrument.
+- [ ] **IN-R. `claims.json` + the release artifact.** Per handoff.md. Plus the
+      missing enforcement: a checker that extracts the § Why FastFHIR? bullets
+      from `../FastFHIR/README.md` and fails if any lacks a `claims.json` entry.
+      Without it the rule is an honour system — and the orjson citation is what
+      an honour system produces.
+
+---
+
+## ▶ UP — filed upstream
+
+**Status** FILED 2026-08-26 into `../FastFHIR/TASKS.md`. **Not committed** —
+that tree is a symlinked live checkout. Track them here; do not fix them here.
+
+| Upstream ID | Ask | Blocks |
+|---|---|---|
+| **CAPI-1** | Public API for writing an inline-block array | PA-1 (Test 1 parity) |
+| **CAPI-2** | `validate_FFHR_stream()` accepts streams the deserializer segfaults on | Test 1 output gating |
+| **CAPI-3** | Block-typed `ChoiceEntry` cannot round-trip across arenas | PA-3, D2 Tier B |
+| **CAPI-4** | No zero-copy reader for packed date/time | PA-7 (Test 3 distortion) |
+| **CAPI-5** | `TypeTraits<std::string>` undefined while POCO fields are `std::string` | papercut only |
+| **CAPI-7** | `FF_FieldInfo` has no `name_len`, so reflection pays a `strlen` per field — ~13% of a walk | PA-11 |
+| **CAPI-8** | `entries()` allocates per array; no non-allocating iterator — ~18% of a walk | PA-11 |
+| **CAPI-6** | Stale doc comment `include/FF_Ingestor.hpp:69` | — |
+| **I3.6** | The orjson citation names a result this repo cannot produce | IN-A |
+| **I3.7** | The −66 % compact figure predates the compaction fix; nothing pins it | IN-E |
+
+- [ ] Re-check each on the next upstream sync; move to PA/IN when it lands.
+
+---
+
+## ▶ HY — hygiene
+
+**Status** OPEN
+
+- [ ] **HY-1. AddressSanitizer in CI.** The compensating control for **D1**.
+      The ODR violation was live for the entire life of the benchmark and no
+      ordinary build ever complained; one ASan run names it in seconds.
+      ```
+      bazel build -c dbg --copt=-fsanitize=address --copt=-fno-omit-frame-pointer \
+        --linkopt=-fsanitize=address --strip=never //bench:bench_harness
+      ```
+- [ ] **HY-2. Assert every timed stage produced observable work.**
+      `(void)result` let the optimizer delete the Test 2 walk; part of the
+      original 83 ns was dead code (notes.md §2). Every stage must produce a
+      value that escapes, checked against an expected magnitude.
+- [ ] **HY-3. Nothing between the last real operation and `stop_ns()`.** A
+      `getenv` diagnostic landed inside the Test 1 window during the port.
+- [ ] **HY-4. Keep `--seed` deterministic by default** (currently `20260825u`,
+      [`bench/main.cpp:133`](bench/main.cpp:133)) and record it in results
+      metadata alongside profile and SHA.
+- [ ] **HY-5. Retire the stale Google-arm "stub" text.** notes.md §5b disproved
+      it and correction banners were added to the tops of the affected
+      documents, but the body text still asserts it at
+      `RESOURCE_COVERAGE_ANALYSIS.md:78`, `:360` and
+      `MESSAGE_SURFACE_PARITY_AUDIT.md:109-110`. **A banner at the top of a file
+      does not travel with a retrieved chunk** — both repos are navigated
+      through a chunk-level `.arbiter/` index, so a stale line is a stale answer.
+      Strike them in place.
+- [ ] **HY-6. Re-index `../FastFHIR/.arbiter`.** It was generated 2026-08-24
+      15:28:33, one second *before* `../FastFHIR/handoff.md` was written, so
+      that document — the source of the "treat all pre-2026-08-24 numbers as
+      void" rule and of the compaction-loss history — is not in the index.
+
+---
+
+## ▶ CO — corpus
+
+**Status** OPEN
+
+Out-of-profile resources are retained as opaque JSON and re-emitted
+byte-for-byte, but they are **not typed-navigable**: no V-Table, so no `Node`
+field access, no query, no interior compaction.
+
+The shipped preset deliberately excludes the `imaging` grouping, so the Synthea
+corpus's **1,444 `ImagingStudy` resources take the opaque path on every run**.
+That is intentional coverage proving the fallback is lossless — **do not enable
+`imaging` to "fix" it.**
+
+- [ ] **CO-1.** A "query every resource" benchmark is not querying every
+      resource. Either restrict the corpus to in-profile types or build with a
+      wider profile, and **say which** — it changes both the binary and the
+      workload.
+- [ ] **CO-2.** Report the opaque fraction (resource count and bytes) alongside
+      every query result, so a reader can see what share was navigable.
+- [ ] **CO-3.** Note in any size comparison that FastFHIR-vs-JSON size is
+      apples-to-apples only since the opaque-JSON change; earlier size wins were
+      partly FastFHIR dropping data the other arms carried.
+
+---
+
+## ▶ PR — build provenance with every result
+
+**Status** OPEN · folded into **IN-0**, kept here for the detail
+
+The compiled profile changes the binary under test with **no Bazel-visible
+signal**: `.external/FastFHIR` is a symlink to the live tree; Bazel does not run
+the generator (`../FastFHIR/BUILD.bazel` globs `generated_src/*.cpp`, which
+**CMake** produces at configure time). So the benchmarked profile is whatever
+CMake last generated.
+
+Current upstream state (verified 2026-08-24): profile
+`us-core,billing,medication-admin,supply`; 80 code-system enums; 44 generated
+`.cpp`; 37 resource types; `ImagingStudy` **not** compiled.
+
+- [ ] **PR-1.** Emit profile, upstream git SHA, dirty flag, and
+      `--compilation_mode` into the results CSV and the PG schema.
+- [ ] **PR-2.** Fail the run if `.external/FastFHIR` has uncommitted changes, or
+      record the dirty state in the metadata.
+- [ ] **PR-3.** Document that a profile change requires
+      `rm -rf ../FastFHIR/generated_src` before regenerating — the generator
+      never deletes output it no longer emits, so a stale tree survives.
+
+---
+
+## ▶ IF — infrastructure
+
+**Status** OPEN
+
+- [ ] **IF-1.** [`generate_repo.sh:403-418`](generate_repo.sh:403) falls back to
+      `tools/generator/make_lib.py`, which no longer exists. The generator is
+      `python -m generator`, or `cmake --preset ninja` from `../FastFHIR`.
+- [ ] **IF-2.** [`bench/main.cpp:31`](bench/main.cpp:31) hardcodes
+      `/Users/RyanLandvater/Programming_Projects/FastFHIR-benchmarking/datasets/synthea`.
+      Drop it; keep the relative fallback and add `--synthea-dir`.
+- [ ] **IF-3.** `local/include/` holds one orphaned `FF_Bundle.hpp` from the
+      CMake-install era. Delete it.
+- [ ] **IF-4.** Google FHIR's Bazel build is macOS-only here, leaving
+      `bench_harness_win` unbuildable on Windows. **Fix the dependency, not the
+      target** — dropping an arm on one platform makes the platforms
+      non-comparable, which defeats the benchmark.
+- [ ] **IF-5.** Keep `SYNTHEA_DATA_URL` in sync between README and
+      [`generate_repo.sh:22`](generate_repo.sh:22).
+
+---
+
+## Standing rules
+
+- **D1, D2, D3 above are decided.** Reopening one needs Ryan, not a rationale.
+- **Keep `--compilation_mode=opt`.** Never publish a number from `-c fastbuild`
+  or `-c dbg`. FastFHIR's own CMake presets are all Debug `-O0` and the same
+  code runs ~10× faster optimized — this is how upstream's §A/§B tables came to
+  be labelled `-O2` while being Debug measurements.
+- **Never trust a result from a build you did not confirm succeeded.** A stale
+  test binary once printed `8/8 PASS` while its build was failing with 10 errors.
+- **Do not commit into `../FastFHIR` from here.** It is a symlinked live tree.
+  Filing into its `TASKS.md` is fine; committing is not.
+- **Record the profile with every published result** (PR).
+- **Do not enable the `imaging` grouping** in `../FastFHIR/CMakePresets.json`.
+- **Treat all pre-2026-08-24 FastFHIR numbers as void** — they predate the
+  opaque-JSON change (`../FastFHIR/handoff.md` §1).
+- **Update this file as you go.** Check the box, add a Progress-log line, and
+  note what the change did *not* settle. A backlog that is only accurate at the
+  end of a session is not a backlog.

@@ -101,6 +101,20 @@ cc_binary(
     ],
 )
 
+# Instrument G -- resilience & integrity suite (TODO.md spec, IN-G). Four
+# pass/fail tests, none of them timers: truncation detection, bit-flip
+# detection (structural vs payload vs checksum), type-confusion prevention,
+# and concurrent build integrity. Run: bazel run -c opt //bench:resilience_test
+cc_binary(
+    name = "resilience_test",
+    srcs = ["resilience_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":bench_core_common",
+        ":bench_provenance",
+    ],
+)
+
 # Read-path validation binary — reports whole-document traversal costs as an
 # average per Bundle entry and gates on <= 50 us/entry (regression bound for
 # optimized builds). Run: bazelisk run //bench:read_path_bench -- <file.ffhr>
