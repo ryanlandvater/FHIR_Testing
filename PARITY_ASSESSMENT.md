@@ -36,7 +36,7 @@
 | Test | Status | Key Finding | Hardening |
 |---|---|---|---|
 | Test 1 (Serialize) | ⚠️ HL7v2 ZFX overhead | HL7v2 does extra work preserving non-mappable FHIR fields | Add lossy HL7v2 variant; report bytes-per-arm |
-| Test 2 (Materialize) | ✅ Fair | FFHR zero-parse is an architectural strength, not an advantage | Report bytes-per-touched-node; add memory metrics |
+| Test 2 (Random Access, D4) | ✅ Replaced | Former materialize walk retired 2026-08-26 (TASKS.md D4) | N/A — see IN-B (shipped) and IN-D |
 | Test 3 (Query) | ✅ Fixed | HL7v2 now pays full parse cost like every other arm | Add cross-arm QuerySummary assertion; extract ZFX fields or document gap |
 | Test 4 (Enrich) | ✅ Fair | Append cost IS the architectural finding | Add byte-level validation; add optional round-trip companion test |
 
@@ -79,9 +79,17 @@ The ZFX overflow costs string escaping (`hl7_escape`: `|`→`\F\`, `^`→`\S\`, 
 
 ---
 
-## Section 2: Test 2 (Materialization)
+## Section 2: Test 2 — superseded (D4)
 
-### How It Works
+> ⚠️ **Superseded 2026-08-26 (TASKS.md D4).** The materialize walk was retired;
+> Test 2 is now random access ([`bench/bench_test_2.hpp`](bench/bench_test_2.hpp))
+> — N random entry reads, each navigating from the root, with a cross-arm byte
+> parity gate. The analysis below is retained as the record of why the walk was
+> wrong evidence; in particular, the "zero-parse is the headline" verdict below
+> could not be supported by a layout-order traversal that was a tape's best case
+> and a query's worst.
+
+### How It Works (former Test 2)
 
 Each arm takes its serialized payload and reconstructs an in-memory model, then recursively walks every node:
 

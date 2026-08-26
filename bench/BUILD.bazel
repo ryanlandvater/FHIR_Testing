@@ -21,6 +21,17 @@ cc_library(
     ],
 )
 
+# Build provenance for the release artifact (TASKS.md IN-0). Header-only and
+# dependency-free: the SHA-256 used for the corpus digest is implemented in the
+# header rather than pulled from boringssl, which is in the graph via FastFHIR's
+# targets but not visible to this module -- and a repo whose point is hermetic,
+# identically-built comparison arms should not grow a crypto dep to hash a
+# directory. provenance_test checks it against the FIPS 180-4 vectors.
+cc_library(
+    name = "bench_provenance",
+    hdrs = ["provenance.hpp"],
+)
+
 # hl7v2 arm is pure C++ with zero platform or Google FHIR deps.
 # Split from bench_core_harness so it can run on Windows.
 cc_library(
@@ -57,6 +68,7 @@ cc_binary(
     data = ["enrich.json"],
     deps = [
         ":bench_core_harness",
+        ":bench_provenance",
     ],
     defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2"],
 )
@@ -70,6 +82,7 @@ cc_binary(
     data = ["enrich.json"],
     deps = [
         ":bench_core_harness",
+        ":bench_provenance",
         "@libpq_macos//:libpq",
     ],
     defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
@@ -109,6 +122,7 @@ cc_binary(
     data = ["enrich.json"],
     deps = [
         ":bench_core_harness",
+        ":bench_provenance",
         "@libpq_win//:libpq",
     ],
     defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
@@ -122,4 +136,12 @@ cc_test(
     deps = [
         ":bench_core_common",
     ],
+)
+
+# The provenance gate: SHA-256 vectors + the missing_fields() enforcement that
+# decides whether numbers may become an artifact at all (TASKS.md IN-0).
+cc_test(
+    name = "provenance_test",
+    srcs = ["provenance_test.cpp"],
+    deps = [":bench_provenance"],
 )

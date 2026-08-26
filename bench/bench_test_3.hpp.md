@@ -69,13 +69,19 @@ static inline QuerySummary query(std::string_view payload);  // raw bytes from F
 
 - **Parser**: `FastFHIR::Parser(payload.data(), payload.size())` — zero-copy
 - **Walk**: Iterates `root[BUNDLE.ENTRY]`, checks each resource's type via `resource_node.is<RESOURCETYPE::PATIENT>()` / `is<RESOURCETYPE::OBSERVATION>()`
-- **Patient**: Reads `resource_node[PATIENT.BIRTH_DATE].as<std::string_view>()`
-- **Observation**: Uses `resource_node.as<ObservationData>()` to get the POCO struct, then checks:
-  - `observation.code->coding[]` for LOINC `2085-9` system/code match
-  - `observation.value.tag` for value type via `value_kind_from_choice_tag()`
-  - `observation.effective.tag` for dateTime vs Period
-  - `observation.issued` presence
-  - `observation.component[]` for component value type classification
+- **Patient**: Reads `resource_node[PATIENT.BIRTH_DATE]` via `read_text_field()`
+  (packed date/time has no zero-copy public reader — CAPI-4)
+- **Observation** (lens-based since 2026-08-26 — no `as<ObservationData>()`, which
+  deserialized the whole POCO; nodes are views over the bytestream, and the
+  census reads only what it classifies):
+  - `resource_node[OBSERVATION.CODE]` → `CODEABLECONCEPT.CODING` → index-walked
+    (`[i]`, not `entries()`, so the zero-allocation read path holds) →
+    `CODING.SYSTEM` / `CODING.CODE` string views for the LOINC `2085-9` match
+  - `OBSERVATION.VALUE` choice tag via `target_recovery` (no node expansion)
+  - `OBSERVATION.EFFECTIVE` choice tag via `target_recovery` (Period vs datetime)
+  - `OBSERVATION.ISSUED` **presence only** — it is a packed date/time slot, and
+    decoding it is the CAPI-4 gap; presence matches the POCO's `is_empty()`
+  - `OBSERVATION.COMPONENT` → index-walked → `OBSERVATION_COMPONENT.VALUE` tag
 - **Choice tag mapping**: Uses `RECOVER_FF_*` constants (`RECOVER_FF_QUANTITY`, `RECOVER_FF_CODEABLECONCEPT`, etc.) to map FFHR's choice-type tags to `ValueKind`
 
 #### JSON (`ARM_JSON`)
@@ -95,7 +101,9 @@ static inline QuerySummary query(const std::string& payload);
 static inline QuerySummary query(const std::string& payload);
 ```
 
-- **Parser**: `test_2::materialize()` first to deserialize protobufs, then walks the resulting vectors
+- **Parser**: Walks the TLV records itself — `ParseFromArray()` per
+  Patient/Observation record, then counts via reflection and direct field
+  access (no dependency on Test 2)
 - **Walk**: Iterates patients and observations, using protobuf reflection and direct field access
 - **Value classification**: Checks `observation.has_value()` and inspects which `value_*` oneof field is set
 

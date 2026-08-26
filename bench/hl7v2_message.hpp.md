@@ -12,7 +12,7 @@ Defines the **HL7v2 message model** used by the HL7v2 benchmark arm. Provides:
 - HL7v2 segment structs (MSH, PID, OBX)
 - FHIR→HL7v2 field mapping helpers
 - `OruR01Message` builder that assembles a complete ORU^R01 message
-- `parse_batch()` function for Test 2 materialization
+- `parse_batch()` function used by Test 3's parse-before-query path
 
 This is a **minimal, purpose-built HL7v2 implementation** — it does not use an external HL7v2 parser library. The segment models are scoped to the fields needed for the benchmark's clinical scenario.
 

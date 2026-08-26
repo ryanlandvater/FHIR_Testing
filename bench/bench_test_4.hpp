@@ -3,6 +3,7 @@
 #include "harness.hpp"
 
 #include <cstdint>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -10,6 +11,7 @@
 
 #if defined(ARM_FASTFHIR)
 #include <FF_Bundle.hpp>
+#include <FF_Ingestor.hpp>
 #define BENCH_TEST_4_ENRICH_FN enrich_fastfhir
 #elif defined(ARM_JSON)
 #include <nlohmann/json.hpp>
@@ -84,6 +86,15 @@ inline std::string format_enrich_summary(const EnrichMetricsSummary& summary) {
          " duration_ns=" + std::to_string(summary.duration_ns);
 }
 
+// EnrichMetricsSummary has carried source_bytes/enriched_bytes since the port
+// and nothing ever read them -- they were formatted into a debug string and
+// dropped. This overload is what puts them in the results (TASKS.md IN-0).
+inline MetricEvent enrich_metric(std::string_view arm, const EnrichMetricsSummary& summary) {
+  return MetricEvent{std::string(arm), Stage::Test4Enrich, summary.duration_ns,
+                     static_cast<std::int64_t>(summary.source_bytes),
+                     static_cast<std::int64_t>(summary.enriched_bytes)};
+}
+
 inline MetricEvent enrich_metric(std::string_view arm, std::int64_t duration_ns) {
   return MetricEvent{std::string(arm), Stage::Test4Enrich, duration_ns};
 }
@@ -94,6 +105,13 @@ using StreamType = FastFHIR::Memory;
 
 inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
                                                 const ObservationData& enrichment_observation) {
+  // FastFHIR::Memory holds a shared_ptr<FF_Memory_t>, so the copy below shares
+  // the arena: the append grows `payload` too. Read the source size FIRST or it
+  // reports the post-append size and the appended-bytes delta is always 0.
+  // (The in-place append is the feature -- WF-4.1 -- but the other three arms
+  // build a separate buffer, so the two columns are not the same measurement.
+  // Tracked as PA-9.)
+  const std::size_t source_bytes_before = payload.view().size();
   StreamType enriched_stream = payload;
   const FastFHIR::FF_Stream stream = make_stream(enriched_stream, FHIR_VERSION_R5);
   FastFHIR::Builder& builder = *stream;
@@ -107,6 +125,15 @@ inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
     throw std::runtime_error("test_4::enrich expected Bundle root in FastFHIR stream");
   }
 
+  // The live-stream append the zero-copy claim calls for -- append the new
+  // observation to the entry array and re-seal -- is NOT expressible through
+  // the public API today (CAPI-12, filed 2026-08-26):
+  //   * MutableEntry[n] throws out_of_range past a sealed array's end;
+  //   * insert_at_field refuses an already-assigned slot ("Patching an
+  //     assigned slot risks orphaning elements of the stream");
+  //   * README Example 3's insert_at_field works only on ABSENT fields.
+  // So this stage must re-serialize the bundle root -- which is why the
+  // append delta is O(entry-array) rather than O(observation) (PA-10).
   BundleData bundle = root_node.as<BundleData>();
   auto observation_handle = builder.append_obj(ObservationData{});
   assign::assign_observation(enrichment_observation, observation_handle);
@@ -116,7 +143,7 @@ inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
   (void)seal_stream(stream, new_root, "fastfhir arm enrich");
 
   EnrichMetricsSummary summary;
-  summary.source_bytes = payload.view().size();
+  summary.source_bytes = source_bytes_before;
   summary.enriched_bytes = enriched_stream.view().size();
   summary.appended_observations = 1;
   summary.duration_ns = timer.stop_ns();

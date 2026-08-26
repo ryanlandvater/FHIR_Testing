@@ -1,8 +1,10 @@
 #include "harness.hpp"
 
 #include <FF_Bundle.hpp>
+#include <FF_Compactor.hpp>
 
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <execution>
 
@@ -196,7 +198,10 @@ namespace bench
     const auto root = builder.append_obj(bundle);
     (void)seal_stream(stream, root, "fastfhir arm bundle");
     const std::int64_t test1_ns = test1_timer.stop_ns();
-    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns});
+    // Wire size is read AFTER the clock stops -- nothing goes between the last
+    // real operation and stop_ns() (notes.md section 6).
+    const std::int64_t test1_bytes = static_cast<std::int64_t>(payload_memory.view().size());
+    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
 
     if (std::getenv("BENCH_VALIDATE"))
     {
@@ -231,22 +236,67 @@ namespace bench
       }
     }
 
+    // FastFHIR-native compact archive (WF-1.4 / IN-E). Compaction runs once
+    // per sample; the arena and its losslessness verdict stay alive so the
+    // same probes run over the compact stream (test_2_compact / test_3_compact
+    // / test_4_compact) -- the claim under test is that the reader is
+    // layout-agnostic, i.e. compact ≈ standard speed.
+    //
+    // Gated on losslessness: the compact stream must re-parse to JSON
+    // semantically identical to the standard stream's, or no compact row is
+    // emitted -- the upstream compactor silently dropped scalar arrays until
+    // 459e8d8, and no compact number leaves without the gate (handoff.md
+    // Instrument E, upstream I3.7).
+    FastFHIR::Memory compact_mem;
+    FastFHIR::Memory::View compact_view{};
+    bool compact_lossless = false;
+    {
+      const FastFHIR::Memory::View standard_view = payload_memory.view();
+      compact_mem =
+          FastFHIR::Memory::create(std::max<std::size_t>(standard_view.size() * 2, 1));
+      Timer compact_timer;
+      compact_timer.start();
+      compact_view = FastFHIR::Compactor::archive(FastFHIR::Parser(payload_memory), compact_mem,
+                                                  FF_CHECKSUM_NONE);
+      const std::int64_t compact_ns = compact_timer.stop_ns();
 
-    Timer test2_timer;
-    test2_timer.start();
-    const auto materialized = test_2::materialize(payload_memory);
-    out.metrics.push_back(test_2::materialize_metric("fastfhir", test2_timer.stop_ns()));
-    // Observe the walk result. Without this the compiler is free to elide
-  // touch_tree() entirely -- the FastFHIR arm reported 83 ns for a 317-entry
-  // bundle before this check existed, which was a dead-code artefact rather
-  // than a zero-copy result. See notes.md section 2.
-  if (materialized.touched_nodes == 0 && materialized.ok) {
-    std::cerr << "[warn] materialize touched 0 nodes\n";
-  }
-  if (std::getenv("BENCH_TOUCHED")) {
-    std::cerr << "[touched] " << out.metrics.back().arm << " nodes="
-              << materialized.touched_nodes << " ok=" << materialized.ok << "\n";
-  }
+      // Semantic JSON equality (nlohmann), not string equality: the two
+      // layouts may legitimately order fields differently, and a false-negative
+      // gate would silently suppress every compact number.
+      bool lossless = false;
+      try
+      {
+        nlohmann::json std_json, cmp_json;
+        {
+          std::ostringstream sink;
+          FastFHIR::Parser(payload_memory).print_json(sink);
+          std_json = nlohmann::json::parse(sink.str());
+        }
+        {
+          std::ostringstream sink;
+          FastFHIR::Parser(compact_view.data(), compact_view.size()).print_json(sink);
+          cmp_json = nlohmann::json::parse(sink.str());
+        }
+        lossless = (std_json == cmp_json);
+      }
+      catch (const std::exception &ex)
+      {
+        std::fprintf(stderr, "[warn] compact losslessness probe threw: %s\n", ex.what());
+      }
+      compact_lossless = lossless;
+
+      if (lossless)
+      {
+        out.metrics.push_back({"fastfhir", Stage::Test1Compact, compact_ns, 0,
+                               static_cast<std::int64_t>(compact_view.size())});
+      }
+      else
+      {
+        std::fprintf(
+            stderr,
+            "[warn] compact losslessness FAILED -- compact size not emitted (IN-E gate)\n");
+      }
+    }
 
     Timer test3_timer;
     test3_timer.start();
@@ -254,10 +304,104 @@ namespace bench
     out.metrics.push_back({"fastfhir", Stage::Test3Query, test3_timer.stop_ns()});
     out.queried_value = test_3::format_query_summary(query_summary);
 
-    auto enrich_result = test_4::BENCH_TEST_4_ENRICH_FN(payload_memory, enrichment_observation_fixture());
-    out.metrics.push_back(test_4::enrich_metric("fastfhir", enrich_result.summary.duration_ns));
+    // Test 3 over the compact archive (test_3_compact). Same census, same
+    // lens reads -- the reader dispatches on the stream layout, so this must
+    // come out ~equal in speed and IDENTICAL in answers. A query-summary
+    // mismatch would mean the compact stream lost content the print_json
+    // gate could not see.
+    if (compact_lossless)
+    {
+      try
+      {
+        Timer t3c_timer;
+        t3c_timer.start();
+        const auto compact_query =
+            test_3::query(std::string_view(compact_view.data(), compact_view.size()));
+        const std::int64_t t3c_ns = t3c_timer.stop_ns();
+        if (test_3::format_query_summary(compact_query) != out.queried_value)
+        {
+          std::fprintf(stderr, "[warn] compact query summary differs from standard!\n");
+        }
+        out.metrics.push_back({"fastfhir", Stage::Test3QueryCompact, t3c_ns});
+      }
+      catch (const std::exception &ex)
+      {
+        std::fprintf(stderr, "[warn] test_3_compact failed: %s\n", ex.what());
+      }
+    }
+
+  // Test 2 -- random access (IN-B / WF-1.1). Out-of-order reads, navigating
+  // from the root each time; the retired materialize walk read in layout
+  // order, and the two disagree by three orders of magnitude.
+  //
+  // MUST run BEFORE Test 4. FastFHIR::Memory is a shared_ptr handle, so the
+  // enrich appends into this very arena (PA-9) -- running Test 2 afterwards
+  // had the FastFHIR arm reading 1,474 entries while the other arms read
+  // 1,473, and the cross-arm byte gate caught it.
+  {
+    const auto ra = test_2::random_access(payload_memory);
+    out.metrics.push_back(test_2::random_access_metric("fastfhir", ra));
+    out.random_access_summary = test_2::format_random_access_summary(ra);
+  }
+
+  // Random access over the compact archive (test_2_compact). Same lens reads;
+  // the byte accumulators are NOT cross-arm-gated here (the gate covers the
+  // standard stage) -- the reader is the same, which is what makes the two
+  // comparable, and the query cross-check above guards content.
+  if (compact_lossless)
+  {
+    try
+    {
+      Timer t2c_timer;
+      t2c_timer.start();
+      const auto compact_ra = test_2::random_access(compact_mem);
+      const std::int64_t t2c_ns = t2c_timer.stop_ns();
+      out.metrics.push_back({"fastfhir", Stage::Test2RandomAccessCompact, t2c_ns,
+                             /*bytes_in=*/0, /*bytes_out=*/compact_ra.bytes_read,
+                             /*ops=*/compact_ra.reads});
+    }
+    catch (const std::exception &ex)
+    {
+      std::fprintf(stderr, "[warn] test_2_compact failed: %s\n", ex.what());
+    }
+  }
+
+  auto enrich_result = test_4::BENCH_TEST_4_ENRICH_FN(payload_memory, enrichment_observation_fixture());
+    out.metrics.push_back(test_4::enrich_metric("fastfhir", enrich_result.summary));
     out.enriched_stream = std::move(enrich_result.enriched_stream);
     out.enrich_metrics_summary = test_4::format_enrich_summary(enrich_result.summary);
+
+    // Enrich over the compact archive (test_4_compact). The API REFUSES this
+    // by design -- "Cannot open Builder on a compact archive. Decompact to a
+    // standard stream before append/mutation" -- so there is no row to emit
+    // (0 would claim N/A per the MetricEvent contract but break the duration
+    // gate). Attempting it anyway is the instrument: it verifies the
+    // write-once property still holds. CAPI-10 tracks the undocumented
+    // immutability.
+    if (compact_lossless)
+    {
+      try
+      {
+        auto compact_enrich =
+            test_4::BENCH_TEST_4_ENRICH_FN(compact_mem, enrichment_observation_fixture());
+        out.metrics.push_back({"fastfhir", Stage::Test4EnrichCompact,
+                               compact_enrich.summary.duration_ns,
+                               static_cast<std::int64_t>(compact_enrich.summary.source_bytes),
+                               static_cast<std::int64_t>(compact_enrich.summary.enriched_bytes)});
+      }
+      catch (const std::exception &ex)
+      {
+        static bool logged = false;
+        if (!logged)
+        {
+          std::fprintf(stderr,
+                       "[compact] test_4_compact: API refuses to open a Builder on a compact "
+                       "archive (write-once format) -- no row emitted, by design: %s\n",
+                       ex.what());
+          logged = true;
+        }
+      }
+    }
     return out;
   }
 

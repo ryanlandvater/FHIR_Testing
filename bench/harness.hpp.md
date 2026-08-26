@@ -19,14 +19,16 @@ Every arm implementation file and every test header includes this first.
 
 ```cpp
 enum class Stage {
-  Test1Serialize,    // Measure struct-to-wire-format conversion
-  Test2Materialize,  // Measure wire-format-to-tree deserialization
-  Test3Query,        // Measure tree walk for LOINC 2085-9 search
-  Test4Enrich,       // Measure append-one-observation workflow
+  Test1Serialize,          // Measure struct-to-wire-format conversion
+  Test1Compact,            // FastFHIR-native compact archive size (IN-E, losslessness gate)
+  Test2RandomAccess,       // Measure N random entry reads, each from the root (D4)
+  Test2RandomAccessCompact,// Same probe over the compact archive (FF arm only)
+  Test3Query,              // Measure tree walk for LOINC 2085-9 search
+  Test3QueryCompact,       // Same census over the compact archive (FF arm only)
+  Test4Enrich,             // Measure append-one-observation workflow
+  Test4EnrichCompact,      // Not emitted: Builder refuses compact archives (CAPI-10)
 };
 ```
-
-Legacy aliases (`Stage1Serialize`, `Stage2Transport`, `Stage3Query`, `Stage3Materialize`) exist for backward compatibility during the stage→test migration.
 
 ### `MetricEvent`
 
@@ -93,7 +95,7 @@ Uses `std::chrono::steady_clock`. Minimum return of 1 ns avoids zero-duration ar
 
 ### `to_string(Stage)`
 
-Maps `Stage` enum to CSV-safe string: `"test_1_serialize"`, `"test_2_materialize"`, etc.
+Maps `Stage` enum to CSV-safe string: `"test_1_serialize"`, `"test_2_random_access"`, etc.
 
 ### `print_metric(const MetricEvent&)`
 

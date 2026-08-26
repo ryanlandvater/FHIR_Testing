@@ -57,15 +57,11 @@ namespace
     return out;
   }
 
-  bool metrics_are_valid(const bench::ArmRunResult &run, bool allow_test2_zero)
+  bool metrics_are_valid(const bench::ArmRunResult &run)
   {
     for (const auto &metric : run.metrics)
     {
       if (metric.duration_ns > 0)
-      {
-        continue;
-      }
-      if (allow_test2_zero && metric.stage == bench::Stage::Test2Materialize && metric.duration_ns == 0)
       {
         continue;
       }
@@ -112,12 +108,12 @@ int main()
     return 1;
   }
 
-  if (!metrics_are_valid(fastfhir, false))
+  if (!metrics_are_valid(fastfhir))
   {
     std::cerr << "timing conformance failed: FastFHIR metric duration invalid\n";
     return 1;
   }
-  if (!metrics_are_valid(json, false))
+  if (!metrics_are_valid(json))
   {
     std::cerr << "timing conformance failed: JSON metric duration invalid\n";
     return 1;

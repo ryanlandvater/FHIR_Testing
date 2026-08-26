@@ -30,7 +30,7 @@ For detailed per-file architecture documentation, see the [bench/*.md](bench/) f
 | timing_conformance_test.cpp | ✅ Complete | ✅ **PASSES** | [timing_conformance_test.cpp.md](bench/timing_conformance_test.cpp.md) | FFHR+JSON parity validation |
 | read_path_bench.cpp | ✅ Complete | ✅ **builds** | [read_path_bench.cpp.md](bench/read_path_bench.cpp.md) | Written against the current API — **the port template** |
 | bench_test_1.hpp (assign) | ✅ 4-arm | ✅ builds; `value[x]` skipped in all arms | [bench_test_1.hpp.md](bench/bench_test_1.hpp.md) | Macro-guarded; identical field coverage |
-| bench_test_2.hpp (materialize) | ✅ 4-arm | ⚠️ walk fixed (was 1 node); counts unnormalized | [bench_test_2.hpp.md](bench/bench_test_2.hpp.md) | All arms implemented |
+| bench_test_2.hpp (random access) | ✅ 4-arm | ✅ replaced materialize (D4); cross-arm byte gate enforces identical reads | [bench_test_2.hpp.md](bench/bench_test_2.hpp.md) | All arms implemented |
 | bench_test_3.hpp (query) | ✅ 4-arm | ✅ builds; FastFHIR pays a print_json penalty | [bench_test_3.hpp.md](bench/bench_test_3.hpp.md) | All arms implemented |
 | bench_test_4.hpp (enrich) | ✅ 4-arm | ✅ builds | [bench_test_4.hpp.md](bench/bench_test_4.hpp.md) | All 4 arms enrich functionally |
 
@@ -39,7 +39,8 @@ For detailed per-file architecture documentation, see the [bench/*.md](bench/) f
 ### P0 - Repair what the port exposed (Blocks Publishing)
 - [ ] See **[TASKS.md § PARITY](TASKS.md)** and **[notes.md](notes.md)**. The
       harness runs, but Test 1 is not at parity, `value[x]` is excluded from every
-      arm, and Test 2 node counts are not normalized across formats.
+      arm, and Test 3 still charges the FastFHIR arm a `print_json` penalty
+      (PA-7). Test 2 is the random-access stage (D4) with a cross-arm byte gate.
 
 ### P1 - Google FHIR arm (revised 2026-08-25)
 - [x] ~~Implement test_2::materialize() for Google FHIR~~ — **already implemented**

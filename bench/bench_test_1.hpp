@@ -2631,7 +2631,44 @@ inline namespace BENCH_ARM_NS {
 #endif
 
 #if defined(ARM_JSON)
-    inline void assign_observation_effective(const ObservationData &src, Json &dst) { write_choice(dst, "effective", src.effective); }
+    inline void assign_observation_effective(const ObservationData &src, Json &dst)
+    {
+      // effective[x] is dateTime | Period | Timing | instant in FHIR. Packed
+      // date/time arrives in the hydrated ChoiceEntry as the RAW 63-bit slot
+      // value (uint64_t) -- write_choice would emit it as a JSON number, which
+      // the census's is_string() check then misses (the Test 3 gate failure,
+      // FF 692 vs JSON 0). Decode through the FF_DATETIME machinery so the
+      // emitted JSON is the canonical ISO-8601, matching print_json's output
+      // on the FF side. Fallback-slot text (held as string_view) passes
+      // through byte-exact.
+      if (src.effective.is_empty())
+        return;
+      const auto tag = src.effective.tag;
+      if (tag == RECOVER_FF_DATETIME || tag == RECOVER_FF_DATE || tag == RECOVER_FF_TIME ||
+          tag == RECOVER_FF_INSTANT)
+      {
+        if (std::holds_alternative<uint64_t>(src.effective.value))
+        {
+          const auto parts = FF_UNPACK_DATETIME(std::get<uint64_t>(src.effective.value));
+          dst["effectiveDateTime"] = FF_FORMAT_DATETIME(parts, RECOVER_FF_DATETIME);
+          return;
+        }
+        if (std::holds_alternative<std::string_view>(src.effective.value))
+        {
+          dst["effectiveDateTime"] = std::get<std::string_view>(src.effective.value);
+          return;
+        }
+      }
+      else if (tag == RECOVER_FF_STRING &&
+               std::holds_alternative<std::string_view>(src.effective.value))
+      {
+        // A string-tagged effective can only be a datetime fallback slot; no
+        // FHIR effective[x] variant is a bare string.
+        dst["effectiveDateTime"] = std::get<std::string_view>(src.effective.value);
+        return;
+      }
+      write_choice(dst, "effective", src.effective);
+    }
 #elif defined(ARM_FASTFHIR)
     inline void assign_observation_effective(const ObservationData &src, PatientStreamSink &dst)
     {

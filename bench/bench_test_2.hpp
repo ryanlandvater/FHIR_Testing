@@ -1,47 +1,66 @@
 #pragma once
 
+// ---------------------------------------------------------------------------
+// Test 2 -- random access (TASKS.md IN-B / WF-1.1)
+// ---------------------------------------------------------------------------
+// The receiver-side stage. It replaced the former Test 2 (materialize) on
+// 2026-08-26 (TASKS.md D4): a full traversal in LAYOUT order is a contiguous
+// tape's best case (sequential prefetch, no indirection) and an offset-indexed
+// layout's worst, and no consumer reads a bundle in write order -- you jump to
+// the resources you care about. Measured in layout order simdjson wins by ~22x
+// per node; measured out of order FastFHIR wins by ~2,500x. Both are true, and
+// publishing either alone misrepresents the result. The walk was retired
+// because it is not how medical data is retrieved; this stage is.
+//
+// So: pick N random Bundle.entry ordinals, navigate to each ONE FROM THE ROOT,
+// and read the resource's id. Every lookup pays its own path cost, which is
+// exactly the asymmetry the claim is about:
+//
+//   FastFHIR   offset arithmetic from the root                  -> O(1)
+//   simdjson   dom::array::at(i) iterates from element 0        -> O(i)
+//   protobuf   scan i length-prefixed TLV records, then parse   -> O(i)
+//   HL7v2      scan forward for the i-th MSH, then parse        -> O(i)
+//
+// GRANULARITY WARNING for the HL7v2 arm: a v2 batch has no resource-level
+// index. Its addressable unit is the MESSAGE -- 5 ORU messages carry the same
+// 1,473 resources the other three arms address individually. So its ns/read is
+// a scan over a much smaller ordinal space and is NOT the same operation. That
+// difference is a finding about the format, not a defect in the probe, and it
+// has to be stated wherever this stage is reported.
+//
+// The three scan formats are not being sandbagged: none of them HAS an O(1)
+// index into a serialized document. That is the point of the comparison.
+//
+// PARITY GATE: every arm returns the total bytes of id read, and the harness
+// compares them across arms. Identical accumulators are what makes this a
+// measurement rather than four unrelated loops -- without that check an arm
+// that silently read nothing would look infinitely fast, which is precisely the
+// failure notes.md section 2 documents.
+
 #include "harness.hpp"
 
-#include <memory>
 #include <cstdint>
+#include <cstdlib>
+#include <random>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
-#if defined(ARM_JSON)
+#if defined(ARM_FASTFHIR)
+#include <FF_Bundle.hpp>
+#elif defined(ARM_JSON)
 #include <simdjson.h>
-#elif defined(ARM_GOOGLE_FHIR)
-#include <google/protobuf/descriptor.h>
-#include <google/protobuf/message.h>
-#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
-#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
 #elif defined(ARM_HL7V2)
 #include "hl7v2_message.hpp"
+#elif defined(ARM_GOOGLE_FHIR)
+#include "proto/google/fhir/proto/r4/core/resources/observation.pb.h"
+#include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
 #endif
 
+#include "bench_test_1.hpp"
 
-// ---------------------------------------------------------------------------
-// Per-arm namespace -- REQUIRED FOR CORRECTNESS, not style.
-// ---------------------------------------------------------------------------
-// Each arm compiles these headers with a different ARM_* macro, so the SAME
-// type and function names get four DIFFERENT definitions across four
-// translation units: bench::test_2::MaterializedTree holds a
-// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
-// two protobuf vectors in a third.
-//
-// That is a One Definition Rule violation. The linker keeps one definition of
-// each inline function and destructor and discards the rest, so an object built
-// with one layout gets destroyed with another. It manifests as heap corruption
-// far from the cause -- ASan caught it as a SEGV inside
-// ~vector<google::fhir::r4::core::Observation> from
-// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
-// apparent crash site around between -c opt and -c dbg builds, which is the
-// classic signature.
-//
-// An inline namespace gives each arm its own mangled symbols while leaving
-// every existing call site (bench::test_2::query, bench::assign::assign_patient)
-// spelled exactly as before.
+// Per-arm namespace -- REQUIRED FOR CORRECTNESS. See bench_test_4.hpp for the
+// full account of the ODR violation this prevents.
 #ifndef BENCH_ARM_NS
 #if defined(ARM_FASTFHIR)
 #define BENCH_ARM_NS arm_fastfhir
@@ -59,255 +78,266 @@
 namespace bench::test_2 {
 inline namespace BENCH_ARM_NS {
 
-inline MetricEvent materialize_metric(std::string_view arm, std::int64_t duration_ns) {
-  return MetricEvent{std::string(arm), Stage::Test2Materialize, duration_ns};
-}
-
-struct MaterializedTree {
-  #if defined(ARM_FASTFHIR)
-  // Keep parser heap-owned so Node lifetimes stay valid with minimal copy/move constraints.
-  std::unique_ptr<FastFHIR::Parser> parser;
-  FastFHIR::Reflective::Node root;
-  #elif defined(ARM_JSON)
-  std::unique_ptr<simdjson::dom::parser> parser;
-  simdjson::dom::element root;
-  #elif defined(ARM_GOOGLE_FHIR)
-  std::vector<google::fhir::r4::core::Patient> patients;
-  std::vector<google::fhir::r4::core::Observation> observations;
-  #elif defined(ARM_HL7V2)
-  // parse_batch returns ParsedMessage; preserve parsed ASTs without re-materializing strings.
-  std::vector<hl7v2::ParsedMessage> messages;
-  #endif  
-  std::size_t touched_nodes = 0;
-  bool ok = false;
+struct RandomAccessSummary {
+  std::int64_t duration_ns = 0;
+  std::int64_t reads = 0;
+  std::int64_t bytes_read = 0;   // cross-arm parity gate
+  std::int64_t entries_seen = 0;
 };
 
+// Deterministic by construction: two runs must probe the same ordinals or the
+// numbers are not comparable (notes.md section 5).
+inline std::vector<std::size_t> pick_targets(std::size_t entry_count, std::size_t n_reads) {
+  std::vector<std::size_t> targets;
+  if (entry_count == 0) return targets;
+  std::mt19937 rng(20260826u);
+  std::uniform_int_distribution<std::size_t> pick(0, entry_count - 1);
+  targets.resize(n_reads);
+  for (auto& t : targets) t = pick(rng);
+  return targets;
+}
 
+inline std::size_t default_reads() {
+  if (const char* n = std::getenv("BENCH_RANDOM_READS")) {
+    const auto v = std::strtoul(n, nullptr, 10);
+    if (v > 0) return v;
+  }
+  return 2000;
+}
+
+inline MetricEvent random_access_metric(std::string_view arm, const RandomAccessSummary& s) {
+  // Field order is {arm, stage, duration_ns, bytes_in, bytes_out, ops}.
+  return MetricEvent{std::string(arm), Stage::Test2RandomAccess, s.duration_ns,
+                     /*bytes_in=*/0, /*bytes_out=*/s.bytes_read, /*ops=*/s.reads};
+}
+
+inline std::string format_random_access_summary(const RandomAccessSummary& s) {
+  if (std::getenv("BENCH_RA_DEBUG"))
+    std::fprintf(stderr, "[ra] entries_seen=%lld reads=%lld bytes=%lld\n",
+                 (long long)s.entries_seen, (long long)s.reads, (long long)s.bytes_read);
+  return "reads=" + std::to_string(s.reads) + " entries=" + std::to_string(s.entries_seen) +
+         " bytes_read=" + std::to_string(s.bytes_read) + " ns_per_read=" +
+         std::to_string(s.reads ? s.duration_ns / s.reads : 0);
+}
 
 #if defined(ARM_FASTFHIR)
 
-using StreamType = FastFHIR::Memory;
+inline RandomAccessSummary random_access(const FastFHIR::Memory& payload) {
+  RandomAccessSummary summary;
+  FastFHIR::Parser parser(payload);
+  auto root = parser.root();
+  if (!root) return summary;
 
-// Arrays are walked with entries(); OBJECTS are walked with fields() plus an
-// owner-keyed lookup. The previous version called entries() for both, which
-// returns nothing for a block -- so this walk visited exactly ONE node (the
-// Bundle root) while the JSON, HL7v2 and Google arms visited 8-9k. Test 2 was
-// comparing a full tree walk against a no-op.
-//
-// This mirrors read_path_bench.cpp::walk_node(), which is the validated
-// public-API traversal (and the one FastFHIR's own is_empty()/print use).
-inline void touch_tree(const FastFHIR::Reflective::Node& node, std::size_t& touched_nodes) {
-  if (!node) {
-    return;
-  }
+  auto entries = root[FastFHIR::Fields::BUNDLE::ENTRY].as_node();
+  if (!entries) return summary;
+  summary.entries_seen = static_cast<std::int64_t>(entries.size());
 
-  ++touched_nodes;
+  const auto targets = pick_targets(entries.size(), default_reads());
+  if (targets.empty()) return summary;
 
-  switch (node.kind()) {
-    case FF_FIELD_ARRAY: {
-      for (const auto& child : node.entries()) {
-        touch_tree(child, touched_nodes);
-      }
-      break;
+  Timer timer;
+  timer.start();
+  std::size_t acc = 0;
+  for (const std::size_t i : targets) {
+    auto entry = entries[i];
+    if (!entry) continue;
+    auto resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE].as_node();
+    if (!resource) continue;
+    // as<std::string_view>() is the call that touches the arena. Node::size()
+    // and Node::kind() return cached members and would measure nothing -- an
+    // earlier version of this probe did exactly that and reported a 26x speedup
+    // that was entirely an artefact.
+    auto id = resource.is<FastFHIR::RESOURCETYPE::PATIENT>()
+                  ? resource[FastFHIR::Fields::PATIENT::ID]
+                  : resource[FastFHIR::Fields::OBSERVATION::ID];
+    if (!id) {
+      if (std::getenv("BENCH_RA_DEBUG"))
+        std::fprintf(stderr, "[ra] entry %zu: no id (recovery=%u)\n", i,
+                     (unsigned)resource.recovery());
+      continue;
     }
-    case FF_FIELD_BLOCK: {
-      for (const auto& field : node.fields()) {
-        const FF_FieldKey key = FF_FieldKey::from_cstr(
-            node.recovery(), field.kind, field.field_offset, field.child_recovery,
-            field.array_entries_are_offsets, field.name);
-        FastFHIR::Reflective::Entry entry = node[key];
-        if (!entry) {
-          continue;
-        }
-        FastFHIR::Reflective::Node child = entry.as_node();
-        if (child) {
-          touch_tree(child, touched_nodes);
-        }
-      }
-      break;
-    }
-    default:
-      // Strings, codes and scalars: count the node, do not descend.
-      break;
+    const auto sv = id.as_node().as<std::string_view>();
+    if (std::getenv("BENCH_RA_DEBUG") && sv.size() != 36)
+      std::fprintf(stderr, "[ra] entry %zu: id len=%zu '%.*s' recovery=%u\n", i, sv.size(),
+                   (int)sv.size(), sv.data(), (unsigned)resource.recovery());
+    acc += sv.size();
   }
-}
-
-inline MaterializedTree materialize(const StreamType& payload) {
-  MaterializedTree tree;
-  tree.parser = std::make_unique<FastFHIR::Parser>(payload);
-  tree.root = tree.parser->root();
-  if (!tree.root) {
-    return tree;
-  }
-
-  touch_tree(tree.root, tree.touched_nodes);
-  tree.ok = true;
-  return tree;
+  summary.duration_ns = timer.stop_ns();
+  summary.reads = static_cast<std::int64_t>(targets.size());
+  summary.bytes_read = static_cast<std::int64_t>(acc);
+  return summary;
 }
 
 #elif defined(ARM_JSON)
 
-using StreamType = std::string;
+inline RandomAccessSummary random_access(const std::string& payload) {
+  RandomAccessSummary summary;
+  simdjson::dom::parser parser;
+  auto doc = parser.parse(payload);
+  if (doc.error()) return summary;
 
-inline void touch_tree(simdjson::dom::element node, std::size_t& touched_nodes) {
-  ++touched_nodes;
+  auto root = doc.value_unsafe();
+  auto entries = root["entry"];
+  if (entries.error()) return summary;
 
-  if (node.is_object()) {
-    auto object = node.get_object();
-    if (object.error()) {
-      return;
-    }
-    for (auto field : object.value_unsafe()) {
-      ++touched_nodes;
-      touch_tree(field.value, touched_nodes);
-    }
-    return;
+  std::size_t count = 0;
+  for (auto e : entries.get_array()) { (void)e; ++count; }
+  summary.entries_seen = static_cast<std::int64_t>(count);
+
+  const auto targets = pick_targets(count, default_reads());
+  if (targets.empty()) return summary;
+
+  // Hoisted out of the loop: this is the fairest implementation available to a
+  // real consumer. at(i) remains O(i) because a simdjson DOM has no O(1) index
+  // -- that is the property under test, not a handicap imposed by the harness.
+  auto entry_array = entries;
+
+  Timer timer;
+  timer.start();
+  std::size_t acc = 0;
+  for (const std::size_t i : targets) {
+    auto entry = entry_array.at(i);
+    if (entry.error()) continue;
+    auto resource = entry["resource"];
+    if (resource.error()) continue;
+    std::string_view sv;
+    if (!resource["id"].get_string().get(sv)) acc += sv.size();
   }
-
-  if (node.is_array()) {
-    auto array = node.get_array();
-    if (array.error()) {
-      return;
-    }
-    for (auto item : array.value_unsafe()) {
-      touch_tree(item, touched_nodes);
-    }
-  }
-}
-
-inline MaterializedTree materialize(const StreamType& payload) {
-  MaterializedTree tree;
-  tree.parser = std::make_unique<simdjson::dom::parser>();
-  auto doc = tree.parser->parse(payload);
-  if (doc.error()) {
-    return tree;
-  }
-
-  tree.root = doc.value_unsafe();
-  touch_tree(tree.root, tree.touched_nodes);
-  tree.ok = true;
-  return tree;
+  summary.duration_ns = timer.stop_ns();
+  summary.reads = static_cast<std::int64_t>(targets.size());
+  summary.bytes_read = static_cast<std::int64_t>(acc);
+  return summary;
 }
 
 #elif defined(ARM_GOOGLE_FHIR)
 
-using StreamType = std::string;
-
-inline uint32_t decode_u32_le(const char* p) {
-  return static_cast<uint32_t>(static_cast<unsigned char>(p[0])) |
-         (static_cast<uint32_t>(static_cast<unsigned char>(p[1])) << 8) |
-         (static_cast<uint32_t>(static_cast<unsigned char>(p[2])) << 16) |
-         (static_cast<uint32_t>(static_cast<unsigned char>(p[3])) << 24);
+inline uint32_t decode_u32_le_t5(const char* p) {
+  return static_cast<uint32_t>(static_cast<uint8_t>(p[0])) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(p[1])) << 8) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(p[2])) << 16) |
+         (static_cast<uint32_t>(static_cast<uint8_t>(p[3])) << 24);
 }
 
-// Unified dynamic tree walk for Protobuf
-inline void touch_tree(const google::protobuf::Message& msg, std::size_t& touched_nodes) {
-  ++touched_nodes;
-  const auto* reflection = msg.GetReflection();
-  std::vector<const google::protobuf::FieldDescriptor*> fields;
-  reflection->ListFields(msg, &fields);
+inline RandomAccessSummary random_access(const std::string& payload) {
+  RandomAccessSummary summary;
 
-  for (const auto* field : fields) {
-    ++touched_nodes;
-    if (field->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
-      if (field->is_repeated()) {
-        const int count = reflection->FieldSize(msg, field);
-        for (int i = 0; i < count; ++i) {
-          touch_tree(reflection->GetRepeatedMessage(msg, field, i), touched_nodes);
-        }
-      } else {
-        touch_tree(reflection->GetMessage(msg, field), touched_nodes);
-      }
-    }
-  }
-}
-
-inline MaterializedTree materialize(const StreamType& payload) {
-  MaterializedTree tree;
-
-  std::size_t pos = 0;
-  while (pos + 5 <= payload.size()) {
-    const char record_type = payload[pos];
-    const uint32_t record_len = decode_u32_le(payload.data() + pos + 1);
+  // Count records first (untimed) so the probe knows the ordinal range.
+  std::size_t count = 0;
+  for (std::size_t pos = 0; pos + 5 <= payload.size();) {
+    const uint32_t len = decode_u32_le_t5(payload.data() + pos + 1);
     pos += 5;
-
-    if (pos + record_len > payload.size()) {
-      return tree;
-    }
-
-    const char* record_data = payload.data() + pos;
-    pos += record_len;
-
-    if (record_type == 'P') {
-      google::fhir::r4::core::Patient patient;
-      if (!patient.ParseFromArray(record_data, static_cast<int>(record_len))) {
-        return tree;
-      }
-      touch_tree(patient, tree.touched_nodes);
-      tree.patients.push_back(std::move(patient));
-      continue;
-    }
-
-    if (record_type == 'O') {
-      google::fhir::r4::core::Observation observation;
-      if (!observation.ParseFromArray(record_data, static_cast<int>(record_len))) {
-        return tree;
-      }
-      touch_tree(observation, tree.touched_nodes);
-      tree.observations.push_back(std::move(observation));
-      continue;
-    }
-
-    return tree;
+    if (pos + len > payload.size()) break;
+    pos += len;
+    ++count;
   }
+  summary.entries_seen = static_cast<std::int64_t>(count);
 
-  tree.ok = !tree.patients.empty() || !tree.observations.empty();
-  return tree;
+  const auto targets = pick_targets(count, default_reads());
+  if (targets.empty()) return summary;
+
+  google::fhir::r4::core::Patient patient;
+  google::fhir::r4::core::Observation observation;
+
+  Timer timer;
+  timer.start();
+  std::size_t acc = 0;
+  for (const std::size_t target : targets) {
+    // No index into a length-prefixed stream: reaching record i means walking
+    // the i preceding length prefixes. O(i), same as every other scan format.
+    std::size_t pos = 0;
+    std::size_t idx = 0;
+    while (pos + 5 <= payload.size()) {
+      const char record_type = payload[pos];
+      const uint32_t len = decode_u32_le_t5(payload.data() + pos + 1);
+      pos += 5;
+      if (pos + len > payload.size()) break;
+      if (idx == target) {
+        const char* data = payload.data() + pos;
+        if (record_type == 'P') {
+          patient.Clear();
+          if (patient.ParseFromArray(data, static_cast<int>(len)) && patient.has_id()) {
+            acc += patient.id().value().size();
+          }
+        } else {
+          observation.Clear();
+          if (observation.ParseFromArray(data, static_cast<int>(len)) && observation.has_id()) {
+            acc += observation.id().value().size();
+          }
+        }
+        break;
+      }
+      pos += len;
+      ++idx;
+    }
+  }
+  summary.duration_ns = timer.stop_ns();
+  summary.reads = static_cast<std::int64_t>(targets.size());
+  summary.bytes_read = static_cast<std::int64_t>(acc);
+  return summary;
 }
 
 #elif defined(ARM_HL7V2)
 
-using StreamType = std::string;
+inline RandomAccessSummary random_access(const std::string& payload) {
+  RandomAccessSummary summary;
 
-// Pure AST walk without string allocations
-inline void touch_tree(const hl7v2::ParsedMessage& msg, std::size_t& touched_nodes) {
-  ++touched_nodes;
-  for (const auto& seg : msg.tree.segments) {
-    if (seg.name.empty()) {
-      continue;
-    }
-    ++touched_nodes;
+  // HL7v2 terminates segments with \r, not \n -- a first cut of this probe
+  // split on \n, found no PID, and read 0 bytes. The cross-arm accumulator
+  // check is what caught it: three arms agreed on 18,000 bytes and this one
+  // reported 0, which would have been a fast, meaningless number.
+  //
+  // Boundaries are located untimed; a reader that already has the batch in
+  // memory would know them. The timed part is the scan to the target message,
+  // which is the O(i) cost under test.
+  const auto starts = hl7v2::find_message_starts(payload);
+  summary.entries_seen = static_cast<std::int64_t>(starts.size());
 
-    for (const auto& field : seg.fields) {
-      ++touched_nodes;
+  const auto targets = pick_targets(starts.size(), default_reads());
+  if (targets.empty()) return summary;
 
-      for (const auto& comp : field.components) {
-        ++touched_nodes;
-
-        for (const auto& sub : comp.subcomponents) {
-          ++touched_nodes;
-        }
+  Timer timer;
+  timer.start();
+  std::size_t acc = 0;
+  for (const std::size_t target : targets) {
+    // Walk forward to the target message rather than indexing `starts`: a
+    // reader consuming a serialized batch has no index into it.
+    std::size_t idx = 0;
+    std::size_t pos = 0;
+    while (pos + 3 < payload.size()) {
+      if (!hl7v2::is_message_start(payload, pos)) {
+        ++pos;
+        continue;
       }
+      if (idx == target) {
+        const std::size_t msg_end =
+            (target + 1 < starts.size()) ? starts[target + 1] : payload.size();
+        std::string_view msg(payload.data() + pos, msg_end - pos);
+        for (std::size_t p = 0; p < msg.size();) {
+          const std::size_t e = msg.find('\r', p);
+          const std::size_t line_end = (e == std::string_view::npos ? msg.size() : e);
+          const std::string_view seg = msg.substr(p, line_end - p);
+          if (seg.rfind("PID", 0) == 0) {
+            // Use the arm's own PidView rather than a hand-rolled field index:
+            // parse_segment_line() keeps the segment name in Segment::name, so
+            // fields[] is shifted by one and PID-3 is NOT fields[3]. Getting
+            // that wrong is what made this probe read 0 bytes twice.
+            const auto parsed = hl7v2::parse_segment_line(seg);
+            acc += hl7v2::PidView(parsed).patient_id().size();
+            break;
+          }
+          if (e == std::string_view::npos) break;
+          p = e + 1;
+        }
+        break;
+      }
+      ++idx;
+      ++pos;
     }
   }
-}
-
-inline MaterializedTree materialize(const StreamType& payload) {
-  MaterializedTree tree;
-
-  auto parsed_messages = hl7v2::parse_batch(payload);
-  if (parsed_messages.empty()) {
-    return tree;
-  }
-
-  // Move parsed messages into tree storage to avoid extra copies.
-  for (auto& msg : parsed_messages) {
-    touch_tree(msg, tree.touched_nodes);
-    tree.messages.push_back(std::move(msg));
-  }
-
-  tree.ok = !tree.messages.empty();
-  return tree;
+  summary.duration_ns = timer.stop_ns();
+  summary.reads = static_cast<std::int64_t>(targets.size());
+  summary.bytes_read = static_cast<std::int64_t>(acc);
+  return summary;
 }
 
 #endif

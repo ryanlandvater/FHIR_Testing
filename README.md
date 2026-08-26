@@ -27,8 +27,8 @@ Four-arm comparative benchmark measuring serialization, materialization, query, 
 > | | |
 > |---|---|
 > | Test 1 | Not at parity — the FastFHIR arm serializes every POCO field, the others ~25. Excludes `value[x]` entirely. |
-> | Test 2 | Was walking **1 node** in the FastFHIR arm vs ~8,000 elsewhere. Fixed; node counts still unnormalized across formats. |
-> | Test 3 | The FastFHIR arm pays a `print_json` penalty the others do not, for packed date/time. |
+> | Test 2 | Random access (D4, 2026-08-26): N random entry reads, each navigating from the root. Replaced the materialize walk — a layout-order traversal that was a tape's best case and a query's worst. Cross-arm byte gate fails the run on mismatched reads. |
+> | Test 3 | FastFHIR reads via node lenses — no whole-POCO materialization (2026-08-26); still pays a `print_json` penalty on `birthDate` only (PA-7). |
 > | Provenance | Compiled profile and upstream SHA still unrecorded — [TASKS.md § PROFILE](TASKS.md). |
 
 ## FastFHIR build flags — the Debug trap (2026-08-19)
@@ -139,9 +139,9 @@ and bytes) next to any query result. Tracked in
 
 | Document | What it is | Freshness |
 |---|---|---|
-| [`handoff.md`](handoff.md) | **Retooling brief.** Maps every claim in FastFHIR's § Why FastFHIR? to an instrument, an artifact, and a citable number. **Start here for new benchmark work.** | ✅ current |
-| [`notes.md`](notes.md) | **Field report from the 2026-08-25 port.** What was silently broken and how it was found. Read before designing new tests. | ✅ current |
-| [`TASKS.md`](TASKS.md) | **Active task backlog.** Corpus decision, provenance, parity repair, repo hygiene. | ✅ current |
+| [`TASKS.md`](TASKS.md) | **The only backlog**, and the standing **Decisions** (D1 macro parity · D2 `value[x]` tiering · D3 serialization model). **Start here.** | ✅ current (2026-08-26) |
+| [`handoff.md`](handoff.md) | **Claim register + instrument design.** Maps every § Why FastFHIR? claim to an instrument, an artifact, and a citable number. Amendments marked ✎. | ✅ current (2026-08-26) |
+| [`notes.md`](notes.md) | **Field report from the 2026-08-25 port.** What was silently broken and how it was found. Read before designing new tests. | ✅ current (2026-08-26) |
 | [`BENCHMARK_IMPLEMENTATION_CHECKLIST.md`](BENCHMARK_IMPLEMENTATION_CHECKLIST.md) | Per-component design vs. build status | ✅ current |
 | [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) | Curated architecture + parity overview | ✅ current |
 | [`PARITY_ASSESSMENT.md`](PARITY_ASSESSMENT.md) | Fairness audit of all four arms | ⚠️ 2026-05-07; reasoning stands, verification stale |
@@ -149,12 +149,24 @@ and bytes) next to any query result. Tracked in
 | [`MESSAGE_SURFACE_PARITY_AUDIT.md`](MESSAGE_SURFACE_PARITY_AUDIT.md) | Google FHIR proto coverage audit | ⚠️ 2026-05-06; Stage 2/3 findings still stand |
 | [`MESSAGE_SURFACE_PARITY_QUICK_REFERENCE.md`](MESSAGE_SURFACE_PARITY_QUICK_REFERENCE.md) | TL;DR of the above | ⚠️ same vintage |
 | [`FFHRnotes.md`](FFHRnotes.md) | Upstream API friction log | ⚠️ mostly resolved; see its status banner |
-| [`TODO.md`](TODO.md) | Data-resilience test suite design | ⚠️ blocked on the port |
+| [`TODO.md`](TODO.md) | **Design spec for Instrument G** — the four resilience tests. Not a second backlog. | ⚠️ unblocked 2026-08-25; API references need a pass |
 | [`bench/*.md`](bench/) | Per-file architecture docs | ⚠️ describe pre-port code; each carries a banner |
 
 Upstream context lives in `../FastFHIR/handoff.md` (why the API moved and what
 it invalidates) and `../FastFHIR/CLAUDE.md` (**not** auto-loaded — read it
 before editing that tree).
+
+Our asks against FastFHIR's public API are filed in `../FastFHIR/TASKS.md` as
+**CAPI-1…CAPI-6**, plus claims-alignment items **I3.6** (the orjson citation)
+and **I3.7** (the compact-size figures). Tracked here in TASKS.md § UP. When
+this benchmark hits an API that is unclear, unsafe to misuse, or missing, file it
+there — this repo is FastFHIR's first external consumer, and that friction is a
+finding, not an inconvenience.
+
+Both repos carry a chunk-level `.arbiter/` index (`repo_map.md` + per-file
+JSON). Navigate with it rather than reading trees wholesale — and remember a
+correction banner at the top of a document **does not travel with a retrieved
+chunk**, so stale body text must be struck in place (TASKS.md HY-5).
 
 ---
 
@@ -177,7 +189,7 @@ Synthea JSON files (119 patients)
   │     │     │     │
   ▼     ▼     ▼     ▼
   bench_test_1.hpp — shared assign_patient() / assign_observation()
-  bench_test_2.hpp — shared materialize() per format
+  bench_test_2.hpp — shared random_access() per format
   bench_test_3.hpp — shared query() per format
   bench_test_4.hpp — shared enrich() per format
   │     │     │     │
@@ -197,7 +209,7 @@ Each arm receives the **exact same in-memory `PatientData`/`ObservationData` str
 | [`main.cpp.md`](bench/main.cpp.md) | CLI args, Synthea discovery, bundle sweep, DB persistence |
 | [`synthea_fixture.cpp.md`](bench/synthea_fixture.cpp.md) | JSON → BundlePatient ingestion pipeline |
 | [`bench_test_1.hpp.md`](bench/bench_test_1.hpp.md) | Shared assignment layer (the fairness guarantee) |
-| [`bench_test_2.hpp.md`](bench/bench_test_2.hpp.md) | Materialization: parse wire format → tree |
+| [`bench_test_2.hpp.md`](bench/bench_test_2.hpp.md) | Random access: N reads from the root (replaced materialize, D4) |
 | [`bench_test_3.hpp.md`](bench/bench_test_3.hpp.md) | Query: LOINC 2085-9 search + value classification |
 | [`bench_test_4.hpp.md`](bench/bench_test_4.hpp.md) | Enrichment: append observation to existing bundle |
 | [`hl7v2_message.hpp.md`](bench/hl7v2_message.hpp.md) | HL7v2 segment types, builder, batch parser |
@@ -220,7 +232,7 @@ The entire assignment layer lives in a **single header per test stage**, guarded
 // arm_fastfhir.cpp:
 #define ARM_FASTFHIR
 #include "bench_test_1.hpp"   // assign_patient() → FastFHIR ObjectHandle
-#include "bench_test_2.hpp"   // materialize()    → FastFHIR::Parser tree
+#include "bench_test_2.hpp"   // random_access() → N root-navigated reads
 #include "bench_test_3.hpp"   // query()          → FFHR node walk
 #include "bench_test_4.hpp"   // enrich()         → FFHR arena append
 #undef ARM_FASTFHIR
@@ -339,19 +351,79 @@ With PostgreSQL persistence:
 | `--runs N` | 10 | Number of bundle build + arm execution repetitions |
 | `--bundle-max-mb N` | 256 | Cap on largest target bundle size (MB) |
 | `--bundle-max-mb-explicit` | off | If set, only the specified max is used (no sweep) |
-| `--db connstr` | none | PostgreSQL connection string |
+| `--bundle-targets-mb a,b,c` | 1,2,4,8,16,32,64,256 | Explicit sweep ladder |
+| `--seed N` | 20260825 | Bundle composition seed. `--seed 0` is random — and a random workload cannot become an artifact |
+| `--results-dir DIR` | none | Write the release artifact (`provenance.json`) here. **Refuses, and exits 3, if the provenance record is incomplete** |
+| `--profile STR` | auto | Pin `FASTFHIR_PRODUCTION_PROFILE`. Needed when several CMake caches disagree — see below |
+| `--db connstr` | none | PostgreSQL connection string (`//bench:bench_harness_pg` only) |
 
 ### Output Columns (stdout CSV)
 
 ```text
-arm,stage,duration_ns,target_mb,patients_in_bundle
+arm,test,duration_ns,bytes_in,bytes_out,target_mb,patients_in_bundle
 ```
 
 Example:
 ```
-fastfhir,test_1_serialize,452831,1,3
-json_fhir,test_1_serialize,891234,1,3
+fastfhir,test_1_serialize,76834,0,232534,1,1
+fastfhir,test_2_random_access,105541,2000,0,72000,1,1
+json_fhir,test_1_serialize,402500,0,105637,1,1
 ```
+
+`bytes_in` / `bytes_out` are **wire bytes** crossing that stage's boundary, and
+they are what makes any size or per-byte throughput claim measurable at all —
+before them the harness emitted only nanoseconds:
+
+| Stage | `bytes_in` | `bytes_out` |
+|---|---|---|
+| `test_1_serialize` | 0 — the input is POCOs, not wire | sealed payload size |
+| `test_1_compact` | 0 | compact archive size (FastFHIR arm only — withheld unless the IN-E losslessness gate passes) |
+| `test_2_random_access` | 0 | id bytes read — the cross-arm parity accumulator (`ops` = reads) |
+| `test_2_compact` | 0 | id bytes read over the compact archive (FF arm only) |
+| `test_3_query` | 0 | 0 |
+| `test_3_compact` | 0 | 0 — same census over the compact archive (FF arm only) |
+| `test_4_enrich` | source stream | enriched stream |
+| `test_4_compact` | — | **no row**: the API refuses to open a Builder on a compact archive (write-once, CAPI-10) |
+
+**0 means "not applicable to this stage", never "measured zero".** A serialize
+stage reporting 0 bytes out is a defect and the harness warns about it.
+
+`target_mb` is the *requested* corpus size and is not a measurement — do not use
+it as a denominator.
+
+### Result provenance and the artifact gate
+
+Every run prints a provenance block to stderr, because the two things that most
+change these numbers are invisible in them: the compiled profile and the
+compilation mode.
+
+```text
+[provenance] fastfhir a9fd4e9 @ a9fd4e9a7430 DIRTY
+[provenance] profile us-core,billing,medication-admin,supply (operator) -- 80 code-system enums, 44 generated .cpp, 36 resource types
+[provenance] build opt clang 21.0.0 on macos/arm64 (Apple M5 Pro)
+[provenance] corpus 342 docs, 1292 MB, sha256 958b1ceb2642
+[provenance] benchmark @ 38705db50262 DIRTY, seed 20260825
+```
+
+With `--results-dir` the same record is written as `provenance.json` — and the
+harness **refuses to write it** (exit 3) if any required field is unestablished.
+Two refusals are deliberate and will bite:
+
+- **`compilation_mode` must be `opt`.** The same code runs ~10x faster at -O2
+  than -O0, and nothing in a results row says which you built. This is the Debug
+  trap, enforced.
+- **An ambiguous profile is rejected.** There is no runtime signal for
+  `FASTFHIR_PRODUCTION_PROFILE`, so it is read from the CMake caches under
+  `../FastFHIR/*/` — and on a working machine those disagree (three build trees,
+  two different values here). The newest wins for the stderr summary, but an
+  artifact requires `--profile` to pin it. `codesystem_enums`, `generated_cpp`
+  and the resource list are recorded alongside as corroboration: the profile
+  string is a claim, those are evidence from the tree actually compiled in.
+
+The corpus digest is a SHA-256 over a manifest of every file's name, size and
+content hash — so a regenerated corpus is never mistaken for the same one. It is
+memoized in `datasets/.corpus_sha256.cache` keyed on (file count, total bytes,
+newest mtime); the first run after a corpus change re-hashes ~1.3 GB.
 
 ---
 

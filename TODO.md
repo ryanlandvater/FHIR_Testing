@@ -1,15 +1,38 @@
-# Data Resilience Test Suite — TODO
+# Instrument G — Resilience & Integrity Suite (design spec)
 
-Tests that exercise FastFHIR's unique structural integrity guarantees under
-real-world corruption scenarios. Each test maps to a failure mode observed in
-production FHIR/HL7v2 pipelines, and each exercises a capability that **no
-other format in the benchmark** can provide.
+> **This is a design specification, not a task list.** The only backlog is
+> [`TASKS.md`](TASKS.md); this document is what **IN-G** there points at. Four
+> tests that exercise FastFHIR's structural integrity guarantees under
+> real-world corruption scenarios. Each maps to a failure mode observed in
+> production FHIR/HL7v2 pipelines, and to a claim in
+> [`handoff.md`](handoff.md)'s register.
 
-> **Blocked on the API port.** These tests are written against the pre-`a9fd4e9`
-> FastFHIR surface and none of them can be built today. The ingestion path
-> below is the *old* one; the current equivalents are in
-> [TASKS.md § PORT-1, PORT-2](TASKS.md). Land the port before implementing any
-> test here, or you will write the whole suite against a dead API.
+**Claims this instrument validates:**
+
+| Test | Claim | § Why FastFHIR? |
+|---|---|---|
+| 1 — Truncation detection | **WF-3.1** OS-protected memory, stable pointers, deterministic layout | § 3 |
+| 2 — Bit-flip detection | **WF-3.3** checksum footers detect corruption — *integrity, not authenticity* | § 3 |
+| 3 — Type-confusion prevention | **WF-3.2** `RECOVERY_TAG` catches mis-typed reads — *malformed, not hostile* | § 2, § 3 |
+| 4 — Concurrent build integrity | **WF-4.2** lock-free concurrent generation (correctness half) | § 4 |
+
+⚠️ **Preserve the qualifiers.** README § 3 is already careful: 3.2 is scoped to
+*malformed* data, not *hostile* (the parser has not been fuzzed — upstream
+TASKS.md G1), and 3.3 is *integrity*, not *authenticity* (an attacker who can
+rewrite payload bytes can recompute the footer). Any artifact this suite emits
+carries those qualifiers forward verbatim. Do not let a headline round them off.
+
+> **Unblocked 2026-08-25** — the blocker was the API port, closed that day
+> (TASKS.md § PORT). ⚠️ The API references below were written against the
+> pre-`a9fd4e9` surface and have **not** been re-verified since; run a pass
+> against the current headers before implementing. Known moves: `Builder::set_root`
+> / `finalize` are private (use `make_stream()` / `seal_stream()` in
+> `bench/harness.hpp`), and `SourceType::FHIR_JSON` is now `FF_SOURCE_FHIR_JSON`.
+
+> **Test 4 has a second blocker.** The parallel path in
+> [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is commented
+> out, so nothing in this repo currently exercises concurrent generation.
+> Re-enable it before implementing Test 4 (TASKS.md **IN-H**).
 
 **Data source:** All tests use Synthea FHIR JSON files from `datasets/synthea/`
 (119 real patient bundles with Observations, Conditions, Encounters, Procedures).
@@ -145,6 +168,14 @@ at the API level. It is impossible to read a Condition's bytes as an
 Observation without the API rejecting it. This is a structural invariant, not
 a best-practice convention.
 
+> **Comparative honesty (TASKS.md D2).** State what the other arms actually do,
+> not what they lack. Protobuf *does* type-check at the message level — a
+> `Condition` cannot be parsed as an `Observation` without a wire-format error
+> in most cases — so the FastFHIR claim is about **field-level** dispatch inside
+> a block and about detecting a *mislabelled but well-formed* resource. Measure
+> that, and say which arms fail it and which do not. An unearned differentiator
+> is worth less than a narrow one that survives review.
+
 ---
 
 ## Test 4: Concurrent Build Integrity — Lock-Free Arena Under Contention
@@ -182,3 +213,20 @@ in-progress writes.
 contention. The final stream is structurally identical to a serial build —
 every entry is present, no data is torn, and all integrity guarantees
 (VALIDATION word, RECOVERY_TAG, checksum) hold.
+
+---
+
+## Reporting contract
+
+- Every test emits **pass/fail per scenario**, not a duration. This instrument
+  is a conformance gate; nothing here belongs in a timing table.
+- Results land in `results/<fastfhir-tag>/resilience.csv` with the
+  `provenance.json` required of every artifact (TASKS.md **IN-0**). No
+  provenance, no artifact.
+- Report the **opaque fraction** with every run (TASKS.md **CO-2**): opaque
+  blocks carry the same 10-byte universal header, so truncation and bit-flip
+  detection apply to them, but their interiors are unparsed — corruption inside
+  an opaque payload is detectable only at *block* granularity, not field
+  granularity. Any test asserting field-level damage detection must run on an
+  in-profile resource. The Synthea corpus routes 1,444 `ImagingStudy` records
+  through this path on every run, so both cases are always available.

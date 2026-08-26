@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bench_test_2.hpp"
+#include "harness.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,22 +25,14 @@
 // ---------------------------------------------------------------------------
 // Each arm compiles these headers with a different ARM_* macro, so the SAME
 // type and function names get four DIFFERENT definitions across four
-// translation units: bench::test_2::MaterializedTree holds a
-// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
-// two protobuf vectors in a third.
-//
-// That is a One Definition Rule violation. The linker keeps one definition of
-// each inline function and destructor and discards the rest, so an object built
-// with one layout gets destroyed with another. It manifests as heap corruption
-// far from the cause -- ASan caught it as a SEGV inside
-// ~vector<google::fhir::r4::core::Observation> from
-// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
-// apparent crash site around between -c opt and -c dbg builds, which is the
-// classic signature.
+// translation units. That is a One Definition Rule violation: the linker keeps
+// one definition of each inline function and destructor and discards the rest,
+// and an object built with one layout gets destroyed with another. ASan caught
+// it as heap corruption with a moving crash site (notes.md section 1).
 //
 // An inline namespace gives each arm its own mangled symbols while leaving
-// every existing call site (bench::test_2::query, bench::assign::assign_patient)
-// spelled exactly as before.
+// every existing call site spelled exactly as before. See bench_test_4.hpp for
+// the full account.
 #ifndef BENCH_ARM_NS
 #if defined(ARM_FASTFHIR)
 #define BENCH_ARM_NS arm_fastfhir
@@ -292,37 +284,74 @@ static inline QuerySummary query(std::string_view payload) {
     if (resource_node.is<FastFHIR::RESOURCETYPE::OBSERVATION>()) {
       acc.note_observation();
 
-      const auto observation = resource_node.as<ObservationData>();
-      if (observation.code) {
-        bool matched = false;
-        for (const auto& coding : observation.code->coding) {
-          if (detail::is_loinc_match(coding.system, coding.code)) {
-            matched = true;
-            break;
+      // Query via node lenses, NOT as<ObservationData>() -- nodes are views
+      // over the bytestream, and materializing the whole observation POCO
+      // deserializes every field the query never reads. This is the same
+      // O(1) per-field access Test 2 demonstrates; the census below reads
+      // only what it classifies.
+      //
+      // Does this observation carry LOINC 2085-9? code.coding[*].{system,code}
+      // via the reflective API; index walks instead of entries() keep the
+      // zero-allocation read path intact.
+      bool matched = false;
+      if (auto code_entry = resource_node[FastFHIR::Fields::OBSERVATION::CODE]) {
+        auto cc = code_entry.as_node();
+        if (cc && cc.is_object()) {
+          if (auto coding_entry = cc[FastFHIR::Fields::CODEABLECONCEPT::CODING]) {
+            const auto n_codings = coding_entry.size();
+            for (std::size_t i = 0; i < n_codings; ++i) {
+              const auto coding = coding_entry[i];
+              std::string_view system_sv, code_sv;
+              if (auto s = coding[FastFHIR::Fields::CODING::SYSTEM]) {
+                system_sv = s.as<std::string_view>();
+              }
+              if (auto c = coding[FastFHIR::Fields::CODING::CODE]) {
+                code_sv = c.as<std::string_view>();
+              }
+              if (detail::is_loinc_match(system_sv, code_sv)) {
+                matched = true;
+                break;
+              }
+            }
           }
         }
-        if (matched) {
-          acc.note_loinc_2085_9();
+      }
+      if (matched) {
+        acc.note_loinc_2085_9();
+      }
+
+      // value[x] / effective[x] / component[x].value are choice slots: the
+      // variant tag is the slot's own RECOVERY_TAG, read without expanding
+      // the node. Same bytes the POCO deserializer would have copied.
+      if (auto v = resource_node[FastFHIR::Fields::OBSERVATION::VALUE]) {
+        if (const auto kind = value_kind_from_choice_tag(v.target_recovery)) {
+          acc.note_observation_value(*kind);
         }
       }
 
-      if (const auto kind = value_kind_from_choice_tag(observation.value.tag)) {
-        acc.note_observation_value(*kind);
+      if (auto eff = resource_node[FastFHIR::Fields::OBSERVATION::EFFECTIVE]) {
+        if (eff.target_recovery == RECOVER_FF_PERIOD) {
+          acc.note_effective_period();
+        } else {
+          acc.note_effective_datetime();
+        }
       }
 
-      if (observation.effective.tag == RECOVER_FF_PERIOD) {
-        acc.note_effective_period();
-      } else if (!observation.effective.is_empty()) {
-        acc.note_effective_datetime();
-      }
-
-      if (!observation.issued.empty()) {
+      // issued is a packed date/time slot (FF_FIELD_DATETIME): decoding it is
+      // the CAPI-4 zero-copy-reader gap, and the census only needs presence --
+      // an absent slot reads as a falsy Entry, exactly the POCO's is_empty().
+      if (resource_node[FastFHIR::Fields::OBSERVATION::ISSUED]) {
         acc.note_issued();
       }
 
-      for (const auto& component : observation.component) {
-        if (const auto kind = value_kind_from_choice_tag(component.value.tag)) {
-          acc.note_component_value(*kind);
+      if (auto comp = resource_node[FastFHIR::Fields::OBSERVATION::COMPONENT]) {
+        const auto n_components = comp.size();
+        for (std::size_t i = 0; i < n_components; ++i) {
+          if (auto cv = comp[i][FastFHIR::Fields::OBSERVATION_COMPONENT::VALUE]) {
+            if (const auto kind = value_kind_from_choice_tag(cv.target_recovery)) {
+              acc.note_component_value(*kind);
+            }
+          }
         }
       }
     }

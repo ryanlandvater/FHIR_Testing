@@ -19,8 +19,8 @@ Benchmarks all four test stages for **Google FHIR** — Google's protobuf-based 
          │
     ┌────┴──────────────┬──────────────────┐
     ▼                   ▼                  ▼
-  test_2::materialize  test_3::query    test_4::enrich
-  (re-parse protos)    (reflect query)  (re-serialize TLV)
+  test_2::random_access  test_3::query    test_4::enrich
+  (TLV scan + parse)    (reflect query)  (re-serialize TLV)
 ```
 
 ## Stage Breakdown
@@ -46,9 +46,12 @@ Benchmarks all four test stages for **Google FHIR** — Google's protobuf-based 
 
 4. **Custom TLV format** — The `append_record()` / `append_u32_le()` helpers create a lightweight framing layer around each serialized protobuf. This is **not** a standard FHIR wire format — it is a benchmark-internal envelope that preserves record boundaries without requiring a Bundle wrapper.
 
-### Test 2 — Materialize
+### Test 2 — Random Access
 
-Delegates to `test_2::materialize()` which iterates the TLV records, deserializes each into `google::fhir::r4::core::Patient` / `Observation` via `ParseFromArray()`, and walks the protobuf reflection tree to count touched nodes. See `bench_test_2.hpp.md`.
+Delegates to `test_2::random_access()` which, per read, walks the length
+prefixes from the start of the payload to the i-th record and
+`ParseFromArray()`s the target — O(i), the property under test (no index into
+a length-prefixed stream). See `bench_test_2.hpp.md`.
 
 ### Test 3 — Query
 

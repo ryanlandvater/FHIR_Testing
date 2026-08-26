@@ -35,10 +35,10 @@ continuous string. This reflects real HL7v2 usage: each ADT/ORU message is
 self-contained with its own MSH segment.
 
 ### Tests 2–4
-- **Test 2**: `test_2::materialize(payload)` — parses the concatenated HL7v2
-  stream into a 4-level `MessageTree` AST per message (`Segment → Field →
-  Component → Subcomponent`), then walks every syntactic node counting
-  `touched_nodes`. Full parse + tree walk cost.
+- **Test 2**: `test_2::random_access(payload)` — scans forward for the i-th
+  `MSH` (v2 has no resource-level index) and reads PID-3, the patient id. Its
+  addressable unit is the MESSAGE (5) where the other arms address resources
+  (1,473) — a format finding, captioned wherever the stage is reported.
 - **Test 3**: `test_3::query(payload)` — calls `hl7v2::parse_batch()` to build
   the full `MessageTree` AST, then iterates segments using typed views
   (`PidView`, `ObxView`) to extract patient count, birthdate, LOINC matches,

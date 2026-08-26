@@ -3,6 +3,7 @@
 // Platform differences gated by __APPLE__ and HAVE_GOOGLE_FHIR macros.
 
 #include "harness.hpp"
+#include "provenance.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -127,6 +128,11 @@ int main(int argc, char **argv)
   bool bundle_max_mb_explicit = false;
   int64_t fastfhir_vma_mb = 0;
   std::string db_connstr;
+  // IN-0: where the release artifact goes, and the escape hatch for a profile
+  // the CMake caches cannot settle. Without --results-dir the harness still
+  // prints provenance to stderr; it just does not claim to be an artifact.
+  std::string results_dir;
+  std::string profile_override;
   // Bundle composition was seeded from std::random_device, so two runs of the
   // same command measured different bundles and a corruption bug reproduced
   // only intermittently. Default to a fixed seed; --seed 0 restores random.
@@ -168,6 +174,14 @@ int main(int argc, char **argv)
     else if (args[i] == "--db" && i + 1 < args.size())
     {
       db_connstr = std::string(args[i + 1]);
+    }
+    else if (args[i] == "--results-dir" && i + 1 < args.size())
+    {
+      results_dir = std::string(args[i + 1]);
+    }
+    else if (args[i] == "--profile" && i + 1 < args.size())
+    {
+      profile_override = std::string(args[i + 1]);
     }
     else if (args[i] == "--seed" && i + 1 < args.size())
     {
@@ -250,7 +264,38 @@ int main(int argc, char **argv)
             << (rng_seed != 0 ? std::to_string(rng_seed) : std::string("random")) << "\n";
   std::uniform_int_distribution<std::size_t> patient_dist(0, all_patients.size() - 1);
 
-  std::cout << "arm,test,duration_ns,target_mb,patients_in_bundle\n"
+  // -----------------------------------------------------------------------
+  // Provenance (TASKS.md IN-0)
+  // -----------------------------------------------------------------------
+  // Collected before the first measurement so the record describes the build
+  // that produced the rows below it, and printed on every run -- artifact or
+  // not -- because the profile and compilation mode are invisible otherwise.
+  bench::provenance::Options prov_opts;
+  prov_opts.profile_override = profile_override;
+  prov_opts.corpus_dir = synthea_dir;
+  prov_opts.seed = rng_seed;
+  const bench::provenance::Provenance prov = bench::provenance::collect(prov_opts);
+  std::cerr << "\n" << bench::provenance::to_summary(prov);
+
+  if (!results_dir.empty())
+  {
+    if (!bench::provenance::write_json(prov, fs::path(results_dir), std::cerr))
+      return 3;
+  }
+  else
+  {
+    const auto missing = bench::provenance::missing_fields(prov);
+    if (!missing.empty())
+    {
+      std::cerr << "[provenance] " << missing.size()
+                << " field(s) unestablished -- these numbers cannot become an artifact:\n";
+      for (const auto &m : missing)
+        std::cerr << "[provenance]   - " << m << "\n";
+    }
+  }
+  std::cerr << "\n";
+
+  std::cout << "arm,test,duration_ns,ops,bytes_in,bytes_out,target_mb,patients_in_bundle\n"
             << std::flush;
 
   // -----------------------------------------------------------------------
@@ -274,16 +319,58 @@ int main(int argc, char **argv)
       PQclear(r);
       r = PQexec(db_conn, "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS duration_us BIGINT");
       PQclear(r);
+      // IN-0: wire bytes, so a size or throughput claim has somewhere to live.
+      r = PQexec(db_conn, "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS bytes_in BIGINT");
+      PQclear(r);
+      r = PQexec(db_conn, "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS bytes_out BIGINT");
+      PQclear(r);
+      r = PQexec(db_conn, "ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS ops BIGINT");
+      PQclear(r);
 
 #if defined(__APPLE__)
       const char *host_label = "macOS";
 #else
       const char *host_label = "Windows";
 #endif
-      const std::string sql = "INSERT INTO benchmark_runs (hostname, iterations, notes)"
-                              " VALUES ('" +
-                              std::string(host_label) + "', " + std::to_string(iterations) + ", 'benchmark harness') RETURNING id";
-      r = PQexec(db_conn, sql.c_str());
+      // The run record carries provenance because a results row is meaningless
+      // without it: same query, different profile or compilation mode, different
+      // numbers, no visible difference in the table (TASKS.md IN-0, PR-1).
+      for (const char *ddl : {
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS fastfhir_sha TEXT",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS fastfhir_dirty BOOLEAN",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS production_profile TEXT",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS compilation_mode TEXT",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS corpus_sha256 TEXT",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS benchmark_sha TEXT",
+               "ALTER TABLE benchmark_runs ADD COLUMN IF NOT EXISTS seed BIGINT",
+           })
+      {
+        PGresult *ddl_r = PQexec(db_conn, ddl);
+        PQclear(ddl_r);
+      }
+
+      // Named locals: every one of these must outlive the PQexecParams call,
+      // so no std::to_string(...).c_str() temporaries here.
+      const std::string iterations_s = std::to_string(iterations);
+      const std::string seed_s = std::to_string(prov.seed);
+      const char *run_params[9] = {
+          host_label,
+          iterations_s.c_str(),
+          prov.fastfhir_sha.c_str(),
+          prov.fastfhir_dirty ? "true" : "false",
+          prov.production_profile.c_str(),
+          prov.compilation_mode.c_str(),
+          prov.corpus_sha256.c_str(),
+          prov.benchmark_sha.c_str(),
+          seed_s.c_str(),
+      };
+      r = PQexecParams(db_conn,
+                       "INSERT INTO benchmark_runs "
+                       "(hostname, iterations, notes, fastfhir_sha, fastfhir_dirty, "
+                       "production_profile, compilation_mode, corpus_sha256, benchmark_sha, seed) "
+                       "VALUES ($1::text, $2::int, 'benchmark harness', $3::text, $4::boolean, "
+                       "$5::text, $6::text, $7::text, $8::text, $9::bigint) RETURNING id",
+                       9, nullptr, run_params, nullptr, nullptr, 0);
       if (PQresultStatus(r) == PGRES_TUPLES_OK)
       {
         run_id = std::atoi(PQgetvalue(r, 0, 0));
@@ -305,24 +392,32 @@ int main(int argc, char **argv)
     const std::string run_id_s = std::to_string(run_id);
     const std::string dur_ns_s = std::to_string(m.duration_ns);
     const std::string dur_us_s = std::to_string((m.duration_ns + 999) / 1000);
+    const std::string ops_s = std::to_string(m.ops);
+    const std::string bytes_in_s = std::to_string(m.bytes_in);
+    const std::string bytes_out_s = std::to_string(m.bytes_out);
     const std::string target_s = std::to_string(target_mb);
     const std::string patients_s = std::to_string(n_patients);
     const std::string stage_s = bench::to_string(m.stage);
 
-    const char *params[7] = {
+    const char *params[10] = {
         run_id_s.c_str(),
         m.arm.c_str(),
         stage_s.c_str(),
         dur_ns_s.c_str(),
         dur_us_s.c_str(),
+        ops_s.c_str(),
+        bytes_in_s.c_str(),
+        bytes_out_s.c_str(),
         target_s.c_str(),
         patients_s.c_str(),
     };
     PGresult *r = PQexecParams(db_conn,
                                "INSERT INTO benchmark_results "
-                               "(run_id, arm, stage, duration_ns, duration_us, target_mb, patients_in_bundle) "
-                               "VALUES ($1::int, $2::text, $3::text, $4::bigint, $5::bigint, $6::int, $7::int)",
-                               7, nullptr, params, nullptr, nullptr, 0);
+                               "(run_id, arm, stage, duration_ns, duration_us, ops, bytes_in, "
+                               "bytes_out, target_mb, patients_in_bundle) "
+                               "VALUES ($1::int, $2::text, $3::text, $4::bigint, $5::bigint, "
+                               "$6::bigint, $7::bigint, $8::bigint, $9::int, $10::int)",
+                               10, nullptr, params, nullptr, nullptr, 0);
     if (PQresultStatus(r) != PGRES_COMMAND_OK)
       std::cerr << "DB insert failed: " << PQerrorMessage(db_conn) << "\n";
     PQclear(r);
@@ -344,7 +439,16 @@ int main(int argc, char **argv)
   // Emit CSV regardless of DB availability
   auto emit_metric = [&](const bench::MetricEvent &m, int64_t target_mb, int64_t n_patients)
   {
+    // A serialize stage that produced no wire bytes did not serialize anything.
+    // 0 is reserved for "not applicable to this stage" (harness.hpp), so this
+    // is a real defect rather than a fast number -- the same class as the Test 2
+    // walk that reported 83 ns for one node (notes.md section 2).
+    if (m.stage == bench::Stage::Test1Serialize && m.bytes_out <= 0)
+    {
+      std::cerr << "[warn] " << m.arm << " test_1_serialize reported 0 wire bytes\n";
+    }
     std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_ns
+              << "," << m.ops << "," << m.bytes_in << "," << m.bytes_out
               << "," << target_mb << "," << n_patients << "\n"
               << std::flush;
   };
@@ -404,6 +508,41 @@ int main(int argc, char **argv)
 #endif
 
         // Collect and emit all metrics
+        // Test 2 parity gate: every arm must have read the same bytes. An arm
+        // that silently read nothing looks infinitely fast, which is exactly
+        // how the HL7v2 probe shipped broken twice during development (wrong
+        // segment terminator, then wrong field index). Cheap, and it turns a
+        // fast meaningless number into a hard failure.
+        {
+          const auto ra_bytes = [](const bench::ArmRunResult &r) -> std::int64_t {
+            for (const auto &m : r.metrics)
+              if (m.stage == bench::Stage::Test2RandomAccess)
+                return m.bytes_out;
+            return -1;
+          };
+          const std::int64_t ref = ra_bytes(ff);
+          struct Named { const char *name; std::int64_t bytes; };
+          const std::vector<Named> others = {
+              {"json_fhir", ra_bytes(jf)},
+#if defined(HAVE_HL7V2)
+              {"hl7v2", ra_bytes(h2)},
+#endif
+#if defined(HAVE_GOOGLE_FHIR)
+              {"google_fhir", ra_bytes(gf)},
+#endif
+          };
+          for (const auto &o : others)
+          {
+            if (o.bytes != ref)
+            {
+              std::cerr << "[validate] test_2 random-access byte mismatch: fastfhir=" << ref
+                        << " " << o.name << "=" << o.bytes
+                        << " -- the arms did not read the same fields\n";
+              validation_failed = true;
+            }
+          }
+        }
+
         auto emit = [&](const std::vector<bench::MetricEvent> &metrics)
         {
           for (const auto &m : metrics)

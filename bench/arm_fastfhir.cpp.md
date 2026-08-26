@@ -50,9 +50,24 @@ The code includes (but has `#if 0`-blocked) two dispatch paths:
 
 Both are disabled — the fallback sequential `std::transform` path is active. This avoids measurement noise from thread scheduling during benchmarking.
 
-### Stage 2 (Materialize) — Delegated to `bench_test_2.hpp`
+### Stage 1b (Compact Archive) — IN-E, gated on losslessness
 
-The FFHR binary is passed to `test_2::materialize()` which wraps it in a `FastFHIR::Parser` and walks the entire node tree via `touch_tree()` to count all nodes. This simulates the cost of parsing the serialized payload back into a traversable tree.
+After the standard stream is sealed, the arm runs `Compactor::archive()` on it
+and emits a `test_1_compact` row with `bytes_out` = the compact archive size.
+The row is **withheld** unless the compact stream re-parses to JSON
+semantically identical to the standard stream's (nlohmann comparison, not
+string equality — the two layouts may legitimately order fields differently).
+The gate exists because the upstream compactor silently dropped scalar arrays
+until `459e8d8`; no compact number leaves without it (handoff.md Instrument E,
+upstream I3.7).
+
+### Stage 2 (Random Access) — Delegated to `bench_test_2.hpp`
+
+The FFHR binary is passed to `test_2::random_access()` which picks N random
+`Bundle.entry` ordinals and navigates to each from the root, reading the
+resource's `id`. FastFHIR's per-read cost is offset arithmetic — O(1). Must run
+before Test 4: the in-place enrich (PA-9) would otherwise move the ordinal
+space under it (TASKS.md D4).
 
 ### Stage 3 (Query) — Delegated to `bench_test_3.hpp`
 
@@ -78,20 +93,28 @@ Deserializes the FFHR bundle, appends a new Observation (from `bench/enrich.json
 
 ## Dependencies
 
-- `FastFHIR` library: `FF_Bundle.hpp`, `FF_Patient.hpp`, `FF_Observation.hpp`, `FastFHIR.hpp`
+- `FastFHIR` library: `FF_Bundle.hpp`, `FF_Patient.hpp`, `FF_Observation.hpp`, `FF_Compactor.hpp`, `FastFHIR.hpp`
 - `harness.hpp`: BundlePatient, BundleBenchFixture, ArmRunResult, Timer
 - `bench_test_1.hpp`: `assign::assign_patient()`, `assign::assign_observation()`
-- `bench_test_2.hpp`: `test_2::materialize()`
+- `bench_test_2.hpp`: `test_2::random_access()`
 - `bench_test_3.hpp`: `test_3::query()`
 - `bench_test_4.hpp`: `test_4::BENCH_TEST_4_ENRICH_FN`
 
 ## Output
 
-Returns an `ArmRunResult` containing:
+Returns an `ArmRunResult` containing (in push order):
 - `metrics[0]`: `{"fastfhir", Test1Serialize, duration_ns}`
-- `metrics[1]`: `{"fastfhir", Test2Materialize, duration_ns}`
+- `metrics[1]`: `{"fastfhir", Test1Compact, duration_ns}` — compact archive size
+  (IN-E losslessness gate; withheld, with a warning, when the gate fails)
 - `metrics[2]`: `{"fastfhir", Test3Query, duration_ns}`
-- `metrics[3]`: `{"fastfhir", Test4Enrich, duration_ns}`
+- `metrics[3]`: `{"fastfhir", Test3QueryCompact, duration_ns}` — same census
+  over the compact archive; answers must match the standard query
+- `metrics[4]`: `{"fastfhir", Test2RandomAccess, duration_ns}`
+- `metrics[5]`: `{"fastfhir", Test2RandomAccessCompact, duration_ns}` — same
+  probe over the compact archive (bytes_out = id bytes read)
+- `metrics[6]`: `{"fastfhir", Test4Enrich, duration_ns}`
+- (no `Test4EnrichCompact` row — the API refuses a Builder on a compact
+  archive, write-once; CAPI-10. Logged once per run.)
 - `queried_value`: Formatted query summary string
 - `reconstructed_bundle_json`: Empty (FFHR binary is not JSON-serializable in this context)
 - `enriched_stream`: The new `FastFHIR::Memory` after enrichment

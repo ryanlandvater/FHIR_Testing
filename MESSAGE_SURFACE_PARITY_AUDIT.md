@@ -222,7 +222,7 @@ Implement **Three-Phase Remediation Plan** to achieve full message surface parit
        }
    }
    
-   out.metrics.push_back({"google_fhir", Stage::Test2Materialize, test2_timer.stop_ns()});
+   out.metrics.push_back({"google_fhir", Stage::Test2RandomAccess, test2_timer.stop_ns()});
    ```
 
 2. **Stage 3 Query** (`arm_google_fhir.cpp` + `bench_test_3.hpp`)

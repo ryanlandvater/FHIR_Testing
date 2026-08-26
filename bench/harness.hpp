@@ -29,28 +29,57 @@ namespace bench {
 // Timed sections are declared here first for manual reviewability.
 // Test 1 start: immediately before first field write to destination representation.
 // Test 1 end: immediately after payload sealed.
-// Test 2 start: immediately before deserialize/materialize work begins.
-// Test 2 end: when the in-memory representation is available for query logic.
+// Test 1-compact start: immediately before Compactor::archive; end: compact stream sealed.
+//   FastFHIR-native serialization variant (IN-E), NOT part of the cross-arm
+//   parity grid -- the arm emits it only when the losslessness gate passes.
+// Test 2 start: first random-access read, navigating from the root.
+// Test 2 end: all target reads complete, values in hand.
 // Test 3 start: first parser/read call that consumes bytes or materialized nodes for query.
 // Test 3 end: target value extracted into result variable.
+// The *_Compact stages run the same probes over the compact archive (FF arm
+// only, same losslessness gate). The claim they test: the reader is
+// layout-agnostic, so compact ≈ standard speed.
 
 enum class Stage {
   Test1Serialize,
-  Test2Materialize,
+  Test1Compact,
+  Test2RandomAccess,
+  Test2RandomAccessCompact,
   Test3Query,
+  Test3QueryCompact,
   Test4Enrich,
-
-  // Temporary compatibility aliases during the stage -> test migration.
-  Stage1Serialize = Test1Serialize,
-  Stage2Transport = Test2Materialize,
-  Stage3Query = Test3Query,
-  Stage3Materialize = Test2Materialize
+  Test4EnrichCompact,
 };
 
 struct MetricEvent {
   std::string arm;
   Stage stage;
   std::int64_t duration_ns;
+
+  // Wire bytes crossing this stage's boundary (TASKS.md IN-0). Until these
+  // existed the harness emitted only nanoseconds, so no size claim -- the
+  // compact-archive figure, or any throughput expressed per byte -- had an
+  // instrument at all. `target_mb` is the *requested* corpus size and is not a
+  // measurement; these are.
+  //
+  //   Test 1 serialize   bytes_out = sealed payload; bytes_in 0 (input is POCOs)
+  //   Test 1 compact     bytes_out = compact archive size (FastFHIR arm only,
+  //                       IN-E losslessness gate)
+  //   Test 2 random acc. bytes_out = id bytes read (the cross-arm parity
+  //                       accumulator); bytes_in 0
+  //   Test 3 query       both 0
+  //   Test 4 enrich      bytes_in  = source stream; bytes_out = enriched stream
+  //
+  // 0 means "not applicable to this stage", never "measured zero" -- a stage
+  // that produces bytes and reports 0 is a bug, and emit_metric says so.
+  std::int64_t bytes_in = 0;
+  std::int64_t bytes_out = 0;
+
+  // Units of work this stage performed, so a duration can be normalized rather
+  // than compared raw across formats that do different amounts of work for the
+  // same clinical content (PA-5). Field reads for Test 2. 0 where the notion
+  // does not apply.
+  std::int64_t ops = 0;
 };
 
 struct ArmRunResult {
@@ -59,6 +88,7 @@ struct ArmRunResult {
   std::string reconstructed_bundle_json;
   std::variant<std::monostate, FastFHIR::Memory, std::string> enriched_stream;
   std::string enrich_metrics_summary;
+  std::string random_access_summary;
 };
 
 class Timer {
@@ -82,12 +112,20 @@ inline std::string to_string(Stage s) {
   switch (s) {
     case Stage::Test1Serialize:
       return "test_1_serialize";
-    case Stage::Test2Materialize:
-      return "test_2_materialize";
+    case Stage::Test1Compact:
+      return "test_1_compact";
+    case Stage::Test2RandomAccess:
+      return "test_2_random_access";
+    case Stage::Test2RandomAccessCompact:
+      return "test_2_compact";
     case Stage::Test3Query:
       return "test_3_query";
+    case Stage::Test3QueryCompact:
+      return "test_3_compact";
     case Stage::Test4Enrich:
       return "test_4_enrich";
+    case Stage::Test4EnrichCompact:
+      return "test_4_compact";
   }
   return "unknown";
 }

@@ -128,6 +128,12 @@ EnrichmentObservationFixture load_enrichment_observation_from_json(const std::fi
     throw std::runtime_error("Expected Observation resource in " + json_path.string());
   }
 
+  // Seal the fixture's arena so the observation is a valid standalone stream:
+  // enrich_fastfhir re-reads it via Parser (the in-memory lab observation)
+  // for the live-stream append. Without the seal the arena has no FFHR header
+  // and Parser throws "FF_HEADER magic bytes mismatch".
+  (void)seal_stream(stream, root, "enrichment observation fixture");
+
   fixture.observation = root_node.as<ObservationData>();
   return fixture;
 }

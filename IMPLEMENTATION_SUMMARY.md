@@ -11,8 +11,9 @@
 >
 > The architecture below is accurate as *design*. The numbers the harness now
 > produces are proof it works end to end, **not results to publish**: Test 1 is
-> not at parity, `value[x]` is excluded from every arm, and Test 2 node counts
-> are not normalized across formats.
+> not at parity, `value[x]` is excluded from every arm, and Test 3 still
+> charges the FastFHIR arm a `print_json` penalty (PA-7). Test 2 is the
+> random-access stage (D4, 2026-08-26).
 
 This document is a curated overview of the benchmark architecture, build status, and parity guidance.
 For detailed per-file API documentation, see the [bench/*.md](bench/) files indexed in [README.md](README.md).
@@ -33,7 +34,7 @@ For detailed per-file API documentation, see the [bench/*.md](bench/) files inde
 | Stage | What It Measures | FastFHIR | JSON | HL7v2 | Google FHIR |
 |---|---|---|---|---|---|
 | Test 1 - Serialize | POCO struct to wire format | OK Arena build | OK nlohmann::json dump | OK ORU^R01 build | OK Protobuf TLV |
-| Test 2 - Materialize | Wire format to in-memory tree | Parser tree walk (walk corrected 2026-08-25) | simdjson DOM walk | Batch parse count | Proto parse + reflection walk |
+| Test 2 - Random Access | N random entry reads from the root (replaced materialize, D4) | Offset arithmetic | simdjson at(i) scan | MSH scan | TLV scan + parse |
 | Test 3 - Query | Tree walk for LOINC 2085-9 | Node reflection | simdjson path | Segment walking | Proto field walk |
 | Test 4 - Enrich | Append observation to bundle | OK Arena append | OK Parse-modify-dump | OK String concat | OK Re-serialize all |
 
@@ -65,7 +66,7 @@ to avoid an ODR violation. See [notes.md](notes.md) §1 and §3.
 | Header | Doc | What It Contains |
 |---|---|---|
 | `bench_test_1.hpp` | [doc](bench/bench_test_1.hpp.md) | Field assignment - assign_patient(), assign_observation() |
-| `bench_test_2.hpp` | [doc](bench/bench_test_2.hpp.md) | Materialization - materialize() + touch_tree() |
+| `bench_test_2.hpp` | [doc](bench/bench_test_2.hpp.md) | Random access - random_access() per arm (replaced materialize, D4) |
 | `bench_test_3.hpp` | [doc](bench/bench_test_3.hpp.md) | Query - LOINC 2085-9 search, value type classification |
 | `bench_test_4.hpp` | [doc](bench/bench_test_4.hpp.md) | Enrichment - append observation to existing bundle |
 
@@ -143,7 +144,9 @@ metrics. `test_2::materialize()` parses the TLV records, runs `ParseFromArray()`
 per message and walks via protobuf reflection (9,539 nodes, ~1.6 ms on a 1 MB
 bundle). `test_3::query()` is implemented with 42 accumulator calls and returns
 `patients=1 observations=316 obs_issued_present=316`, matching the JSON
-baseline.
+baseline. *(The materialize stage itself was retired 2026-08-26 — TASKS.md D4;
+Test 2 is random access now. The verification record above is retained as
+history.)*
 
 **Two real Google-arm gaps remain instead:**
 - `birthdate` is a microsecond epoch (`194140800000000`) where every other arm

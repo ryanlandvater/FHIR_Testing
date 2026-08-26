@@ -43,8 +43,10 @@ Same parallel/sequential patterns as arm_fastfhir.cpp:
 - Sequential `std::transform` (active)
 
 ### Tests 2–4
-- **Test 2**: `test_2::materialize(payload)` — parse the JSON string with simdjson
-  DOM parser, walk tree counting nodes.
+- **Test 2**: `test_2::random_access(payload)` — parse with simdjson, then read
+  N random entry ids; each `at(i)` iterates the DOM array from element 0 (O(i),
+  the property under test). Hoists the `root["entry"]` lookup out of the loop —
+  the fairest implementation available to a real consumer.
 - **Test 3**: `test_3::query(payload)` — re-parse with simdjson, walk entries
   counting patients, LOINC matches, observation value types.
 - **Test 4**: `test_4::enrich_json(payload, obs)` — parse with nlohmann::json,
@@ -54,7 +56,7 @@ Same parallel/sequential patterns as arm_fastfhir.cpp:
 
 | Decision | Rationale |
 |---|---|
-| `nlohmann::json` for serialization, simdjson for materialize/query | nlohmann provides the most straightforward struct→JSON mapping (the `assign::` template writes into it). simdjson is faster for reading — the benchmark tests both libraries at their strength. |
+| `nlohmann::json` for serialization, simdjson for random access/query | nlohmann provides the most straightforward struct→JSON mapping (the `assign::` template writes into it). simdjson is faster for reading — the benchmark tests both libraries at their strength. |
 | JSON serialization is allocation-heavy (sinks into `nlohmann::json::dump`) | This is inherent to DOM-based serializers. It's the baseline FastFHIR is measured against — a fair comparison of the full round-trip cost. |
 | Enrichment re-parses the entire bundle with nlohmann | Realistic worst-case: a JSON-based system must parse, modify, and re-serialize to append data. FastFHIR's append-directly-to-arena avoids this. |
 

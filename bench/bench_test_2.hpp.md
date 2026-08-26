@@ -1,122 +1,53 @@
-# `bench_test_2.hpp` — Materialization (Test 2)
+# `bench_test_2.hpp` — Random Access (Test 2)
 
-> ⚠️ **Corrected 2026-08-25 — this stage was measuring almost nothing.**
-> `touch_tree()` walked objects with `entries()`, which returns elements of an
-> *array*; blocks need `fields()`. The FastFHIR arm therefore visited **1 node**
-> while the JSON, HL7v2 and Google arms visited ~8,000, and the reported duration
-> was 333 ns.
->
-> Now mirrors `read_path_bench.cpp::walk_node()` and visits 4,443 nodes
-> (~108 µs). Node counts still differ per format for identical clinical content,
-> so Test 2 is **not yet normalized**. See [notes.md](../notes.md) §2.
+> ⚠️ **Replaced the materialize walk 2026-08-26 (TASKS.md D4).** The former
+> Test 2 walked every node in LAYOUT order — a contiguous tape's best case and
+> an offset-indexed layout's worst — and no consumer reads a bundle in write
+> order. Read in layout order simdjson wins ~22x per node; read out of order
+> FastFHIR wins up to ~2,500x. Both are true; the walk chart is retired.
 
 ## Purpose
 
-Implements **Test 2 (Materialize)**: taking each arm's serialized output and parsing it back into an in-memory tree or object model, then recursively walking every node to measure the full materialization cost.
+Implements **Test 2 (Random Access)** — the receiver-side stage: pick N random
+`Bundle.entry` ordinals (deterministic seed `20260826u`, default 2000 reads,
+`BENCH_RANDOM_READS` overrides), navigate to each ONE FROM THE ROOT, and read
+the resource's `id`. Every lookup pays its own path cost — that asymmetry is
+the WF-1.1 claim:
 
-This test represents the "receiver's cost" — how expensive is it to consume each format's output?
+| Arm | Per-read cost |
+|---|---|
+| FastFHIR | offset arithmetic from the root — O(1) |
+| simdjson | `dom::array::at(i)` iterates from element 0 — O(i) |
+| protobuf | scan i length-prefixed TLV records, then parse — O(i) |
+| HL7v2 | scan forward for the i-th MSH, then parse — O(i) |
 
-## Architecture
+The three scan formats are not being sandbagged: none of them HAS an O(1)
+index into a serialized document. That is the point of the comparison.
 
-Defines one `materialize()` overload per arm, selected by the same `#define ARM_*` guard pattern as `bench_test_1.hpp`.
+## Parity Gate
 
-### Common Types
-
-```cpp
-struct MaterializedTree {
-  // Arm-specific root storage (see below)
-  std::size_t touched_nodes = 0;
-  bool ok = false;
-};
-inline MetricEvent materialize_metric(arm, duration_ns);
-```
-
-### Per-Arm Implementations
-
-#### FastFHIR (`ARM_FASTFHIR`)
-
-```cpp
-using StreamType = FastFHIR::Memory;
-MaterializedTree materialize(const StreamType& payload);
-```
-
-- **Parser**: `FastFHIR::Parser(payload)` — zero-copy parser over the FFHR arena
-- **Walk**: Recursively visits every node via `node.entries()`, incrementing `touched_nodes`
-- **Cost model**: Pure pointer chasing — the FFHR binary is already in memory; this measures tree navigation speed
-
-#### JSON (`ARM_JSON`)
-
-```cpp
-using StreamType = std::string;
-MaterializedTree materialize(const StreamType& payload);
-```
-
-- **Parser**: `simdjson::dom::parser` — the fastest DOM parser for JSON
-- **Walk**: Recursive object/array field enumeration via `simdjson::dom::object` / `array` iterators
-- **Cost model**: Full parse + tree walk — simdjson must tokenize the string, build a DOM, and navigate it
-
-#### Google FHIR (`ARM_GOOGLE_FHIR`)
-
-```cpp
-using StreamType = std::string;
-MaterializedTree materialize(const StreamType& payload);
-```
-
-- **Parser**: Iterates the custom TLV record format, deserializes each protobuf via `ParseFromArray()`
-- **Walk**: Uses protobuf reflection (`GetReflection()`, `ListFields()`, `FieldDescriptor::cpp_type()`) to recursively walk each message's fields
-- **Cost model**: TLV iteration + protobuf deserialization + reflection tree walk — the most expensive materialization path
-
-#### HL7v2 (`ARM_HL7V2`)
-
-```cpp
-using StreamType = std::string;
-MaterializedTree materialize(const StreamType& payload);
-```
-
-- **Storage**: `MaterializedTree::messages` holds `std::vector<hl7v2::ParsedMessage>`, each containing a fully-parsed `MessageTree` (backed by an owning `storage` string for zero-copy `string_view` references).
-- **Parser**: Calls `hl7v2::parse_batch()` which splits the concatenated HL7v2 stream on `MSH|` message boundaries, then builds a four-level `MessageTree` AST per message:
-  - `Segment` level — split on `\r`
-  - `Field` level (inside each Segment) — split on `|`
-  - `Component` level (inside each Field) — split on `^`
-  - `Subcomponent` level (inside each Component) — split on `&`
-- **Walk**: Recursively visits every syntactic node in the tree:
-  ```cpp
-  inline void touch_tree(const hl7v2::ParsedMessage& msg, std::size_t& touched_nodes) {
-    ++touched_nodes;                                      // message node
-    for (const auto& seg : msg.tree.segments) {
-      if (seg.name.empty()) continue;
-      ++touched_nodes;                                    // segment node
-      for (const auto& field : seg.fields) {
-        ++touched_nodes;                                  // field node
-        for (const auto& comp : field.components) {
-          ++touched_nodes;                                // component node
-          for (const auto& sub : comp.subcomponents) {
-            ++touched_nodes;                              // subcomponent node
-          }
-        }
-      }
-    }
-  }
-  ```
-- **Cost model**: Full HL7v2 parse (message boundary scan + `\r` → `|` → `^` → `&` hierarchical splitting) + 4-level tree walk. Heavier than segment-only counting but mirrors the node-granularity cost model used by FastFHIR and JSON arms.
+Every arm accumulates the **total bytes of `id` read**; the harness compares
+the accumulators across arms and **fails the run (exit 2)** on any mismatch —
+an arm that silently read nothing would look infinitely fast. The gate caught
+three real bugs during development (TASKS.md IN-B2: wrong HL7v2 segment
+terminator, wrong PID field index, and the probe running after Test 4's
+in-place enrich).
 
 ## What Gets Measured
 
-The timer starts **before** the `materialize()` call and stops **after** `touched_nodes` is populated. This captures the full cost of:
+The timer starts after the target list is built and stops when all reads
+complete. `MetricEvent` carries `ops` = reads and `bytes_out` = id bytes read
+(the parity accumulator). The read is `as<std::string_view>()` — the call that
+actually touches the arena; cached `Node` members would measure nothing (an
+earlier probe reported a 26x speedup that was entirely that artefact).
 
-- **FastFHIR**: Walking a pre-built tree (zero deserialization — the FFHR binary IS the tree)
-- **JSON**: simdjson DOM construction + tree walk
-- **Google FHIR**: TLV parsing + protobuf deserialization + reflection walk
-- **HL7v2**: Full HL7v2 string parse (message boundary scan + `\r` → `|` → `^` → `&` hierarchical splitting) + 4-level tree walk (segment → field → component → subcomponent)
+## Granularity Warning (HL7v2)
 
-## Key Design Decisions
-
-| Decision | Rationale |
-|---|---|
-| Recursive tree walk (`touch_tree`) | Guarantees all nodes are visited; prevents compiler from optimizing away unused parses |
-| Separate parser instance per arm | Each arm's parser is heap-owned via `unique_ptr` to avoid move/copy complications |
-| Protobuf reflection for Google FHIR | Generic walk without per-message-type visitor code |
-| HL7v2 full 4-level parse tree | Hierarchical splitting (`\r` → `|` → `^` → `&`) builds `Segment`/`Field`/`Component`/`Subcomponent` AST — matches the node-granularity cost model of other arms |
+A v2 batch has no resource-level index — its addressable unit is the MESSAGE
+(5 ORU messages carry the same 1,473 resources the other arms address
+individually). Its ns/read is a scan over a much smaller ordinal space and is
+NOT the same operation. That difference is a finding about the format, not a
+probe defect, and is captioned wherever this stage is reported.
 
 ## Dependencies
 
