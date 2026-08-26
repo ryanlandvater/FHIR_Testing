@@ -500,6 +500,19 @@ interacting) rather than the per-unit rate.
 
 ### Fix directions for next session (not started)
 
+0. **The recovery semantic that can legitimately differentiate FFHR —
+   edge/relationship recovery via cross-validation (Ryan, 2026-08-26; full
+   spec in TASKS.md IN-G2).** FastFHIR encodes every parent→child edge
+   TWICE: the parent's slot (offset + expected RECOVERY_TAG) and the child's
+   header (VALIDATION + actual tag). Corrupt the parent's pointer → the child
+   is orphaned but still self-consistent; an offset sweep finds it and its
+   tag matches the parent slot's declared type → the edge is reconstructible.
+   Corrupt the child's header → the parent's intact pointer still names the
+   location → the edge's existence is provable from the parent alone. Two
+   sets of correct information for each set of mistakes. **The metric should
+   count RESTORED EDGES, not surviving blocks** — and only FFHR has the
+   redundancy (JSON/protobuf values are inline; no orphan to sweep, no
+   slot-type to match). Build `Recovery::recover_edges()` per IN-G2.
 1. **One semantic for the y-axis**: "% of the bundle's clinical units a scanner
    can still extract INTACT" — with content verification in every format:
    FFHR entries whose block parses; JSON entries whose span parses; protobuf

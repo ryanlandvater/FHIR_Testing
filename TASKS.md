@@ -690,15 +690,73 @@ Ordered by what unblocks the most.
       pre-validates the header manually) and **CAPI-14** (generated POCO
       string fields are `string_view`; assigning a temporary dangles).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
 - [ ] **IN-G2. Fix the recovery-test methodology (do not cite the current curve).**
-      handoff.md § "Test 5 — known flaws" documents five problems: (A) units
+      handoff.md § "Test 5 — known flaws" documents six problems: (A) units
       differ (hl7v2 counts segments, others count entries); (B) damage density
       is not normalized (same k = different intensity per format); (C) the
       hl7v2 recover checks only segment names, never content (a \r merge still
       counts); (D) the hl7v2 structural set excludes the real cascade triggers
-      (`|`, `^`, `&`, `~`); (E) blast-radius asymmetry. Fix directions in the
-      same section: content-verified recovery per format, normalized x-axis
-      (flips per 1,000 units), pipes/carrots in the v2 structural set, and a
-      defensible v2 unit. Re-run and re-examine before any citation.
+      (`|`, `^`, `&`, `~`); (E) blast-radius asymmetry; (F) the y-axis semantic
+      is asymmetric (JSON's "recovered" is a full re-parse, FFHR's is
+      header-only) and the curves are identical by construction. Fix
+      directions in the same section: content-verified recovery per format,
+      normalized x-axis (flips per 1,000 units), pipes/carrots in the v2
+      structural set, and a defensible v2 unit. Re-run and re-examine before
+      any citation.
+
+      **The recovery semantic that can legitimately differentiate FFHR —
+      edge/relationship recovery via cross-validation (Ryan, 2026-08-26).**
+      FastFHIR's arena encodes every parent→child edge TWICE, and the two
+      halves corroborate each other:
+
+      ```
+      Node A (Observation)                      Node B (valueQuantity block)
+        ┌──────────────────────────┐              ┌─────────────────────────┐
+        │  field slot for "value":  │  offset ──▶  │ VALIDATION == own offset│
+        │  { expected RECOVERY_TAG, │              │ RECOVERY_TAG (Quantity) │
+        │    stored offset → B }    │              │ payload bytes           │
+        └──────────────────────────┘              └─────────────────────────┘
+      ```
+
+      **Failure mode 1 — A's pointer is corrupt (the offset value in A's
+      slot is garbage).** A loses its result; B is ORPHANED (reachable by
+      nobody, but still physically present and self-consistent). Recovery:
+      sweep for orphan blocks (VALIDATION == position + known tag) → B is
+      found → **B's RECOVERY_TAG matches A's slot's expected tag** (the
+      corrupted offset sits in the "value" slot of an Observation, whose
+      declared child type is Quantity — and B IS a Quantity). The two halves
+      corroborate: the relationship is reconstructible, and the edge can be
+      counted as recovered.
+
+      **Failure mode 2 — B's header is corrupt (B's VALIDATION or
+      RECOVERY_TAG damaged).** A's pointer is intact — it still names B's
+      location, and A's slot still declares B's expected type. Recovery:
+      the pointer identifies where B must be; whether the content survives
+      depends on how much of B's header is damaged, but the EDGE's existence
+      is provable from A's side alone.
+
+      **The principle: two sets of correct information for each one set of
+      mistakes.** Every pointer edge is encoded independently in the parent's
+      slot (offset + expected type) and the child's header (VALIDATION +
+      actual type). Corruption of either side leaves the other as evidence;
+      cross-validating both detects the edge from either half and can repair
+      (or at least count) it from the intact half.
+
+      **What this changes about the metric:** recovery should count
+      RESTORED EDGES — parent→child pairs whose two halves corroborate —
+      not surviving blocks. That is the content-verified, relationship-level
+      semantic the comparison needs, and it is FFHR-specific: JSON values are
+      inline in the object (no separate addressable block, no orphan to
+      sweep, no slot-type to match); protobuf fields are inline in the
+      message; HL7v2 has no structure of this kind. Only the arena's
+      offset-addressed, self-describing blocks have the redundancy, so only
+      FFHR can demonstrate cross-validated edge recovery. Build a
+      `Recovery::recover_edges()` (or extend the library `Recovery`) that:
+      (1) walks intact parents, (2) for each pointer slot with a corrupt
+      target, sweeps for an orphan whose tag matches the slot's expected
+      type, (3) counts the edge recovered when a unique corroborating match
+      exists, (4) reports edges recovered / total edges — then re-run the
+      comparison with this as the FFHR curve against content-verified curves
+      for the other formats.
 - [ ] **IN-H. Thread-scaling curve** (WF-4.2). *Blocked:* the parallel path in
       [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is
       commented out, so this repo currently exercises only the serial path and
