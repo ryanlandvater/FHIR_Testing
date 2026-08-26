@@ -3,8 +3,13 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
+#include <memory>
+#include <stdexcept>
 #include <variant>
 #include <string>
 #include <string_view>
@@ -94,6 +99,276 @@ inline void print_metric(const MetricEvent& e) {
 inline constexpr std::string_view kPatientQueryField = "birthDate";
 inline constexpr std::string_view kCholesterolLoincCode = "2085-9";
 inline constexpr std::string_view kLoincSystem = "http://loinc.org";
+
+// ---------------------------------------------------------------------------
+// FastFHIR stream helpers (ported to the FF_* facade 2026-08-25)
+// ---------------------------------------------------------------------------
+// Builder::set_root() and Builder::finalize() became private in FastFHIR
+// a9fd4e9. The only way in is the friend free functions FF_StreamSetRoot /
+// FF_StreamFinalize, which take an FF_Stream -- and FF_Stream is exactly
+// std::shared_ptr<Builder>. So we build the shared_ptr ourselves rather than
+// going through FF_CreateStream: that keeps the existing "the fixture owns the
+// arena, the builder borrows it" model, which BundlePatient::memory and
+// clone_bundle_patient() both depend on.
+
+inline FastFHIR::FF_Stream make_stream(const FastFHIR::Memory& memory,
+                                       FHIR_VERSION version = FHIR_VERSION_R5) {
+  return std::make_shared<FastFHIR::Builder>(memory, version);
+}
+
+// Benchmark-mode checksum. FF_StreamFinalize requires a hasher whenever the
+// algorithm is not NONE; hashing for real would measure OpenSSL rather than
+// FastFHIR, so this returns a zeroed digest of the right width. The stream
+// still carries a SHA256 header, exactly as it did before the port.
+inline std::vector<BYTE> bench_null_sha256(const unsigned char*, Size) {
+  return std::vector<BYTE>(32, 0);
+}
+
+// Assign the root and seal the arena. Throws with the FF_Result message on
+// failure -- the facade is noexcept and returns status codes, so an unchecked
+// call would silently produce an unsealed stream and a fast, meaningless
+// number.
+inline FastFHIR::Memory::View seal_stream(const FastFHIR::FF_Stream& stream,
+                                          const FastFHIR::Reflective::ObjectHandle& root,
+                                          std::string_view context,
+                                          FF_Checksum_Algorithm algorithm = FF_CHECKSUM_SHA256) {
+  FF_Result result = FastFHIR::FF_StreamSetRoot(FastFHIR::FF_StreamSetRootInfo{
+      .stream = stream,
+      .root = root,
+  });
+  if (!result) {
+    throw std::runtime_error("FF_StreamSetRoot failed for " + std::string(context) + ": " +
+                             result.message);
+  }
+
+  FastFHIR::Memory::View view;
+  result = FastFHIR::FF_StreamFinalize(
+      FastFHIR::FF_StreamFinalizeInfo{
+          .stream = stream,
+          .algorithm = algorithm,
+          // A hasher is required only when the algorithm is not NONE.
+          .hasher = algorithm == FF_CHECKSUM_NONE ? FastFHIR::FF_HashCallback{}
+                                                  : FastFHIR::FF_HashCallback{bench_null_sha256},
+      },
+      view);
+  if (!result) {
+    throw std::runtime_error("FF_StreamFinalize failed for " + std::string(context) + ": " +
+                             result.message);
+  }
+  return view;
+}
+
+// Reads a FHIR text-valued field off a FastFHIR node.
+//
+// Upstream DT-2 packs date / dateTime / time / instant into an inline 8-byte
+// slot, so Node::as<std::string_view>() -- which demands a string-layout
+// recovery tag -- throws "Node is not a string or code" on Patient.birthDate.
+// Only values that do not fit the packed form spill to an FF_STRING, and the
+// parser hands those back already tagged as strings, so the fast path below
+// still covers them.
+//
+// There is no public zero-copy accessor that renders a packed date/time as
+// text; print_json is the only public path, and it costs an ostringstream plus
+// JSON escaping that the string case does not pay. That asymmetry is a real
+// measurement distortion in the FastFHIR arm's query stage -- see notes.md,
+// "Packed date/time has no zero-copy public reader".
+inline std::string read_text_field(const FastFHIR::Reflective::Node& node) {
+  if (!node) {
+    return {};
+  }
+  if (node.kind() == FF_FIELD_DATETIME) {
+    std::ostringstream oss;
+    node.print_json(oss);
+    std::string text = oss.str();
+    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+      return text.substr(1, text.size() - 2);
+    }
+    return text;
+  }
+  return std::string(node.as<std::string_view>());
+}
+
+// ---------------------------------------------------------------------------
+// Cross-arena choice[x] sanitisation -- READ THIS BEFORE TRUSTING TEST 1.
+// ---------------------------------------------------------------------------
+// FastFHIR's generated deserializer stores a BLOCK-typed choice variant
+// (valueQuantity, valueCodeableConcept, valuePeriod, ...) as the raw child
+// OFFSET of that block, in the ChoiceEntry's uint64_t alternative:
+//
+//     generated_src/FF_Observation.cpp:319
+//         else data.value.value = child_off;   // offset into the SOURCE arena
+//
+// The POCO carries no base pointer, so that offset is meaningless outside the
+// arena it was read from -- and this benchmark hydrates POCOs from one arena
+// and serializes them into another, which is precisely the unsupported move.
+//
+// The generated STORE then writes the foreign offset straight back out and
+// tags the slot as a block, so the damage is not confined to code the benchmark
+// controls: appending a hydrated POCO wholesale via Builder::append() is enough
+// to corrupt the destination stream. validate_FFHR_stream() reports "the offset
+// chain is broken", and reading it back segfaults in
+// FF_CODEABLECONCEPT::deserialize.
+//
+// Clearing these at hydration is the only place that fixes every path at once,
+// and it has a second benefit: all four arms then receive byte-identical POCOs,
+// which is what the parity axiom actually requires.
+//
+// COST: Test 1 does not measure value[x] serialization at all. Fixing it needs
+// the source arena base plumbed through so the block can be deep-copied. See
+// notes.md, "Block-typed choice[x] cannot cross arenas".
+// True when a ChoiceEntry's payload is an ARENA-RELATIVE reference rather than
+// a self-contained value, and therefore cannot be re-serialized into a
+// different arena.
+//
+// Three shapes reach the uint64_t alternative, and only some are portable:
+//
+//   BLOCK    always a child offset into the source arena         -> NOT portable
+//   CODE     dictionary index (MSB clear)                        -> portable
+//            packed FF_CODEABLE_CONCEPT offset (MSB set)         -> NOT portable
+//   DATETIME packed civil value (bit 63 clear)                   -> portable
+//            fallback offset to an FF_STRING (bit 63 set)        -> NOT portable
+//
+// Missing the CODE case is what kept this bug alive through the first three
+// attempts at a fix: Synthea's us-core-race / us-core-ethnicity extensions carry
+// valueCode, so ~337 slots per corpus slipped through a BLOCK-only test and
+// corrupted the stream anyway.
+inline bool is_cross_arena_choice(const ChoiceEntry& choice) {
+  if (choice.is_empty() || !std::holds_alternative<uint64_t>(choice.value)) {
+    return false;
+  }
+  const uint64_t raw = std::get<uint64_t>(choice.value);
+  switch (Recovery_to_Kind(choice.tag)) {
+    case FF_FIELD_BLOCK:
+      return true;
+    case FF_FIELD_CODE:
+      return (static_cast<uint32_t>(raw) & FF_CODEABLE_CONCEPT_FLAG) != 0;
+    case FF_FIELD_DATETIME:
+      return raw != FF_DATETIME_NULL && FF_DATETIME_IS_FALLBACK(raw);
+    default:
+      return false;
+  }
+}
+
+// Retained name for the arm-side call sites.
+inline bool is_cross_arena_block_choice(const ChoiceEntry& choice) {
+  return is_cross_arena_choice(choice);
+}
+
+inline void sanitize_choice(ChoiceEntry& choice) {
+  if (is_cross_arena_block_choice(choice)) {
+    choice = ChoiceEntry{};
+  }
+}
+
+inline void sanitize_extensions(std::vector<ExtensionData>& extensions) {
+  for (auto& ext : extensions) {
+    sanitize_choice(ext.value);
+    sanitize_extensions(ext.extension);
+  }
+}
+
+// Every FHIR datatype carries its own `extension` vector, so an offending
+// ChoiceEntry can hide arbitrarily deep -- Synthea alone puts extensions on
+// Patient, Patient.address (geolocation) and Patient.name. Sweep each nested
+// vector rather than only the top-level ones.
+template <typename T>
+inline void sanitize_each(std::vector<T>& items) {
+  for (auto& item : items) {
+    sanitize_extensions(item.extension);
+  }
+}
+
+inline void sanitize_codeable_concept(CodeableConceptData& concept_data) {
+  sanitize_extensions(concept_data.extension);
+  sanitize_each(concept_data.coding);
+}
+
+inline void sanitize_reference_range(ObservationreferenceRangeData& range) {
+  sanitize_extensions(range.extension);
+  sanitize_extensions(range.modifierextension);
+  if (range.low) sanitize_extensions(range.low->extension);
+  if (range.high) sanitize_extensions(range.high->extension);
+  if (range.type) sanitize_codeable_concept(*range.type);
+  for (auto& applies : range.appliesto) sanitize_codeable_concept(applies);
+  if (range.age) sanitize_extensions(range.age->extension);
+}
+
+inline void sanitize_observation(ObservationData& observation) {
+  sanitize_choice(observation.value);
+  sanitize_choice(observation.effective);
+  sanitize_choice(observation.instantiates);
+  sanitize_extensions(observation.extension);
+  sanitize_extensions(observation.modifierextension);
+
+  if (observation.meta) sanitize_extensions(observation.meta->extension);
+  if (observation.text) sanitize_extensions(observation.text->extension);
+  sanitize_each(observation.identifier);
+  sanitize_each(observation.basedon);
+  sanitize_each(observation.partof);
+  sanitize_each(observation.focus);
+  sanitize_each(observation.performer);
+  sanitize_each(observation.note);
+  sanitize_each(observation.hasmember);
+  sanitize_each(observation.derivedfrom);
+  sanitize_each(observation.triggeredby);
+
+  for (auto& category : observation.category) sanitize_codeable_concept(category);
+  for (auto& interpretation : observation.interpretation) sanitize_codeable_concept(interpretation);
+  if (observation.code) sanitize_codeable_concept(*observation.code);
+  if (observation.dataabsentreason) sanitize_codeable_concept(*observation.dataabsentreason);
+  if (observation.bodysite) sanitize_codeable_concept(*observation.bodysite);
+  if (observation.method) sanitize_codeable_concept(*observation.method);
+
+  if (observation.subject) sanitize_extensions(observation.subject->extension);
+  if (observation.encounter) sanitize_extensions(observation.encounter->extension);
+  if (observation.specimen) sanitize_extensions(observation.specimen->extension);
+  if (observation.device) sanitize_extensions(observation.device->extension);
+  if (observation.bodystructure) sanitize_extensions(observation.bodystructure->extension);
+
+  for (auto& range : observation.referencerange) sanitize_reference_range(range);
+
+  for (auto& component : observation.component) {
+    sanitize_choice(component.value);
+    sanitize_extensions(component.extension);
+    sanitize_extensions(component.modifierextension);
+    if (component.code) sanitize_codeable_concept(*component.code);
+    if (component.dataabsentreason) sanitize_codeable_concept(*component.dataabsentreason);
+    for (auto& interpretation : component.interpretation) sanitize_codeable_concept(interpretation);
+    for (auto& range : component.referencerange) sanitize_reference_range(range);
+  }
+}
+
+inline void sanitize_patient(PatientData& patient) {
+  sanitize_choice(patient.deceased);
+  sanitize_choice(patient.multiplebirth);
+  sanitize_extensions(patient.extension);
+  sanitize_extensions(patient.modifierextension);
+
+  sanitize_each(patient.identifier);
+  sanitize_each(patient.name);
+  sanitize_each(patient.telecom);
+  sanitize_each(patient.address);
+  sanitize_each(patient.photo);
+  sanitize_each(patient.contact);
+  sanitize_each(patient.communication);
+  sanitize_each(patient.generalpractitioner);
+  sanitize_each(patient.link);
+
+  if (patient.meta) sanitize_extensions(patient.meta->extension);
+  if (patient.text) sanitize_extensions(patient.text->extension);
+  if (patient.maritalstatus) sanitize_codeable_concept(*patient.maritalstatus);
+  if (patient.managingorganization) sanitize_extensions(patient.managingorganization->extension);
+
+  for (auto& contact : patient.contact) {
+    sanitize_each(contact.relationship);
+    sanitize_each(contact.telecom);
+    if (contact.name) sanitize_extensions(contact.name->extension);
+    if (contact.address) sanitize_extensions(contact.address->extension);
+  }
+  for (auto& communication : patient.communication) {
+    if (communication.language) sanitize_codeable_concept(*communication.language);
+  }
+}
 
 // One ingested Synthea patient item kept in RAM.
 // The FastFHIR::Memory arena contains the serialized FFHR patient binary.
@@ -254,6 +529,22 @@ inline void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
   copy_resources_for_patient(condition_nodes, bundle_patient.patient.id, bundle_patient.conditions);
   copy_resources_for_patient(procedure_nodes, bundle_patient.patient.id, bundle_patient.procedures);
   copy_resources_for_patient(observation_nodes, bundle_patient.patient.id, bundle_patient.observations);
+
+  // Drop choice[x] variants that carry a source-arena offset. They cannot be
+  // re-serialized into another arena, and leaving them in corrupts the FastFHIR
+  // arm's stream and feeds the other arms a raw offset as if it were a value.
+  // Doing it here means every arm receives byte-identical POCOs. See the
+  // sanitize_choice() commentary above and notes.md.
+  sanitize_patient(bundle_patient.patient);
+  for (auto& observation : bundle_patient.observations) {
+    sanitize_observation(observation);
+    if (std::getenv("BENCH_DROP_OBS_CODE")) observation.code.reset();
+    if (std::getenv("BENCH_DROP_OBS_CAT")) observation.category.clear();
+    if (std::getenv("BENCH_DROP_OBS_COMP")) observation.component.clear();
+    if (std::getenv("BENCH_DROP_OBS_EXT")) { observation.extension.clear(); observation.modifierextension.clear(); }
+    if (std::getenv("BENCH_DROP_OBS_RR")) observation.referencerange.clear();
+    if (std::getenv("BENCH_DROP_OBS_INTERP")) observation.interpretation.clear();
+  }
 }
 
 // Extract a key=value field from a queried_value string.

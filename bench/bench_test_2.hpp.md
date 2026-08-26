@@ -1,5 +1,15 @@
 # `bench_test_2.hpp` — Materialization (Test 2)
 
+> ⚠️ **Corrected 2026-08-25 — this stage was measuring almost nothing.**
+> `touch_tree()` walked objects with `entries()`, which returns elements of an
+> *array*; blocks need `fields()`. The FastFHIR arm therefore visited **1 node**
+> while the JSON, HL7v2 and Google arms visited ~8,000, and the reported duration
+> was 333 ns.
+>
+> Now mirrors `read_path_bench.cpp::walk_node()` and visits 4,443 nodes
+> (~108 µs). Node counts still differ per format for identical clinical content,
+> so Test 2 is **not yet normalized**. See [notes.md](../notes.md) §2.
+
 ## Purpose
 
 Implements **Test 2 (Materialize)**: taking each arm's serialized output and parsing it back into an in-memory tree or object model, then recursively walking every node to measure the full materialization cost.

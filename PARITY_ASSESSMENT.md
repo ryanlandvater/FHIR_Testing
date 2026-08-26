@@ -4,6 +4,31 @@
 **Scope**: Fairness audit of all four benchmark arms across all four test stages, with concrete hardening recommendations
 **Conclusion**: Test 3 fixed. Tests 1, 2, and 4 are structurally fair — format-inherent differences are the findings, not flaws. Hardening recommendations provided for rebuttal-proof publication.
 
+> **Reviewed 2026-08-24 — reasoning stands, verification does not.** This audit
+> predates the upstream FastFHIR change, and its "✅ Fixed" markers describe a
+> benchmark that does not currently build ([TASKS.md § PORT](TASKS.md)). The
+> structural fairness arguments below are unaffected by the port and remain the
+> right frame; the claims that a given behaviour *was verified* need re-running
+> once the build is green.
+>
+> One finding is materially changed and should be read before the rest:
+>
+> **Test 1's size comparison was not apples-to-apples.** FastFHIR used to
+> silently drop resource types outside the compiled profile — one Synthea
+> bundle lost 41 of 250 records and still reported success. The FastFHIR arm
+> was therefore serializing *less data* than the other three arms, invisibly,
+> in exactly the direction that flattered it. That is fixed (out-of-profile
+> resources are retained as opaque JSON), but it means **every pre-2026-08-24
+> size and throughput figure in this repo is void**, and the Test 1 verdict
+> below was reached on numbers that no longer apply.
+>
+> A second consequence lands on Test 3: opaque resources are not
+> typed-navigable, so a "query every resource" stage silently skips them —
+> 1,444 `ImagingStudy` records in the Synthea corpus. That is a new fairness
+> question this audit never considered. See
+> [README § Result provenance](README.md#result-provenance) and
+> [TASKS.md § CORPUS](TASKS.md).
+
 ---
 
 ## Assessment Summary

@@ -103,22 +103,53 @@ cc_test(name = "timing_conformance_test", ...)
 
 Two forms of the same conformance test — one binary, one `bazel test` target. Uses only `bench_core_common` (FFHR + JSON arms).
 
+⛔ Both currently fail to build — [TASKS.md § PORT-1, PORT-3](../TASKS.md).
+
+### `read_path_bench` — cc_binary
+
+```python
+cc_binary(
+    name = "read_path_bench",
+    srcs = ["read_path_bench.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:fastfhir_runtime"],
+)
+```
+
+Read-path traversal validation: reports whole-document traversal cost as an
+average per Bundle entry and **fails (exit 1) above 50 µs/entry**. Depends only
+on `//:fastfhir_runtime`, not on the shared bench headers — which is why it is
+**the only target that currently builds**, and the reference for how the
+ported arms should call the FastFHIR API. See
+[`read_path_bench.cpp.md`](read_path_bench.cpp.md).
+
+```bash
+bazel run //bench:read_path_bench -- /path/to/bundle.ffhr
+```
+
 ### `bench_harness_win` — cc_binary
 
 ```python
 cc_binary(
     name = "bench_harness_win",
     srcs = ["main.cpp"],
+    data = ["enrich.json"],
     deps = [
-        ":bench_core_common",
-        ":bench_core_hl7v2",
+        ":bench_core_harness",
         "@libpq_win//:libpq",
     ],
-    defines = ["HAVE_LIBPQ", "HAVE_HL7V2"],
+    defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
 )
 ```
 
-Windows-specific build without Google FHIR. Links against a Windows libpq.
+Windows build linking a Windows libpq. **All four arms, Google FHIR included** —
+it differs from `bench_harness` only in the libpq it links (`@libpq_win//:libpq`
+instead of Homebrew's) and in dropping the macOS-specific rpath/link options.
+
+*(An earlier revision of this doc claimed this target excluded Google FHIR.
+That was wrong — the four-arm comparison is the point of the benchmark, and
+dropping an arm on one platform would make the two platforms
+non-comparable.)*
 
 ## Platform Preprocessor Defines
 

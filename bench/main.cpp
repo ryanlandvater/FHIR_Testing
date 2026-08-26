@@ -127,6 +127,10 @@ int main(int argc, char **argv)
   bool bundle_max_mb_explicit = false;
   int64_t fastfhir_vma_mb = 0;
   std::string db_connstr;
+  // Bundle composition was seeded from std::random_device, so two runs of the
+  // same command measured different bundles and a corruption bug reproduced
+  // only intermittently. Default to a fixed seed; --seed 0 restores random.
+  unsigned int rng_seed = 20260825u;
   std::vector<int64_t> target_sizes_bytes = {
       1LL * 1024 * 1024,
       2LL * 1024 * 1024,
@@ -164,6 +168,10 @@ int main(int argc, char **argv)
     else if (args[i] == "--db" && i + 1 < args.size())
     {
       db_connstr = std::string(args[i + 1]);
+    }
+    else if (args[i] == "--seed" && i + 1 < args.size())
+    {
+      rng_seed = static_cast<unsigned int>(std::strtoul(args[i + 1].data(), nullptr, 10));
     }
     else if (args[i] == "--bundle-targets-mb" && i + 1 < args.size())
     {
@@ -237,7 +245,9 @@ int main(int argc, char **argv)
   }
   std::cerr << "Loaded " << all_patients.size() << " patients.\n\n";
 
-  std::mt19937 rng(std::random_device{}());
+  std::mt19937 rng(rng_seed != 0 ? rng_seed : std::random_device{}());
+  std::cerr << "Bundle composition seed: "
+            << (rng_seed != 0 ? std::to_string(rng_seed) : std::string("random")) << "\n";
   std::uniform_int_distribution<std::size_t> patient_dist(0, all_patients.size() - 1);
 
   std::cout << "arm,test,duration_ns,target_mb,patients_in_bundle\n"
@@ -318,9 +328,16 @@ int main(int argc, char **argv)
     PQclear(r);
   };
 #else
-  // Stub — no PostgreSQL client available on this platform.
-  PGconn *db_conn = nullptr; // unused
-  int run_id = -1;
+  // Stub — built without libpq (the default //bench:bench_harness target).
+  // PGconn is a libpq type, so it cannot even be *named* here; the previous
+  // `PGconn *db_conn = nullptr;` only ever compiled because HAVE_LIBPQ was
+  // always defined. Build //bench:bench_harness_pg for --db support.
+  if (!db_connstr.empty())
+  {
+    std::cerr << "Warning: --db was given but this binary was built without libpq; "
+                 "metrics will be written to stdout only. "
+                 "Use //bench:bench_harness_pg for PostgreSQL persistence.\n";
+  }
   auto insert_metric = [](const bench::MetricEvent &, int64_t, int64_t) {};
 #endif
 

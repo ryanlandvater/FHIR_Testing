@@ -1,5 +1,17 @@
 # `main.cpp` — Benchmark Harness Entry Point
 
+> ✅ **Builds and runs 2026-08-25.** Two changes worth knowing:
+>
+> - **`--seed N`** fixes bundle composition (default `20260825`; `--seed 0`
+>   restores random). It was previously seeded from `std::random_device`, so two
+>   runs of the same command measured different data — which made a corruption
+>   bug reproduce only intermittently. See [notes.md](../notes.md) §5.
+> - **PostgreSQL is opt-in.** The default `//bench:bench_harness` links no libpq
+>   and warns if `--db` is passed. Build `//bench:bench_harness_pg` for `--db`.
+>
+> ⚠️ `main.cpp:31` still prefers a hardcoded developer path for the corpus —
+> tracked in [TASKS.md § INFRA](../TASKS.md).
+
 ## Purpose
 
 The **main executable** of the benchmark harness. It discovers Synthea JSON files, builds `BundleBenchFixture` instances at various target sizes, runs all four arms (FastFHIR, JSON, HL7v2, Google FHIR) with configurable iterations and warmup, and writes results to stdout (CSV) and optionally to PostgreSQL.

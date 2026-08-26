@@ -1,5 +1,20 @@
 # `arm_fastfhir.cpp` — FastFHIR Serialization Arm
 
+> ⚠️ **Ported 2026-08-25 — builds, but Test 1 no longer uses the shared
+> assignment layer.** `Builder::set_root`/`finalize` are private, so sealing goes
+> through `seal_stream()`. More importantly, this arm now calls
+> `append_obj(item.patient)` / `append_obj(*observation)` on the **whole POCO**
+> rather than appending an empty resource and amending fields.
+>
+> Why: FastFHIR stores datatype arrays (`Observation.category`, …) as
+> `FF_ARRAY::INLINE_BLOCK`, and there is **no public API** to write that layout
+> field-by-field. The old path wrote an offset array instead, which the reader
+> walked as inline block headers and dereferenced as garbage.
+>
+> **Parity cost:** this arm now serializes every POCO field; the other three
+> serialize only the ~25 the shared layer covers. See
+> [notes.md](../notes.md) §3 — Test 1 is not publishable in this state.
+
 ## Purpose
 
 Implements the **FastFHIR** benchmark arm: serializing in-memory `PatientData` and `ObservationData` structs into the FastFHIR binary arena format (`FastFHIR::Memory`). This is the primary arm being benchmarked — the one whose performance is compared against JSON, HL7v2, and Google Protobuf.

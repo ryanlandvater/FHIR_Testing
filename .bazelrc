@@ -1,6 +1,6 @@
 build --enable_bzlmod=true
 build --cxxopt=-std=c++20
-build --cxxopt=/std:c++20
+build:windows --cxxopt=/std:c++20
 build --cxxopt=-D_ENABLE_EXTENDED_ALIGNED_STORAGE
 build --compilation_mode=opt
 build --announce_rc

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+
 /*
 IMPORTANT BENCHMARK NOTE
 
@@ -53,8 +55,45 @@ namespace
 #include <variant>
 #include <vector>
 
+
+// ---------------------------------------------------------------------------
+// Per-arm namespace -- REQUIRED FOR CORRECTNESS, not style.
+// ---------------------------------------------------------------------------
+// Each arm compiles these headers with a different ARM_* macro, so the SAME
+// type and function names get four DIFFERENT definitions across four
+// translation units: bench::test_2::MaterializedTree holds a
+// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
+// two protobuf vectors in a third.
+//
+// That is a One Definition Rule violation. The linker keeps one definition of
+// each inline function and destructor and discards the rest, so an object built
+// with one layout gets destroyed with another. It manifests as heap corruption
+// far from the cause -- ASan caught it as a SEGV inside
+// ~vector<google::fhir::r4::core::Observation> from
+// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
+// apparent crash site around between -c opt and -c dbg builds, which is the
+// classic signature.
+//
+// An inline namespace gives each arm its own mangled symbols while leaving
+// every existing call site (bench::test_2::query, bench::assign::assign_patient)
+// spelled exactly as before.
+#ifndef BENCH_ARM_NS
+#if defined(ARM_FASTFHIR)
+#define BENCH_ARM_NS arm_fastfhir
+#elif defined(ARM_JSON)
+#define BENCH_ARM_NS arm_json
+#elif defined(ARM_HL7V2)
+#define BENCH_ARM_NS arm_hl7v2
+#elif defined(ARM_GOOGLE_FHIR)
+#define BENCH_ARM_NS arm_google_fhir
+#else
+#define BENCH_ARM_NS arm_none
+#endif
+#endif
+
 namespace bench::assign
 {
+inline namespace BENCH_ARM_NS {
 
 #if defined(ARM_GOOGLE_FHIR)
   struct GooglePatientTarget
@@ -73,6 +112,46 @@ namespace bench::assign
   {
 
     using Json = nlohmann::json;
+
+    // ---------------------------------------------------------------------
+    // Cross-arena choice[x] limitation -- READ THIS BEFORE TRUSTING TEST 1.
+    // ---------------------------------------------------------------------
+    // FastFHIR's generated deserializer stores a BLOCK-typed choice variant
+    // (valueQuantity, valueCodeableConcept, valuePeriod, ...) as the raw child
+    // OFFSET of that block, in the ChoiceEntry's uint64_t alternative:
+    //
+    //     generated_src/FF_Observation.cpp:319
+    //         else data.value.value = child_off;   // offset into the SOURCE arena
+    //
+    // That offset is only meaningful inside the arena it was read from. The
+    // POCO carries no base pointer, so a ChoiceEntry alone cannot be re-serialized
+    // into a different arena -- and every arm here does exactly that, because the
+    // fixtures are hydrated from one arena and the arms serialize into another.
+    //
+    // What each arm did with it before this was noticed (2026-08-25):
+    //   * FastFHIR arm: wrote the foreign offset into a slot tagged as a block,
+    //     producing a STRUCTURALLY CORRUPT stream. validate_FFHR_stream() reports
+    //     "the offset chain is broken", and reading it back segfaults in
+    //     FF_CODEABLECONCEPT::deserialize.
+    //   * JSON arm: emitted {"valueQuantity": 55683} -- a raw arena offset as a
+    //     JSON number. Valid JSON, meaningless FHIR.
+    //   * Google/HL7v2 arms: same integer, same meaninglessness.
+    //
+    // So NO arm has ever serialized a real valueQuantity. Rather than have one
+    // arm corrupt its stream and the others emit nonsense, every arm now SKIPS
+    // block-typed choices uniformly. That keeps the arms comparable and the
+    // streams valid, at the cost of Test 1 not measuring value[x] at all.
+    //
+    // Fixing it properly needs the source arena base plumbed into the assignment
+    // sink so the block can be deep-copied (deserialize from source, append into
+    // destination). That is the single biggest correctness gap in the benchmark
+    // -- see notes.md, "Block-typed choice[x] cannot cross arenas".
+    inline bool is_cross_arena_block_choice(const ChoiceEntry &choice)
+    {
+      return !choice.is_empty() &&
+             std::holds_alternative<uint64_t>(choice.value) &&
+             Recovery_to_Kind(choice.tag) == FF_FIELD_BLOCK;
+    }
 
     inline bool has_u8(uint8_t v) { return v != FF_NULL_UINT8; }
     inline bool has_u32(uint32_t v) { return v != FF_NULL_UINT32; }
@@ -147,41 +226,41 @@ namespace bench::assign
       return static_cast<int64_t>(epoch_seconds) * 1000000LL;
     }
 
-    inline GoogleAdministrativeGenderValue google_map_gender(AdministrativeGender gender)
+    inline GoogleAdministrativeGenderValue google_map_gender(FF_AdministrativeGender gender)
     {
       switch (gender)
       {
-      case AdministrativeGender::Male:
+      case FF_AdministrativeGender::Male:
         return google::fhir::r4::core::AdministrativeGenderCode_Value_MALE;
-      case AdministrativeGender::Female:
+      case FF_AdministrativeGender::Female:
         return google::fhir::r4::core::AdministrativeGenderCode_Value_FEMALE;
-      case AdministrativeGender::Other:
+      case FF_AdministrativeGender::Other:
         return google::fhir::r4::core::AdministrativeGenderCode_Value_OTHER;
-      case AdministrativeGender::Unknown:
+      case FF_AdministrativeGender::Unknown:
       default:
         return google::fhir::r4::core::AdministrativeGenderCode_Value_UNKNOWN;
       }
     }
 
-    inline GoogleObservationStatusValue google_map_observation_status(ObservationStatus status)
+    inline GoogleObservationStatusValue google_map_observation_status(FF_ObservationStatus status)
     {
       switch (status)
       {
-      case ObservationStatus::Registered:
+      case FF_ObservationStatus::Registered:
         return google::fhir::r4::core::ObservationStatusCode_Value_REGISTERED;
-      case ObservationStatus::Preliminary:
+      case FF_ObservationStatus::Preliminary:
         return google::fhir::r4::core::ObservationStatusCode_Value_PRELIMINARY;
-      case ObservationStatus::Final:
+      case FF_ObservationStatus::Final:
         return google::fhir::r4::core::ObservationStatusCode_Value_FINAL;
-      case ObservationStatus::Amended:
+      case FF_ObservationStatus::Amended:
         return google::fhir::r4::core::ObservationStatusCode_Value_AMENDED;
-      case ObservationStatus::Corrected:
+      case FF_ObservationStatus::Corrected:
         return google::fhir::r4::core::ObservationStatusCode_Value_CORRECTED;
-      case ObservationStatus::Cancelled:
+      case FF_ObservationStatus::Cancelled:
         return google::fhir::r4::core::ObservationStatusCode_Value_CANCELLED;
-      case ObservationStatus::EnteredInError:
+      case FF_ObservationStatus::EnteredInError:
         return google::fhir::r4::core::ObservationStatusCode_Value_ENTERED_IN_ERROR;
-      case ObservationStatus::Unknown:
+      case FF_ObservationStatus::Unknown:
       default:
         return google::fhir::r4::core::ObservationStatusCode_Value_UNKNOWN;
       }
@@ -216,8 +295,12 @@ namespace bench::assign
         pb_ext->mutable_id()->set_value(std::string(src.id));
       }
 
-      // Google FHIR requires a URL. Mocking one from your ext_ref integer.
-      pb_ext->mutable_url()->set_value("http://example.org/ext/" + std::to_string(src.ext_ref));
+      // Google FHIR requires a URL. Mocking one from the URL intern-table index.
+      // NOTE: src.url is an index into FastFHIR's URL directory, not a URL. A
+      // faithful arm would resolve it via Parser::url_directory(); mocking keeps
+      // the pre-port behaviour. See notes.md "Extension URL interning".
+      if (src.url != FF_NULL_UINT32)
+        pb_ext->mutable_url()->set_value("http://example.org/ext/" + std::to_string(src.url));
 
       // Map the ChoiceEntry variant to Extension.value[x]
       if (!src.value.is_empty())
@@ -284,6 +367,12 @@ namespace bench::assign
     inline void write_choice(Json &out, const std::string_view base, const ChoiceEntry &choice)
     {
       if (choice.is_empty())
+      {
+        return;
+      }
+      // See is_cross_arena_block_choice(): this used to emit the raw source-arena
+      // offset as a JSON number (e.g. {"valueQuantity": 55683}).
+      if (is_cross_arena_block_choice(choice))
       {
         return;
       }
@@ -375,8 +464,9 @@ namespace bench::assign
         for (const auto &e : src.extension)
           out["extension"].push_back(to_json_extension(e));
       }
-      if (src.ext_ref != 0)
-        out["urlIndex"] = src.ext_ref;
+      // FF_NULL_UINT32 is "absent"; 0 is a legitimate intern index.
+      if (src.url != FF_NULL_UINT32)
+        out["urlIndex"] = src.url;
       write_choice(out, "value", src.value);
       return out;
     }
@@ -636,10 +726,14 @@ namespace bench::assign
       put_if_string(out, "id", src.id);
       put_if_string(out, "contentType", src.contenttype);
       put_if_string(out, "language", src.language);
-      put_if_string(out, "data", src.data);
+      // PORT-6: Attachment.data / .hash are std::unique_ptr<std::string_view>
+      // upstream -- the base64 payload that compaction used to drop (CMP-1).
+      if (src.data)
+        put_if_string(out, "data", *src.data);
       put_if_string(out, "url", src.url);
       put_if_u32(out, "size", src.size);
-      put_if_string(out, "hash", src.hash);
+      if (src.hash)
+        put_if_string(out, "hash", *src.hash);
       put_if_string(out, "title", src.title);
       put_if_string(out, "creation", src.creation);
       put_if_u32(out, "height", src.height);
@@ -977,7 +1071,10 @@ namespace bench::assign
     template <typename Target>
     inline void hl7_mark_if_choice(Target &dst, const char *field_name, const ChoiceEntry &choice)
     {
-      if (!choice.is_empty())
+      // A block-typed choice would render as an empty {} through write_choice
+      // now that the raw-offset branch is gone -- skip it rather than emit an
+      // empty ZFX field the other arms do not write.
+      if (!choice.is_empty() && !is_cross_arena_block_choice(choice))
       {
         hl7_append_json_field(dst, field_name, hl7_json_value(choice));
       }
@@ -993,37 +1090,76 @@ namespace bench::assign
       FastFHIR::Reflective::ObjectHandle handle;
     };
 
+    // PORT-7 (2026-08-25): this used to hand-roll the custom-CODE wire encoding
+    // -- append a bare FF_STRING, compute an offset relative to the SLOT, OR in
+    // FF_CUSTOM_STRING_FLAG. Every part of that is now wrong:
+    //
+    //   * FF_CUSTOM_STRING_FLAG no longer exists.
+    //   * The discriminator moved from bit 30 to bit 31 (FF_CODEABLE_CONCEPT_FLAG),
+    //     reclaiming bit 30 for payload.
+    //   * With the flag set the offset now targets an FF_CODEABLE_CONCEPT block,
+    //     not a bare FF_STRING, and is relative to the CONTAINING BLOCK rather
+    //     than to the slot.
+    //
+    // Substituting the new constant would have emitted a valid-looking slot
+    // pointing at the wrong block type -- wrong bytes, no compile error. So the
+    // hand-rolled path is gone; ENCODE_FF_CODE is the public encoder and owns
+    // both branches (dictionary hit -> 31-bit index with MSB clear; miss ->
+    // packed relative offset with MSB set). See notes.md.
     inline void stream_assign_code_field(PatientStreamSink &dst, FF_FieldKey key, std::string_view code_value)
     {
+      const Offset block_offset = dst.handle.offset();
+
       if (code_value.empty())
       {
-        dst.builder.amend_scalar<uint32_t>(dst.handle.offset(), key.field_offset, FF_CODE_NULL);
+        dst.builder.amend_scalar<uint32_t>(block_offset, key.field_offset, FF_CODE_NULL);
         return;
       }
 
-      uint32_t raw_code = FF_GetDictionaryCode(std::string(code_value), dst.builder.FhirVersion());
-      if (raw_code == FF_CODE_NULL)
+      const std::string code_str(code_value);
+      const uint32_t version = dst.builder.FhirVersion();
+
+      // Fast path: permanent-dictionary hit needs no child space at all.
+      uint32_t slot = FF_GetDictionaryCode(code_str, version);
+      if (slot == FF_CODE_NULL)
       {
-        const auto string_offset = dst.builder.append(std::string_view(code_value));
-        const auto code_slot_offset = dst.handle.offset() + key.field_offset;
-        if (string_offset < code_slot_offset)
+        // Miss: ENCODE_FF_CODE writes an FF_CODEABLE_CONCEPT into child space
+        // and advances the cursor, so claim exactly SIZE_FF_CODE bytes first.
+        const Size child_size = SIZE_FF_CODE(code_value, version);
+        Offset child_off =
+            FastFHIR::AdvancedBuilderAccess(dst.builder).UNSAFE_allocate_raw(child_size);
+        if (child_off == FF_NULL_OFFSET)
         {
-          throw std::runtime_error("FastFHIR benchmark assignment: custom CODE string offset is before code slot");
+          throw std::runtime_error(
+              "FastFHIR benchmark assignment: arena claim failed for custom CODE '" + code_str + "'");
         }
-        const auto relative_offset = string_offset - code_slot_offset;
-        if (relative_offset > 0x7FFFFFFF)
+
+        const Offset child_begin = child_off;
+        slot = ENCODE_FF_CODE(dst.builder.memory().base(), block_offset, child_off,
+                                        code_str, version,
+                                        FF_CodeableConceptSystem::UNKNOWN);
+
+        // The SIZE/ENCODE contract is the same one Builder::append enforces for
+        // SIZE/STORE: a disagreement means the next claim overlaps this block.
+        if (child_off != child_begin + child_size)
         {
-          throw std::runtime_error("FastFHIR benchmark assignment: custom CODE relative offset exceeds 31-bit range");
+          throw std::runtime_error(
+              "FastFHIR benchmark assignment: SIZE_FF_CODE/ENCODE_FF_CODE disagree for '" +
+              code_str + "' (claimed " + std::to_string(child_size) + ", wrote " +
+              std::to_string(child_off - child_begin) + ")");
         }
-        raw_code = static_cast<uint32_t>(relative_offset) | FF_CUSTOM_STRING_FLAG;
       }
-      dst.builder.amend_scalar<uint32_t>(dst.handle.offset(), key.field_offset, raw_code);
+      dst.builder.amend_scalar<uint32_t>(block_offset, key.field_offset, slot);
     }
 
     inline void stream_assign_choice_field(PatientStreamSink &dst, FF_FieldKey key, const ChoiceEntry &choice,
                                            const char *field_name)
     {
       if (choice.is_empty())
+        return;
+      // See is_cross_arena_block_choice(): writing the foreign offset here is
+      // what corrupted the arm's own stream ("the offset chain is broken").
+      if (detail::is_cross_arena_block_choice(choice))
         return;
 
       auto assign_raw_variant = [&](uint64_t raw_bits)
@@ -1218,7 +1354,7 @@ namespace bench::assign
 #elif defined(ARM_FASTFHIR)
     inline void assign_patient_gender(const PatientData &src, PatientStreamSink &dst)
     {
-      stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::GENDER, FF_AdministrativeGenderToString(src.gender));
+      stream_assign_code_field(dst, FastFHIR::Fields::PATIENT::GENDER, serialize_AdministrativeGender(src.gender));
     }
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_gender(const PatientData &src, GooglePatientTarget &dst)
@@ -1241,7 +1377,7 @@ namespace bench::assign
     inline void assign_patient_birth_date(const PatientData &src, PatientStreamSink &dst)
     {
       if (!src.birthdate.empty())
-        dst.handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = src.birthdate;
+        dst.handle[FastFHIR::Fields::PATIENT::BIRTH_DATE] = std::string_view(src.birthdate);
     }
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_birth_date(const PatientData &src, GooglePatientTarget &dst)
@@ -1717,14 +1853,15 @@ namespace bench::assign
           pb_photo->mutable_content_type()->set_value(std::string(photo.contenttype));
         if (!photo.language.empty())
           pb_photo->mutable_language()->set_value(std::string(photo.language));
-        if (!photo.data.empty())
-          pb_photo->mutable_data()->set_value(std::string(photo.data));
+        // PORT-6: Attachment.data / .hash are std::unique_ptr<std::string_view>.
+        if (photo.data && !photo.data->empty())
+          pb_photo->mutable_data()->set_value(std::string(*photo.data));
         if (!photo.url.empty())
           pb_photo->mutable_url()->set_value(std::string(photo.url));
         if (photo.size != FF_NULL_UINT32)
           pb_photo->mutable_size()->set_value(photo.size);
-        if (!photo.hash.empty())
-          pb_photo->mutable_hash()->set_value(std::string(photo.hash));
+        if (photo.hash && !photo.hash->empty())
+          pb_photo->mutable_hash()->set_value(std::string(*photo.hash));
         if (!photo.title.empty())
           pb_photo->mutable_title()->set_value(std::string(photo.title));
         // Note: photo.creation omitted here; requires passing through google_birthdate_to_us() and assigning to DateTime
@@ -1759,7 +1896,7 @@ namespace bench::assign
       {
         auto *pb_contact = dst.patient.add_contact();
 
-        if (contact.gender != AdministrativeGender::Unknown)
+        if (contact.gender != FF_AdministrativeGender::Unknown)
         {
           pb_contact->mutable_gender()->set_value(google_map_gender(contact.gender));
         }
@@ -2265,12 +2402,12 @@ namespace bench::assign
 #if defined(ARM_JSON)
     inline void assign_observation_status(const ObservationData &src, Json &dst)
     {
-      put_if_string(dst, "status", FF_ObservationStatusToString(src.status));
+      put_if_string(dst, "status", serialize_ObservationStatus(src.status));
     }
 #elif defined(ARM_FASTFHIR)
     inline void assign_observation_status(const ObservationData &src, PatientStreamSink &dst)
     {
-      stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::STATUS, FF_ObservationStatusToString(src.status));
+      stream_assign_code_field(dst, FastFHIR::Fields::OBSERVATION::STATUS, serialize_ObservationStatus(src.status));
     }
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_status(const ObservationData &src, GoogleObservationTarget &dst)
@@ -2535,7 +2672,7 @@ namespace bench::assign
     inline void assign_observation_issued(const ObservationData &src, PatientStreamSink &dst)
     {
       if (!src.issued.empty())
-        dst.handle[FastFHIR::Fields::OBSERVATION::ISSUED] = src.issued;
+        dst.handle[FastFHIR::Fields::OBSERVATION::ISSUED] = std::string_view(src.issued);
     }
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_issued(const ObservationData &src, GoogleObservationTarget &dst)
@@ -3320,4 +3457,5 @@ namespace bench::assign
   }
 #endif
 
+}  // inline namespace BENCH_ARM_NS
 } // namespace bench::assign

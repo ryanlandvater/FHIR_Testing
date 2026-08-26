@@ -5,12 +5,33 @@ real-world corruption scenarios. Each test maps to a failure mode observed in
 production FHIR/HL7v2 pipelines, and each exercises a capability that **no
 other format in the benchmark** can provide.
 
+> **Blocked on the API port.** These tests are written against the pre-`a9fd4e9`
+> FastFHIR surface and none of them can be built today. The ingestion path
+> below is the *old* one; the current equivalents are in
+> [TASKS.md § PORT-1, PORT-2](TASKS.md). Land the port before implementing any
+> test here, or you will write the whole suite against a dead API.
+
 **Data source:** All tests use Synthea FHIR JSON files from `datasets/synthea/`
 (119 real patient bundles with Observations, Conditions, Encounters, Procedures).
 This ensures realistic payload sizes, nested structures, and resource diversity.
-Ingestion path: `make_bundle_patient_from_json()` → `FastFHIR::Ingest::Ingestor`
-→ `BundlePatient` struct → `Builder::append_obj()` → sealed `Memory::View`;
-same pipeline as the benchmark harness.
+The directory is populated by `generate_repo.sh` and is **not** checked in — it
+does not exist in a fresh clone until that script runs.
+
+Ingestion path, in current API terms:
+`make_bundle_patient_from_json()` → `FF_CreateIngestor` / `FF_Ingest`
+→ `BundlePatient` struct → `FF_StreamAppendObject()` → `FF_StreamSetRoot()`
+→ `FF_StreamFinalize()` → sealed `Memory::View`; same pipeline as the
+benchmark harness.
+
+**A resilience-specific note on the upstream change:** out-of-profile resources
+are now retained as opaque JSON blocks rather than dropped. Opaque blocks carry
+the same 10-byte universal header (`VALIDATION` + `RECOVERY_TAG`) as every
+other block, so the truncation and bit-flip mechanisms below apply to them —
+but their *interiors* are unparsed bytes, so corruption inside an opaque
+payload is detectable only at block granularity, not field granularity. Any
+test that asserts field-level damage detection must run on an in-profile
+resource. Worth an explicit test either way: the Synthea corpus routes 1,444
+`ImagingStudy` records through this path on every run.
 
 ---
 

@@ -41,6 +41,16 @@ cc_library(
     ],
 )
 
+# The four-arm benchmark. PostgreSQL persistence is OPT-IN: see
+# :bench_harness_pg below. main.cpp guards every libpq call behind
+# HAVE_LIBPQ, so this target is the complete benchmark minus the --db flag,
+# and it builds on any machine.
+#
+# Why libpq is not linked here: the previous form passed
+# copts = ["-I/opt/homebrew/opt/libpq/include"], which Bazel rejects as "a path
+# outside of the execution root" under sandboxed compilation regardless of
+# whether libpq is installed. An absolute -I cannot be made hermetic; a
+# new_local_repository can. See WORKSPACE.bazel :libpq_macos.
 cc_binary(
     name = "bench_harness",
     srcs = ["main.cpp"],
@@ -48,12 +58,25 @@ cc_binary(
     deps = [
         ":bench_core_harness",
     ],
-    defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
-    copts = ["-I/opt/homebrew/opt/libpq/include"],
-    linkopts = [
-        "-L/opt/homebrew/opt/libpq/lib",
-        "-lpq",
+    defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2"],
+)
+
+# Same benchmark with --db PostgreSQL persistence. Requires libpq on the host:
+#   brew install libpq
+# and LIBPQ_MACOS_PATH pointed at its prefix if it is not the Homebrew default.
+cc_binary(
+    name = "bench_harness_pg",
+    srcs = ["main.cpp"],
+    data = ["enrich.json"],
+    deps = [
+        ":bench_core_harness",
+        "@libpq_macos//:libpq",
     ],
+    defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
+    target_compatible_with = ["@platforms//os:macos"],
+    # "manual" keeps //bench:all from trying to fetch @libpq_macos on a machine
+    # that has no libpq installed. Build this target by name when you want --db.
+    tags = ["manual"],
 )
 
 cc_binary(
@@ -65,6 +88,21 @@ cc_binary(
     ],
 )
 
+# Read-path validation binary — reports whole-document traversal costs as an
+# average per Bundle entry and gates on <= 50 us/entry (regression bound for
+# optimized builds). Run: bazelisk run //bench:read_path_bench -- <file.ffhr>
+cc_binary(
+    name = "read_path_bench",
+    srcs = ["read_path_bench.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:fastfhir_runtime",
+    ],
+)
+
+# Windows build: all four arms, Google FHIR included -- it differs from
+# :bench_harness_pg only in which libpq it links. target_compatible_with keeps
+# //bench:all from trying to fetch @libpq_win on macOS/Linux.
 cc_binary(
     name = "bench_harness_win",
     srcs = ["main.cpp"],
@@ -74,6 +112,7 @@ cc_binary(
         "@libpq_win//:libpq",
     ],
     defines = ["HAVE_GOOGLE_FHIR", "HAVE_HL7V2", "HAVE_LIBPQ"],
+    target_compatible_with = ["@platforms//os:windows"],
 )
 
 cc_test(

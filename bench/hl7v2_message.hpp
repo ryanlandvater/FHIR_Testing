@@ -101,11 +101,11 @@ static inline std::string normalize_birthdate(std::string_view src) {
 
 static inline std::string sex_code(const PatientData& patient) {
   switch (patient.gender) {
-    case AdministrativeGender::Male:
+    case FF_AdministrativeGender::Male:
       return "M";
-    case AdministrativeGender::Female:
+    case FF_AdministrativeGender::Female:
       return "F";
-    case AdministrativeGender::Other:
+    case FF_AdministrativeGender::Other:
       return "O";
     default:
       return "U";

@@ -4,18 +4,51 @@
 **Last Updated**: May 6, 2026  
 **Prepared For**: FastFHIR vs. Google FHIR Benchmarking Study
 
+> ### ⚠️ Correction (2026-08-25): Google FHIR Stages 2 and 3 are NOT stubbed
+>
+> This document repeats a claim that is false. Verified by running the harness:
+>
+> | | Claimed | Actual |
+> |---|---|---|
+> | Stage 2 (materialize) | "returns 0 ns" | **implemented** — parses the TLV records, `ParseFromArray` per message, protobuf-reflection walk. 9,539 nodes touched, ~1.6 ms on a 1 MB bundle. |
+> | Stage 3 (query) | "returns 0 ns" | **implemented** — 42 accumulator calls. Returns `patients=1 observations=316 obs_issued_present=316`, matching the JSON baseline exactly. |
+>
+> There is no `0`-duration metric push anywhere in `arm_google_fhir.cpp`. The
+> ~80 h of Stage 2/3 work this document schedules as P1 appears to have been
+> done at some point without the docs being updated.
+>
+> **Two real Google-arm gaps remain**, and they are not the ones described here:
+>
+> - `birthdate` is reported as a microsecond epoch (`194140800000000`) where
+>   every other arm reports ISO (`1976-02-26`). A normalization gap.
+> - The Google arm is **excluded from `validate_parity()`**, which only compares
+>   FastFHIR-vs-JSON and JSON-vs-HL7v2. Its query results are therefore never
+>   checked against another arm.
+>
+> See [notes.md](notes.md) and [TASKS.md § PARITY](TASKS.md).
+
+> **Stale denominator — reviewed 2026-08-24.** Written against a FastFHIR that
+> compiled **28** resource types; the current profile compiles **37**. Read
+> every "28" as "37" and every "2/28" as "2/37". The denominator is
+> profile-dependent and moves with `FASTFHIR_PRODUCTION_PROFILE` — see
+> [README § Result provenance](README.md#result-provenance).
+>
+> Also note that resource types outside the compiled profile are no longer
+> dropped: they round-trip losslessly as opaque JSON but are not
+> typed-navigable, so they cannot participate in stage 2 or 3.
+
 ---
 
 ## Executive Summary
 
 ### Current State
-- **FastFHIR**: 28 R4 resources fully implemented and available
-- **Google FHIR**: Only 2 resources (Patient, Observation) confirmed; Stage 2/3 unimplemented
-- **Benchmark Coverage**: Only 2/28 FastFHIR resources actively tested
+- **FastFHIR**: 37 resource types compiled at the current profile (`us-core,billing,medication-admin,supply`); out-of-profile types round-trip as opaque JSON but are not typed-navigable
+- **Google FHIR**: Only 2 resources (Patient, Observation) confirmed. ~~Stage 2/3 unimplemented~~ — **both are implemented**; see the correction above.
+- **Benchmark Coverage**: Only 2/37 FastFHIR resources actively tested
 - **Parity Status**: ❌ **BROKEN** — Cannot fairly compare Google FHIR with incomplete implementations
 
 ### Critical Issues
-1. **Google FHIR incomplete**: Stage 2 (deserialization) and Stage 3 (query) return zero metrics
+1. ~~**Google FHIR incomplete**: Stage 2 and Stage 3 return zero metrics~~ — **false**; both are implemented and return real timings. See the correction above.
 2. **Narrow test scope**: Only Patient + Observation tested; 26 FastFHIR resources untested
 3. **Unknown Google FHIR resource list**: Full protobuf coverage unknown; only Patient/Observation linked
 4. **No R5 coverage**: Available in FastFHIR but not benchmarked
@@ -101,8 +134,8 @@ Implement **Three-Phase Remediation Plan** to achieve full message surface parit
 | ✅ QuestionnaireResponse | | | ✅ RelatedPerson |
 
 **Key Facts**:
-- ✅ All 28 resources have public headers (`FF_<Type>.hpp`)
-- ✅ All 28 resources have internal implementation headers (`FF_<Type>_internal.hpp`)
+- ✅ All 37 compiled resources have public headers (`FF_<Type>.hpp`)
+- ✅ All 37 compiled resources have internal implementation headers (`FF_<Type>_internal.hpp`)
 - ✅ Full R4 specification compliance
 - ✅ R5 dictionary also available (not tested)
 - ✅ Auto-generated from FHIR specification
@@ -151,7 +184,7 @@ Implement **Three-Phase Remediation Plan** to achieve full message surface parit
 | **Procedure** | ❌ NONE | ❌ NONE | ❌ NONE | 0/4 |
 | **All Others** | ❌ NONE | ❌ NONE | ❌ NONE | 0/4 |
 
-**Coverage**: 3/28 resources = **10.7%**
+**Coverage**: 3/37 resources = **8.1%**
 
 ---
 
@@ -706,8 +739,8 @@ Create `GOOGLE_FHIR_RESOURCE_AUDIT.md` with:
 
 ### FastFHIR
 - Repository: [github.com/google/fastfhir](https://github.com/google/fastfhir) (actual org TBD)
-- Public API: `local/include/FastFHIR.hpp`
-- Resource Headers: `local/include/FF_*.hpp`
+- Public API: `.external/FastFHIR/include/FastFHIR.hpp`
+- Resource Headers: `.external/FastFHIR/generated_src/FF_*.hpp`
 
 ### Google FHIR (Protobuf)
 - Repository: [github.com/google/fhir](https://github.com/google/fhir)
@@ -720,9 +753,10 @@ Create `GOOGLE_FHIR_RESOURCE_AUDIT.md` with:
 - Sample Data: `datasets/synthea/` (local)
 
 ### Related Documentation
-- [ASSIGNMENT_REFACTOR_PROGRESS.md](ASSIGNMENT_REFACTOR_PROGRESS.md) — Prior refactoring history
+- [TASKS.md](TASKS.md) — active task backlog; the API port blocks everything here
 - [BENCHMARK_IMPLEMENTATION_CHECKLIST.md](BENCHMARK_IMPLEMENTATION_CHECKLIST.md) — General implementation status
-- [bench/FFHRnotes.md](FFHRnotes.md) — API integration notes
+- [FFHRnotes.md](FFHRnotes.md) — API integration notes (mostly resolved upstream)
+- [README.md § Result provenance](README.md#result-provenance) — profile dependence and opaque resources
 
 ---
 

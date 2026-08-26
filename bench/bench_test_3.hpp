@@ -19,7 +19,44 @@
 #include "proto/google/fhir/proto/r4/core/resources/patient.pb.h"
 #endif
 
+
+// ---------------------------------------------------------------------------
+// Per-arm namespace -- REQUIRED FOR CORRECTNESS, not style.
+// ---------------------------------------------------------------------------
+// Each arm compiles these headers with a different ARM_* macro, so the SAME
+// type and function names get four DIFFERENT definitions across four
+// translation units: bench::test_2::MaterializedTree holds a
+// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
+// two protobuf vectors in a third.
+//
+// That is a One Definition Rule violation. The linker keeps one definition of
+// each inline function and destructor and discards the rest, so an object built
+// with one layout gets destroyed with another. It manifests as heap corruption
+// far from the cause -- ASan caught it as a SEGV inside
+// ~vector<google::fhir::r4::core::Observation> from
+// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
+// apparent crash site around between -c opt and -c dbg builds, which is the
+// classic signature.
+//
+// An inline namespace gives each arm its own mangled symbols while leaving
+// every existing call site (bench::test_2::query, bench::assign::assign_patient)
+// spelled exactly as before.
+#ifndef BENCH_ARM_NS
+#if defined(ARM_FASTFHIR)
+#define BENCH_ARM_NS arm_fastfhir
+#elif defined(ARM_JSON)
+#define BENCH_ARM_NS arm_json
+#elif defined(ARM_HL7V2)
+#define BENCH_ARM_NS arm_hl7v2
+#elif defined(ARM_GOOGLE_FHIR)
+#define BENCH_ARM_NS arm_google_fhir
+#else
+#define BENCH_ARM_NS arm_none
+#endif
+#endif
+
 namespace bench::test_3 {
+inline namespace BENCH_ARM_NS {
 
 struct QuerySummary {
   std::size_t patients = 0;
@@ -241,10 +278,12 @@ static inline QuerySummary query(std::string_view payload) {
     }
 
     if (resource_node.is<FastFHIR::RESOURCETYPE::PATIENT>()) {
-      std::string_view birthdate;
+      // birthDate is a packed date/time slot upstream, not a string -- see
+      // read_text_field(). The local std::string must outlive note_patient().
+      std::string birthdate;
       auto birth_date_entry = resource_node[FastFHIR::Fields::PATIENT::BIRTH_DATE];
       if (birth_date_entry) {
-        birthdate = birth_date_entry.as<std::string_view>();
+        birthdate = read_text_field(birth_date_entry.as_node());
       }
       acc.note_patient(birthdate);
       continue;
@@ -581,4 +620,5 @@ static inline QuerySummary query(const std::string& payload) {
 
 #endif
 
+}  // inline namespace BENCH_ARM_NS
 }  // namespace bench::test_3

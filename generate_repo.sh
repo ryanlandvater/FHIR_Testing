@@ -398,25 +398,35 @@ fi
 
 echo -e "${GREEN}FastFHIR located at ${FASTFHIR_DIR}${NC}"
 
+# generated_src/ is produced by FastFHIR's CMake configure step, and its
+# contents are PROFILE-DEPENDENT (FASTFHIR_PRODUCTION_PROFILE). Bazel does not
+# run the generator -- FastFHIR's BUILD.bazel just globs generated_src/*.cpp --
+# so whatever CMake last generated is what gets benchmarked. See README,
+# "Result provenance".
+#
+# The generator moved: `tools/generator/make_lib.py` no longer exists. It is
+# now the `generator` package, invoked as `python -m generator` or, preferably,
+# via the CMake preset that also validates the code-system enums against the
+# permanent ledger.
 GENERATED_SENTINEL="${FASTFHIR_DIR}/generated_src/FF_Patient.hpp"
 if [[ ! -f "${GENERATED_SENTINEL}" ]]; then
-  echo -e "${YELLOW}generated_src missing; running FastFHIR generator once via tools/generator/make_lib.py...${NC}"
-  PYTHON_BIN="${PYTHON_BIN:-}"
-  if [[ -z "${PYTHON_BIN}" ]]; then
-    if command -v python3 >/dev/null 2>&1; then
-      PYTHON_BIN="python3"
-    elif command -v python >/dev/null 2>&1; then
-      PYTHON_BIN="python"
-    else
-      echo -e "${RED}Error: python3/python not found; cannot run make_lib.py${NC}"
-      exit 1
-    fi
+  echo -e "${YELLOW}generated_src missing; running FastFHIR generator once via 'cmake --preset ninja'...${NC}"
+
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo -e "${RED}Error: cmake not found; cannot generate FastFHIR sources.${NC}"
+    echo -e "${RED}Install CMake, or run 'python -m generator' from ${FASTFHIR_DIR}.${NC}"
+    exit 1
   fi
 
   (
     cd "${FASTFHIR_DIR}"
-    "${PYTHON_BIN}" tools/generator/make_lib.py
+    cmake --preset ninja
   )
+
+  if [[ ! -f "${GENERATED_SENTINEL}" ]]; then
+    echo -e "${RED}Error: generator ran but ${GENERATED_SENTINEL} is still missing.${NC}"
+    exit 1
+  fi
 fi
 
 if [[ -d "${FASTFHIR_DIR}/.git" ]]; then

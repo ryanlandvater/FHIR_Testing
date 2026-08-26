@@ -1,5 +1,43 @@
 # FFHR Integration Notes for FastFHIR Repo
 
+> ## Status — reviewed 2026-08-24 against FastFHIR `a9fd4e9`
+>
+> **Most of this file is resolved.** It was written when this repo consumed
+> FastFHIR from a CMake **install tree** (`build/include` + linked
+> `libfastfhir`). That model is gone: consumption is now a **Bazel module**
+> (`bazel_dep(name = "fastfhir")` + `local_path_override` to
+> `.external/FastFHIR`), which builds FastFHIR from source and resolves headers
+> through the module's `includes` attribute.
+>
+> | # | Item | Status |
+> |---|---|---|
+> | 1 | Missing installed headers | **Moot** — no install tree in the build path. CMake also now installs an explicit header set (`CMakeLists.txt:320-328`). |
+> | 2 | Ingestor symbols not exported | **Misdiagnosed** — `fastfhir_ingestor` is a *separate target*, not a missing export. This repo links it via `//:fastfhir_runtime`, and the fixture uses `Ingestor` directly. The "use struct-based Builder instead" workaround below is wrong; ignore it. |
+> | 3 | Relative `../generated_src/` includes | **Fixed upstream** — no such includes remain in `include/`. |
+> | 3b | `Fields` vs `FieldKeys` naming | **Fixed** — both namespaces coexist in `generated_src/FF_FieldKeys.hpp`. |
+> | 4 | CODE field assignment types underdocumented | **STILL OPEN, and now worse** — see below. |
+> | 5 | Examples not compile-tested | **Fixed upstream** — `py_readme_examples` executes the published README examples verbatim. |
+>
+> ### Item 4 has hardened into a compile error
+>
+> `TypeTraits<std::string>` is **undefined**; only `std::string_view` is
+> specialised. Assigning a `std::string` no longer converts surprisingly — it
+> fails to build (`../FastFHIR/include/FF_Builder.hpp:209, 220, 226, 619`).
+> The upstream ask stands: document assignment type expectations per field
+> kind. The consumer-side port is [TASKS.md § PORT-8](TASKS.md).
+>
+> A second, sharper instance of the same root cause: this repo hand-rolled the
+> custom-CODE wire encoding because the public path was unclear. Upstream then
+> moved the discriminator from bit 30 to bit 31 and changed what the offset
+> points at, silently invalidating that code. The public encoder is
+> `ENCODE_FF_CODE` (`../FastFHIR/include/FF_Primitives.hpp:1767`) — it should
+> have been discoverable from the docs. See [TASKS.md § PORT-7](TASKS.md).
+>
+> **Historical content is preserved verbatim below.** Read it as a record of
+> what integration friction looked like, not as current guidance.
+
+---
+
 Purpose: This document records public API and documentation issues discovered while integrating FastFHIR as an external dependency from installed artifacts only (no internal include/build path coupling).
 
 Primary goal: This file is a maintainer-facing improvement guide for FastFHIR itself. Every entry should help improve one or more of:

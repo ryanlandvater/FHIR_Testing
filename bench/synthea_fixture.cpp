@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <simdjson.h>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -29,17 +31,22 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
   const auto arena_size = std::max<std::size_t>(4096, file_size * static_cast<std::size_t>(2));
   item.memory = FastFHIR::Memory::create(arena_size);
 
-  FastFHIR::Builder builder(item.memory);
+  const FastFHIR::FF_Stream stream = make_stream(item.memory);
   FastFHIR::Ingest::Ingestor ingestor;
-  FastFHIR::Reflective::ObjectHandle root(&builder, FF_NULL_OFFSET);
+  FastFHIR::Reflective::ObjectHandle root(stream.get(), FF_NULL_OFFSET);
   size_t parsed_count = 0;
 
   FF_Result result{FF_FAILURE};
   try {
     FastFHIR::Ingest::IngestRequest request{
-        .builder = builder,
-        .source_type = FastFHIR::Ingest::SourceType::FHIR_JSON,
+        .builder = *stream,
+        .source_type = FF_SOURCE_FHIR_JSON,
+        .extension_filter = FF_ExtensionFilterMode::FILTER_ALL_KNOWN,
         .json_string = ingest_payload,
+        // padded_string guarantees SIMDJSON_PADDING slack past size(), so the
+        // ingestor can parse in place instead of making a padded copy of the
+        // whole document.
+        .payload_capacity = json_buffer.size() + simdjson::SIMDJSON_PADDING,
     };
     result = ingestor.ingest(request, root, parsed_count);
   } catch (const std::exception& ex) {
@@ -62,11 +69,13 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
     throw std::runtime_error("No Patient resource in ingested root for " + json_path.string());
   }
 
-  builder.set_root(root);
-  (void)builder.finalize(FF_CHECKSUM_SHA256, [](const unsigned char* data, size_t size) -> std::vector<BYTE> {
-    // No-op checksum callback for benchmarking; real implementation would hash the data.
-    return std::vector<BYTE>(32);
-  });
+  (void)seal_stream(stream, root, json_path.string());
+  if (std::getenv("BENCH_VALIDATE_INGEST")) {
+    FastFHIR::Parser check(item.memory);
+    const FF_Result vr = check.validate_FFHR_stream();
+    std::fprintf(stderr, "[validate-ingest] %s: code=%d %s\n",
+                 json_path.filename().string().c_str(), (int)vr.code, vr.message.c_str());
+  }
   return item;
 }
 
@@ -88,17 +97,19 @@ EnrichmentObservationFixture load_enrichment_observation_from_json(const std::fi
     EnrichmentObservationFixture fixture{};
     fixture.memory = FastFHIR::Memory::create(
       std::max<std::size_t>(4096, file_size * static_cast<std::size_t>(2)));
-    FastFHIR::Builder builder(fixture.memory);
+  const FastFHIR::FF_Stream stream = make_stream(fixture.memory);
   FastFHIR::Ingest::Ingestor ingestor;
-  FastFHIR::Reflective::ObjectHandle root(&builder, FF_NULL_OFFSET);
+  FastFHIR::Reflective::ObjectHandle root(stream.get(), FF_NULL_OFFSET);
   size_t parsed_count = 0;
 
   FF_Result result{FF_FAILURE};
   try {
     FastFHIR::Ingest::IngestRequest request{
-        .builder = builder,
-        .source_type = FastFHIR::Ingest::SourceType::FHIR_JSON,
+        .builder = *stream,
+        .source_type = FF_SOURCE_FHIR_JSON,
+        .extension_filter = FF_ExtensionFilterMode::FILTER_ALL_KNOWN,
         .json_string = ingest_payload,
+        .payload_capacity = json_buffer.size() + simdjson::SIMDJSON_PADDING,
     };
     result = ingestor.ingest(request, root, parsed_count);
   } catch (const std::exception& ex) {

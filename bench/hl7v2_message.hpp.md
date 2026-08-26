@@ -1,5 +1,10 @@
 # `hl7v2_message.hpp` — HL7v2 Message Types
 
+> ✅ **Ported 2026-08-25.** `sex_code()` switches on `FF_AdministrativeGender`.
+> The enum gained an `FF_UNSET = 255` case that currently falls through to each
+> arm's `default:` — deciding what unset means per format is tracked in
+> [TASKS.md § PARITY](../TASKS.md).
+
 ## Purpose
 
 Defines the **HL7v2 message model** used by the HL7v2 benchmark arm. Provides:

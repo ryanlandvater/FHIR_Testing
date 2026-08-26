@@ -3,14 +3,43 @@
 **Generated**: 2026-05-06  
 **Status**: 🔴 CRITICAL GAPS IDENTIFIED
 
+> ### ⚠️ Correction (2026-08-25): Google FHIR Stages 2 and 3 are NOT stubbed
+>
+> This document repeats a claim that is false. Verified by running the harness:
+>
+> | | Claimed | Actual |
+> |---|---|---|
+> | Stage 2 (materialize) | "returns 0 ns" | **implemented** — parses the TLV records, `ParseFromArray` per message, protobuf-reflection walk. 9,539 nodes touched, ~1.6 ms on a 1 MB bundle. |
+> | Stage 3 (query) | "returns 0 ns" | **implemented** — 42 accumulator calls. Returns `patients=1 observations=316 obs_issued_present=316`, matching the JSON baseline exactly. |
+>
+> There is no `0`-duration metric push anywhere in `arm_google_fhir.cpp`. The
+> ~80 h of Stage 2/3 work this document schedules as P1 appears to have been
+> done at some point without the docs being updated.
+>
+> **Two real Google-arm gaps remain**, and they are not the ones described here:
+>
+> - `birthdate` is reported as a microsecond epoch (`194140800000000`) where
+>   every other arm reports ISO (`1976-02-26`). A normalization gap.
+> - The Google arm is **excluded from `validate_parity()`**, which only compares
+>   FastFHIR-vs-JSON and JSON-vs-HL7v2. Its query results are therefore never
+>   checked against another arm.
+>
+> See [notes.md](notes.md) and [TASKS.md § PARITY](TASKS.md).
+
+> **Stale denominator — reviewed 2026-08-24.** FastFHIR compiled 28 resource
+> types when this was written; the current profile compiles **37**. Read
+> "3/28" as "3/37" and "89% unmeasured" as **~92% unmeasured**. See
+> [MESSAGE_SURFACE_PARITY_AUDIT.md](MESSAGE_SURFACE_PARITY_AUDIT.md) for the
+> full note.
+
 ---
 
 ## TL;DR: Key Findings
 
 | Finding | Impact | Severity |
 |---------|--------|----------|
-| **Google FHIR Stage 2/3 not implemented** | Test 2/3 return 0 ns; unfair comparison | 🔴 CRITICAL |
-| **Only 3/28 resources tested** | 89% of FastFHIR capability unmeasured | 🔴 CRITICAL |
+| ~~Google FHIR Stage 2/3 not implemented~~ | **FALSE** — both implemented; see correction at top | ✅ RESOLVED |
+| **Only 3/37 resources tested** | ~92% of FastFHIR capability unmeasured | 🔴 CRITICAL |
 | **Google FHIR proto coverage unknown** | Can't assess parity for 25+ resources | 🔴 HIGH |
 | **Encounter/Condition/Procedure missing** | Core clinical workflows untested | 🔴 HIGH |
 | **No R5 support** | Future-proofing gap | 🟡 MEDIUM |
@@ -19,15 +48,16 @@
 
 ## Message Surfaces: FFHR Coverage vs Google FHIR
 
-### Currently Tested (3/28)
+### Currently Tested (3/37)
 ✅ **Patient** — FastFHIR + Google FHIR (Stage 1 only)  
 ✅ **Observation** — FastFHIR + Google FHIR (Stage 1 only)  
 ✅ **Bundle** — FastFHIR + Google FHIR (Stage 1 only)  
 
-### BLOCKED for Google FHIR (0 resources)
-🔴 **Stage 2/3 not implemented** — Returns zero metrics  
-🔴 **Deserialization untested** — Protobuf → message conversion invisible  
-🔴 **Query performance untested** — Field traversal unmeasured  
+### Google FHIR stage status (corrected 2026-08-25)
+✅ **Stage 2 implemented** — TLV parse + `ParseFromArray` + reflection walk (9,539 nodes)  
+✅ **Stage 3 implemented** — matches the JSON baseline on patients/observations/obs_issued  
+🟡 **`birthdate` unit mismatch** — microsecond epoch vs ISO everywhere else  
+🟡 **Excluded from `validate_parity()`** — results never cross-checked  
 
 ### Available in FFHR but NOT TESTED (10 critical + 13 unknown)
 
@@ -48,27 +78,29 @@
 
 ## Actionable Parity Issues
 
-### Issue #1: Google FHIR Stages 2 & 3 Are Stubbed
-**What's Broken**:
-```cpp
-// arm_google_fhir.cpp — Currently:
-out.metrics.push_back({"google_fhir", Stage::Test2Materialize, 0});     // ❌ Wrong
-out.metrics.push_back({"google_fhir", Stage::Test3Query, 0});            // ❌ Wrong
-```
+### ~~Issue #1: Google FHIR Stages 2 & 3 Are Stubbed~~ — RESOLVED
 
-**Why It Matters**: Cannot compare deserialization speed or query latency against FastFHIR.
+**This issue was never real, or was fixed without the docs being updated.** The
+code shown below does not exist in `arm_google_fhir.cpp`; there is no
+zero-duration metric push anywhere in it.
 
-**Fix Priority**: 🔴 MUST FIX BEFORE PUBLICATION
+**What replaces it:**
+- `birthdate` is a microsecond epoch (`194140800000000`) in the Google arm and
+  ISO (`1976-02-26`) in every other arm.
+- The Google arm is excluded from `validate_parity()`, so nothing checks its
+  query results against another arm.
 
-**Effort**: ~80 hours
+**Fix Priority**: 🟡 Should fix before publication
+
+**Effort**: ~4 hours
 
 ---
 
-### Issue #2: Only 3 Resources Tested (10.7% Coverage)
+### Issue #2: Only 3 Resources Tested (8.1% Coverage)
 
 **What's Missing**:
 ```
-Tested:      Patient, Observation, Bundle (3/28)
+Tested:      Patient, Observation, Bundle (3/37)
 Untested:    Encounter, Condition, Procedure, Medication, CarePlan,
              ServiceRequest, DiagnosticReport, AllergyIntolerance,
              Immunization, Organization, Practitioner, Location,
@@ -222,4 +254,5 @@ Add remaining 13 resources; optionally add R5 support.
 - [RESOURCE_COVERAGE_ANALYSIS.md](RESOURCE_COVERAGE_ANALYSIS.md) — Detailed coverage discovery
 - [BENCHMARK_IMPLEMENTATION_CHECKLIST.md](BENCHMARK_IMPLEMENTATION_CHECKLIST.md) — General status
 - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) — Background context
+- [TASKS.md](TASKS.md) — active task backlog (the API port blocks all of the above)
 

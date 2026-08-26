@@ -1,5 +1,15 @@
 # `synthea_fixture.cpp` — Synthea JSON Ingestion Pipeline
 
+> ✅ **Ported 2026-08-25 — builds and runs.** The ingest path now uses
+> `FF_SOURCE_FHIR_JSON`, pins `extension_filter` to `FILTER_ALL_KNOWN`, and
+> passes `payload_capacity` so simdjson parses the document in place instead of
+> making a padded copy. Sealing goes through `make_stream()` / `seal_stream()`
+> in `harness.hpp` (`FF_StreamSetRoot` + `FF_StreamFinalize`).
+>
+> Hydration also **sanitises cross-arena `choice[x]` values** here — see
+> [notes.md](../notes.md) §4. Without it the FastFHIR arm wrote a foreign arena
+> offset into a block-tagged slot and corrupted its own stream.
+
 ## Purpose
 
 Loads real-world Synthea-generated FHIR JSON patient files from disk and converts them into the benchmark's in-memory `BundlePatient` representation. This is the **data ingestion pipeline** that feeds all four benchmark arms.

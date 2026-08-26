@@ -18,6 +18,28 @@ cc_library(
 """,
 )
 
+# macOS libpq for //bench:bench_harness_pg. Homebrew keeps libpq keg-only, so
+# the prefix is not on the default include/lib path. Override with
+# LIBPQ_MACOS_PATH if yours lives elsewhere.
+#
+# This exists as a repository rather than a bare -I/-L pair because Bazel
+# rejects absolute include paths outside the execution root under sandboxed
+# compilation -- which is what broke the old :bench_harness target.
+new_local_repository(
+    name = "libpq_macos",
+    path = "/opt/homebrew/opt/libpq",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "libpq",
+    hdrs = glob(["include/*.h"]),
+    includes = ["include"],
+    linkopts = ["-lpq"],
+)
+""",
+)
+
 new_local_repository(
     name = "libpq_win",
     path = "C:/PROGRA~1/POSTGR~1/16",

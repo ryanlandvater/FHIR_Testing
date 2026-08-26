@@ -80,17 +80,17 @@ int main()
 {
   bench::BundlePatient bp{};
   bp.memory = FastFHIR::Memory::create(4096);
-  FastFHIR::Builder builder(bp.memory, FHIR_VERSION_R5);
+  const FastFHIR::FF_Stream stream = bench::make_stream(bp.memory, FHIR_VERSION_R5);
 
   PatientData patient{};
   patient.id = "patient-conformance";
   patient.birthdate = "1990-03-21";
-  patient.gender = AdministrativeGender::Male;
+  patient.gender = FF_AdministrativeGender::Male;
   patient.active = 1;
 
-  auto patient_handle = builder.append_obj(patient);
-  builder.set_root(patient_handle);
-  const auto patient_view = builder.finalize();
+  auto patient_handle = stream->append_obj(patient);
+  const auto patient_view =
+      bench::seal_stream(stream, patient_handle, "conformance patient", FF_CHECKSUM_NONE);
   const int64_t patient_ffhr_bytes = static_cast<int64_t>(patient_view.size());
 
   bp.patient.id = patient.id;

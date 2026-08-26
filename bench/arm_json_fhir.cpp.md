@@ -1,5 +1,11 @@
 # `bench/arm_json_fhir.cpp` — JSON (nlohmann) Serialization Arm
 
+> ✅ **Builds 2026-08-25.** No changes of its own; it inherited the
+> `bench_test_1.hpp` port. Note the JSON arm previously emitted
+> `{"valueQuantity": 55683}` — a raw arena offset as a JSON number — which is now
+> skipped along with every other block-typed choice.
+> See [notes.md](../notes.md) §4.
+
 ## Purpose
 
 Implements the **JSON serialization arm** using nlohmann::json. Converts the same

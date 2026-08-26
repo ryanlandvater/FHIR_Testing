@@ -1,8 +1,18 @@
 ﻿# FastFHIR Benchmarking: Implementation & Validation Summary
 
-**Status**: Four Arms Live; Google FHIR Stages 2/3 Stubbed; 2/28 Resources Tested
+**Status**: ✅ Builds and runs (ported 2026-08-25) · Results not publishable · 2/37 Resources Tested
 
 ---
+
+> **Read [notes.md](notes.md) first.** The harness was ported to FastFHIR's
+> `FF_*` façade API on 2026-08-25 and builds and runs again. Doing so exposed
+> five defects that had been live and silent — including an ODR violation across
+> the four arms and a Test 2 walk that visited 1 node instead of ~8,000.
+>
+> The architecture below is accurate as *design*. The numbers the harness now
+> produces are proof it works end to end, **not results to publish**: Test 1 is
+> not at parity, `value[x]` is excluded from every arm, and Test 2 node counts
+> are not normalized across formats.
 
 This document is a curated overview of the benchmark architecture, build status, and parity guidance.
 For detailed per-file API documentation, see the [bench/*.md](bench/) files indexed in [README.md](README.md).
@@ -23,8 +33,8 @@ For detailed per-file API documentation, see the [bench/*.md](bench/) files inde
 | Stage | What It Measures | FastFHIR | JSON | HL7v2 | Google FHIR |
 |---|---|---|---|---|---|
 | Test 1 - Serialize | POCO struct to wire format | OK Arena build | OK nlohmann::json dump | OK ORU^R01 build | OK Protobuf TLV |
-| Test 2 - Materialize | Wire format to in-memory tree | OK Parser tree walk | OK simdjson DOM walk | OK Batch parse count | STUBBED (0 ns) |
-| Test 3 - Query | Tree walk for LOINC 2085-9 | OK Node reflection | OK simdjson path | OK Segment walking | STUBBED (0 ns) |
+| Test 2 - Materialize | Wire format to in-memory tree | Parser tree walk (walk corrected 2026-08-25) | simdjson DOM walk | Batch parse count | Proto parse + reflection walk |
+| Test 3 - Query | Tree walk for LOINC 2085-9 | Node reflection | simdjson path | Segment walking | Proto field walk |
 | Test 4 - Enrich | Append observation to bundle | OK Arena append | OK Parse-modify-dump | OK String concat | OK Re-serialize all |
 
 ## Code Parity: The Macro-Guarded Assignment Layer
@@ -41,7 +51,14 @@ Every arm's `assign_patient()` and `assign_observation()` live in the **same hea
 #include "bench_test_1.hpp"  // assign_patient to nlohmann::json&
 ```
 
-This ensures **identical loop structure, field coverage, and query logic** across all arms.
+This was intended to ensure **identical loop structure, field coverage, and
+query logic** across all arms.
+
+⚠️ **As of 2026-08-25 the FastFHIR arm's Test 1 no longer uses this layer** — it
+serializes the whole POCO via `append_obj`, because the public API cannot write
+FastFHIR's inline-block arrays field-by-field. It therefore covers *more* fields
+than the other three arms. The headers also required a per-arm inline namespace
+to avoid an ODR violation. See [notes.md](notes.md) §1 and §3.
 
 **Per-file documentation:**
 
@@ -64,7 +81,9 @@ See: [harness.hpp.md](bench/harness.hpp.md) for type definitions and [bench_test
 
 ### Phase 2: Synthea Integration
 
-- 119 Synthea-generated FHIR JSON patient Bundles ingested via FastFHIR Ingestor
+- Synthea FHIR JSON patient Bundles ingested via FastFHIR Ingestor. The corpus
+  in use holds 342 files, of which **336 yield a Patient**; the other six are
+  `hospitalInformation*` / `practitionerInformation*` bundles and are skipped.
 - Ingested into `BundlePatient` structs holding FFHR arenas + hydrated POCOs
 - Semantic query focus: LOINC code `2085-9` (Total Cholesterol) within `Observation.code.coding`
 
@@ -72,12 +91,19 @@ See: [synthea_fixture.cpp.md](bench/synthea_fixture.cpp.md)
 
 ### Phase 3: Arm Implementation
 
+Build status verified 2026-08-25 with `bazel build -c opt --keep_going //bench:all`:
+
 | Arm | File | Doc | Build Status | Notes |
 |---|---|---|---|---|
-| FastFHIR | `arm_fastfhir.cpp` | [doc](bench/arm_fastfhir.cpp.md) | OK | Primary arm; arena-based serialization |
-| JSON FHIR | `arm_json_fhir.cpp` | [doc](bench/arm_json_fhir.cpp.md) | OK | nlohmann::json serialize; simdjson read |
-| HL7v2 | `arm_hl7v2.cpp` | [doc](bench/arm_hl7v2.cpp.md) | OK | ORU^R01 messages; zero external deps |
-| Google FHIR | `arm_google_fhir.cpp` | [doc](bench/arm_google_fhir.cpp.md) | Stages 2/3 stubbed | DYNAMIC_BUNDLED dylib linkage |
+| FastFHIR | `arm_fastfhir.cpp` | [doc](bench/arm_fastfhir.cpp.md) | ⚠️ builds; Test 1 bypasses the shared layer | Primary arm; arena-based serialization |
+| JSON FHIR | `arm_json_fhir.cpp` | [doc](bench/arm_json_fhir.cpp.md) | ✅ builds | nlohmann::json serialize; simdjson read |
+| HL7v2 | `arm_hl7v2.cpp` | [doc](bench/arm_hl7v2.cpp.md) | ✅ builds | ORU^R01 messages; zero external deps |
+| Google FHIR | `arm_google_fhir.cpp` | [doc](bench/arm_google_fhir.cpp.md) | ✅ builds; all 4 stages live | DYNAMIC_BUNDLED dylib linkage |
+
+Worth remembering from the port: the JSON and HL7v2 arms broke too, despite
+having no FastFHIR serialization path of their own. `harness.hpp` uses
+FastFHIR's generated POCOs and code-system enums as the shared ground-truth
+types, so an upstream rename reaches every arm.
 
 ### Phase 4: Build & Dependency Resolution
 
@@ -99,22 +125,41 @@ bazel run //bench:bench_harness -- --runs 10
 
 Conformance validation:
 ```bash
-bazel test //bench:timing_conformance_test
+bazel test -c opt //bench:timing_conformance_test
 ```
+
+Measured node counts per arm on a 1 MB bundle (Test 2), for calibration:
+fastfhir 4,443 · json_fhir 8,327 · hl7v2 8,008 · google_fhir 9,539. These are
+**not** normalized across formats — see [notes.md](notes.md) §2.
 
 ---
 
 ## Remaining Parity Gaps
 
-### P1: Google FHIR Stages 2 & 3 (Materialize + Query)
+### ~~P1: Google FHIR Stages 2 & 3~~ — RESOLVED (verified 2026-08-25)
 
-`arm_google_fhir.cpp` currently pushes zero-duration metrics for Stages 2 and 3. This means **no comparison data is generated** for Google FHIR's deserialization or query latency.
+**This gap does not exist.** `arm_google_fhir.cpp` pushes no zero-duration
+metrics. `test_2::materialize()` parses the TLV records, runs `ParseFromArray()`
+per message and walks via protobuf reflection (9,539 nodes, ~1.6 ms on a 1 MB
+bundle). `test_3::query()` is implemented with 42 accumulator calls and returns
+`patients=1 observations=316 obs_issued_present=316`, matching the JSON
+baseline.
 
-**Required**: Implement `test_2::materialize()` for Google FHIR's custom TLV record format (iterate records, `ParseFromArray()` each protobuf, walk via reflection counting nodes) and `test_3::query()` (iterate deserialized protobufs counting patients, LOINC matches, value types).
+**Two real Google-arm gaps remain instead:**
+- `birthdate` is a microsecond epoch (`194140800000000`) where every other arm
+  reports ISO (`1976-02-26`).
+- The Google arm is excluded from `validate_parity()`, so its results are never
+  cross-checked against another arm.
 
-### P2: Resource Coverage: Only 2 of 28 Resources Tested
+### P2: Resource Coverage: Only 2 of 37 Resources Tested
 
-Only `Patient` and `Observation` are actively serialized/queried. Encounter, Condition, Procedure, and 24 other FHIR R4 resources available in FastFHIR are hydrated in `BundlePatient` structs but never enter the benchmark pipeline.
+Only `Patient` and `Observation` are actively serialized/queried. Encounter, Condition, Procedure, and 32 other FHIR resources compiled into FastFHIR at the current profile are hydrated in `BundlePatient` structs but never enter the benchmark pipeline.
+
+The denominator is **profile-dependent**: 37 is the count for
+`us-core,billing,medication-admin,supply` as of 2026-08-24. Resource types
+outside the compiled profile are not absent from the stream — they are
+retained as opaque JSON, which round-trips losslessly but is **not
+typed-navigable**. See [README § Result provenance](README.md#result-provenance).
 
 ### P2: HL7v2 Birthdate Normalization
 
@@ -136,16 +181,25 @@ The benchmark uses `FHIR_VERSION_R5` builder but only R4 resources are tested.
 
 | Priority | TODO | Where | Impact |
 |---|---|---|---|
-| P1 | Implement Google FHIR Stage 2 (Materialize) | bench_test_2.hpp | Stage 2 returns 0 ns for google_fhir |
-| P1 | Implement Google FHIR Stage 3 (Query) | bench_test_3.hpp | Stage 3 returns 0 ns for google_fhir |
-| P2 | Add Encounter, Condition, Procedure to serialization scope | bench_test_1.hpp | Only 2/28 resources benchmarked |
+| **P0** | **Repair parity exposed by the port** | [TASKS.md § PARITY](TASKS.md) | **Test 1 not at parity; `value[x]` excluded; Test 2 unnormalized** |
+| P1 | Normalize the Google arm's `birthdate` (microsecond epoch vs ISO) | bench_test_3.hpp | Cross-arm query parity |
+| P1 | Include the Google arm in `validate_parity()` | main.cpp | Its results are never cross-checked |
+| P2 | Add Encounter, Condition, Procedure to serialization scope | bench_test_1.hpp | Only 2/37 resources benchmarked |
+| P2 | Decide the query corpus given opaque resources | [TASKS.md § CORPUS](TASKS.md) | Stage 3 silently skips 1,444 `ImagingStudy` records |
+| P2 | Record profile + upstream SHA with every result | [TASKS.md § PROFILE](TASKS.md) | Results are not reproducible without it |
 | P2 | Align HL7v2 birthdate output format or document normalization | hl7v2_message.hpp | Cross-arm query parity |
 | P3 | R5 dictionary query support | arm_fastfhir.cpp | R5 coverage gap |
 
 ## Upstream FastFHIR Issues
 
-Documented in [FFHRnotes.md](FFHRnotes.md):
-- Missing installed transitive headers (generated headers not installed by build system)
-- Ingestor symbols not exported in `libfastfhir`
-- Install-interface include semantics need cleanup
-- CODE field assignment type expectations underdocumented
+Reviewed 2026-08-24 against `a9fd4e9` — see [FFHRnotes.md](FFHRnotes.md) for
+the full audit.
+
+**Still open:**
+- CODE field assignment type expectations underdocumented — now a hard compile
+  error (`TypeTraits<std::string>` is undefined), and the reason this repo
+  hand-rolled a wire encoding that has since gone invalid.
+
+**Resolved upstream:** missing installed headers (moot under the Bazel module),
+Ingestor symbol export (misdiagnosed — separate target), install-interface
+include semantics, `Fields`/`FieldKeys` naming, and compile-tested examples.

@@ -49,7 +49,17 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   test2_timer.start();
   const auto materialized = test_2::materialize(payload);
   out.metrics.push_back(test_2::materialize_metric("hl7v2", test2_timer.stop_ns()));
-  (void)materialized;
+  // Observe the walk result. Without this the compiler is free to elide
+  // touch_tree() entirely -- the FastFHIR arm reported 83 ns for a 317-entry
+  // bundle before this check existed, which was a dead-code artefact rather
+  // than a zero-copy result. See notes.md section 2.
+  if (materialized.touched_nodes == 0 && materialized.ok) {
+    std::cerr << "[warn] materialize touched 0 nodes\n";
+  }
+  if (std::getenv("BENCH_TOUCHED")) {
+    std::cerr << "[touched] " << out.metrics.back().arm << " nodes="
+              << materialized.touched_nodes << " ok=" << materialized.ok << "\n";
+  }
 
   Timer test3_timer;
   test3_timer.start();

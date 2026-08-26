@@ -1,5 +1,20 @@
 # `bench_test_1.hpp` — Shared Field Assignment Layer (Test 1)
 
+> ✅ **Ported 2026-08-25.** Enum renames (`FF_`-prefixed), `serialize_<Enum>()`
+> in place of the removed `*ToString`, `ExtensionData::url` with an
+> `FF_NULL_UINT32` sentinel, null-checked `Attachment.data`/`.hash`, and the
+> hand-rolled custom-CODE encoder replaced by `ENCODE_FF_CODE()`.
+>
+> ⚠️ Two things to know before trusting this file:
+>
+> - It is now wrapped in a **per-arm inline namespace**. Without it the four
+>   arms' definitions collide under one name across four translation units — an
+>   ODR violation that caused heap corruption far from the cause.
+>   See [notes.md](../notes.md) §1.
+> - **`value[x]` is skipped by every arm.** Block-typed choices carry a
+>   source-arena offset that cannot cross arenas.
+>   See [notes.md](../notes.md) §4.
+
 ## Purpose
 
 This is the **single most critical file in the benchmark** for fairness. It defines the `assign::` namespace containing overloaded `assign_patient()` and `assign_observation()` functions that write the same POCO data to **four different output types**:

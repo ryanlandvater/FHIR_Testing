@@ -25,7 +25,44 @@
 
 #include "bench_test_1.hpp"
 
+
+// ---------------------------------------------------------------------------
+// Per-arm namespace -- REQUIRED FOR CORRECTNESS, not style.
+// ---------------------------------------------------------------------------
+// Each arm compiles these headers with a different ARM_* macro, so the SAME
+// type and function names get four DIFFERENT definitions across four
+// translation units: bench::test_2::MaterializedTree holds a
+// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
+// two protobuf vectors in a third.
+//
+// That is a One Definition Rule violation. The linker keeps one definition of
+// each inline function and destructor and discards the rest, so an object built
+// with one layout gets destroyed with another. It manifests as heap corruption
+// far from the cause -- ASan caught it as a SEGV inside
+// ~vector<google::fhir::r4::core::Observation> from
+// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
+// apparent crash site around between -c opt and -c dbg builds, which is the
+// classic signature.
+//
+// An inline namespace gives each arm its own mangled symbols while leaving
+// every existing call site (bench::test_2::query, bench::assign::assign_patient)
+// spelled exactly as before.
+#ifndef BENCH_ARM_NS
+#if defined(ARM_FASTFHIR)
+#define BENCH_ARM_NS arm_fastfhir
+#elif defined(ARM_JSON)
+#define BENCH_ARM_NS arm_json
+#elif defined(ARM_HL7V2)
+#define BENCH_ARM_NS arm_hl7v2
+#elif defined(ARM_GOOGLE_FHIR)
+#define BENCH_ARM_NS arm_google_fhir
+#else
+#define BENCH_ARM_NS arm_none
+#endif
+#endif
+
 namespace bench::test_4 {
+inline namespace BENCH_ARM_NS {
 
 struct EnrichMetricsSummary {
   std::size_t source_bytes = 0;
@@ -58,7 +95,8 @@ using StreamType = FastFHIR::Memory;
 inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
                                                 const ObservationData& enrichment_observation) {
   StreamType enriched_stream = payload;
-  FastFHIR::Builder builder(enriched_stream, FHIR_VERSION_R5);
+  const FastFHIR::FF_Stream stream = make_stream(enriched_stream, FHIR_VERSION_R5);
+  FastFHIR::Builder& builder = *stream;
 
   Timer timer;
   timer.start();
@@ -75,11 +113,7 @@ inline EnrichResult<StreamType> enrich_fastfhir(const StreamType& payload,
   bundle.entry.push_back(BundleentryData{.resource = static_cast<ResourceReference>(observation_handle)});
 
   auto new_root = builder.append_obj(bundle);
-  builder.set_root(new_root);
-  (void)builder.finalize(FF_CHECKSUM_SHA256,
-                         [](const unsigned char*, size_t) -> std::vector<BYTE> {
-                           return std::vector<BYTE>(32);
-                         });
+  (void)seal_stream(stream, new_root, "fastfhir arm enrich");
 
   EnrichMetricsSummary summary;
   summary.source_bytes = payload.view().size();
@@ -277,4 +311,5 @@ inline EnrichResult<StreamType> enrich_google_fhir(const StreamType& payload,
 
 #endif
 
+}  // inline namespace BENCH_ARM_NS
 }  // namespace bench::test_4

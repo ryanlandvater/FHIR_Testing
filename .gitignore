@@ -1,11 +1,12 @@
 # macOS
 .DS_Store
 
-# Bazel build artifacts
-/bazel-bin/
-/bazel-out/
-/bazel-testlogs/
-/bazel-fastfhir-benchmark/
+# Bazel build artifacts (no trailing slash: Bazel creates these as symlinks,
+# and a trailing-slash pattern matches directories only)
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-fastfhir-benchmark
 MODULE.bazel.lock
 
 # Python/Jupyter
@@ -17,6 +18,9 @@ __pycache__/
 notebooks/analysis_exports/
 notebooks/benchmark_outputs/
 notebooks/.bench_tmp/
+
+# Arbiter
+.arbiter/
 
 # Benchmark result artifacts should not be committed at repo root
 BENCHMARK_RESULTS.md

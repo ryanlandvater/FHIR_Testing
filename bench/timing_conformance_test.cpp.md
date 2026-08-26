@@ -1,5 +1,10 @@
 # `timing_conformance_test.cpp` — Timing Conformance Test
 
+> ✅ **Ported 2026-08-25 — `bazel test -c opt //bench:timing_conformance_test`
+> passes.** Uses `bench::make_stream()` / `bench::seal_stream()` and
+> `FF_AdministrativeGender::Male`. Seals with `FF_CHECKSUM_NONE` to preserve the
+> pre-port stream size.
+
 ## Purpose
 
 A lightweight, standalone **validation binary** that verifies the benchmark harness produces correct, consistent timing measurements. It runs both the FastFHIR and JSON arms on a single synthetic patient and checks:

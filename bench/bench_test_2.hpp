@@ -20,7 +20,44 @@
 #include "hl7v2_message.hpp"
 #endif
 
+
+// ---------------------------------------------------------------------------
+// Per-arm namespace -- REQUIRED FOR CORRECTNESS, not style.
+// ---------------------------------------------------------------------------
+// Each arm compiles these headers with a different ARM_* macro, so the SAME
+// type and function names get four DIFFERENT definitions across four
+// translation units: bench::test_2::MaterializedTree holds a
+// unique_ptr<FastFHIR::Parser> in one TU, a simdjson element in another, and
+// two protobuf vectors in a third.
+//
+// That is a One Definition Rule violation. The linker keeps one definition of
+// each inline function and destructor and discards the rest, so an object built
+// with one layout gets destroyed with another. It manifests as heap corruption
+// far from the cause -- ASan caught it as a SEGV inside
+// ~vector<google::fhir::r4::core::Observation> from
+// bench::test_2::MaterializedTree::~MaterializedTree, and it also moved the
+// apparent crash site around between -c opt and -c dbg builds, which is the
+// classic signature.
+//
+// An inline namespace gives each arm its own mangled symbols while leaving
+// every existing call site (bench::test_2::query, bench::assign::assign_patient)
+// spelled exactly as before.
+#ifndef BENCH_ARM_NS
+#if defined(ARM_FASTFHIR)
+#define BENCH_ARM_NS arm_fastfhir
+#elif defined(ARM_JSON)
+#define BENCH_ARM_NS arm_json
+#elif defined(ARM_HL7V2)
+#define BENCH_ARM_NS arm_hl7v2
+#elif defined(ARM_GOOGLE_FHIR)
+#define BENCH_ARM_NS arm_google_fhir
+#else
+#define BENCH_ARM_NS arm_none
+#endif
+#endif
+
 namespace bench::test_2 {
+inline namespace BENCH_ARM_NS {
 
 inline MetricEvent materialize_metric(std::string_view arm, std::int64_t duration_ns) {
   return MetricEvent{std::string(arm), Stage::Test2Materialize, duration_ns};
@@ -51,18 +88,47 @@ struct MaterializedTree {
 
 using StreamType = FastFHIR::Memory;
 
+// Arrays are walked with entries(); OBJECTS are walked with fields() plus an
+// owner-keyed lookup. The previous version called entries() for both, which
+// returns nothing for a block -- so this walk visited exactly ONE node (the
+// Bundle root) while the JSON, HL7v2 and Google arms visited 8-9k. Test 2 was
+// comparing a full tree walk against a no-op.
+//
+// This mirrors read_path_bench.cpp::walk_node(), which is the validated
+// public-API traversal (and the one FastFHIR's own is_empty()/print use).
 inline void touch_tree(const FastFHIR::Reflective::Node& node, std::size_t& touched_nodes) {
   if (!node) {
     return;
   }
 
   ++touched_nodes;
-  if (!node.is_array() && !node.is_object()) {
-    return;
-  }
 
-  for (auto& child : node.entries()) {
-    touch_tree(child, touched_nodes);
+  switch (node.kind()) {
+    case FF_FIELD_ARRAY: {
+      for (const auto& child : node.entries()) {
+        touch_tree(child, touched_nodes);
+      }
+      break;
+    }
+    case FF_FIELD_BLOCK: {
+      for (const auto& field : node.fields()) {
+        const FF_FieldKey key = FF_FieldKey::from_cstr(
+            node.recovery(), field.kind, field.field_offset, field.child_recovery,
+            field.array_entries_are_offsets, field.name);
+        FastFHIR::Reflective::Entry entry = node[key];
+        if (!entry) {
+          continue;
+        }
+        FastFHIR::Reflective::Node child = entry.as_node();
+        if (child) {
+          touch_tree(child, touched_nodes);
+        }
+      }
+      break;
+    }
+    default:
+      // Strings, codes and scalars: count the node, do not descend.
+      break;
   }
 }
 
@@ -246,4 +312,5 @@ inline MaterializedTree materialize(const StreamType& payload) {
 
 #endif
 
+}  // inline namespace BENCH_ARM_NS
 }  // namespace bench::test_2
