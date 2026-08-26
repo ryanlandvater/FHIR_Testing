@@ -805,6 +805,10 @@ def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
 
     fig.tight_layout(rect=[0, 0.18, 1, 0.95])
     finish(fig, prov, [
+        "METHODOLOGICALLY SUSPECT (2026-08-26): HL7v2 counts SEGMENTS, the others count "
+        "ENTRIES; k is not normalized per format; the HL7v2 recover checks only segment names, "
+        "not content, and its structural set excludes pipes/carrots. Do not cite — fix per "
+        "handoff.md §Test 5 flaws.",
         "Corruption and recovery are INDEPENDENT processes (scripts/recovery_sweep.py): "
         "the recoverer reads only the corrupted bytes, a scanner's view.",
         "Structural flips only (FFHR header+block headers; JSON brace/bracket/quote/colon/"

@@ -689,6 +689,16 @@ Ordered by what unblocks the most.
       **CAPI-13** (Parser ctor SEGVs on a corrupted header — the probe
       pre-validates the header manually) and **CAPI-14** (generated POCO
       string fields are `string_view`; assigning a temporary dangles).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
+- [ ] **IN-G2. Fix the recovery-test methodology (do not cite the current curve).**
+      handoff.md § "Test 5 — known flaws" documents five problems: (A) units
+      differ (hl7v2 counts segments, others count entries); (B) damage density
+      is not normalized (same k = different intensity per format); (C) the
+      hl7v2 recover checks only segment names, never content (a \r merge still
+      counts); (D) the hl7v2 structural set excludes the real cascade triggers
+      (`|`, `^`, `&`, `~`); (E) blast-radius asymmetry. Fix directions in the
+      same section: content-verified recovery per format, normalized x-axis
+      (flips per 1,000 units), pipes/carrots in the v2 structural set, and a
+      defensible v2 unit. Re-run and re-examine before any citation.
 - [ ] **IN-H. Thread-scaling curve** (WF-4.2). *Blocked:* the parallel path in
       [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is
       commented out, so this repo currently exercises only the serial path and

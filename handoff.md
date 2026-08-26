@@ -380,6 +380,126 @@ as WF-4.2's timing half.
 
 ---
 
+## Test 5 (recovery comparison) — design, results, and KNOWN FLAWS
+
+**Status: WORKING BUT METHODOLOGICALLY WRONG — do not cite.** The recovery
+comparison across the four formats was built and runs, but the HL7v2 result is
+inflated by flaws in the test, not by the format. Identified 2026-08-26; fixing
+deferred to the next session. This section is everything known about the test.
+
+### What it does (as built)
+
+- **Artifacts**: the harness's `--dump-artifacts` writes one representative
+  bundle's Test-1 wire payload per arm (FFHR / JSON / protobuf TLV / HL7v2
+  batch) via `ArmRunResult.test1_payload`.
+- **Corruptor** (`bench/corruption_probe.cpp --mode corrupt`): flips `k` random
+  bits in the format's STRUCTURAL set only:
+  - FFHR: FF_HEADER region + each resource block's 10-byte header
+    (VALIDATION + RECOVERY_TAG).
+  - JSON: brace / bracket / quote / colon / comma characters.
+  - protobuf: TLV record headers (type byte + 4-byte length).
+  - **HL7v2: `\r` segment terminators + the first 3 chars of each segment
+    name. NOT pipes (`|`) or carrots (`^`)** — see Flaw D.
+- **Recovery** (`--mode recover`, runs in a SEPARATE process from the
+  corruptor — the recoverer sees only the corrupted bytes):
+  - FFHR: `FastFHIR::Recovery` (library API) — VALIDATION-word resync;
+    whole-stream fallback on header damage; adjacent-damage dedup.
+  - JSON: full-parse fast path; on failure, entry-span reparse at each
+    `"resource"` marker.
+  - protobuf: TLV length resync + `ParseFromArray` confirmation.
+  - **HL7v2: counts lines that still begin with a known 3-char segment name
+    (MSH/PID/OBX/...).** — see Flaws A/B/C.
+- **Driver** (`scripts/recovery_sweep.py`): subprocess pairs (corrupt →
+  recover) per format × k ∈ {0..512} × 20 trials → `results/recovery_curve.csv`
+  → `fig8_recovery`.
+
+### Results (median % recoverable, 20 trials)
+
+| bits | FastFHIR (entries) | JSON (entries) | protobuf TLV (entries) | HL7v2 (SEGMENTS) |
+|---|---:|---:|---:|---:|
+| 16 | 98.9 | 98.9 | 76.4 | 99.8 |
+| 64 | 95.7 | 95.9 | 46.2 | 99.3 |
+| 128 | 91.6 | 91.9 | 32.5 | 98.6 |
+| 256 | 84.0 | 84.7 | 15.4 | 97.2 |
+| 512 | 70.3 | 71.6 | 9.6 | 94.4 |
+
+The protobuf collapse (one bad length header derails the walk) is real and
+defensible. **The HL7v2 > FastFHIR result is NOT defensible** — it is a
+measurement artifact. The user's read is correct: random delimiter corruption
+with a naive recovery cannot legitimately beat a block-validated format at
+recovering content.
+
+### The flaws (in order of severity)
+
+**A. Units are not comparable — HL7v2 counts SEGMENTS, the others count
+ENTRIES.** The denominators: 8,939 segments (hl7v2) vs 1,473 entries (FFHR /
+JSON / protobuf). A segment is a line; an entry is a whole resource. "94.4% of
+segments still start with a known name" is not "94.4% of the clinical content
+recovered." The figure's caveat says the units differ; that is not enough — the
+numbers must not share an axis until they measure the same semantic.
+
+**B. Damage density is not normalized.** `k` bits against each format's own
+structural position count: 512 flips is ~5.7% of hl7v2's ~9k segment/terminator
+positions but ~60% of FFHR's ~860 block-header positions. Same `k` = wildly
+different damage intensity. The x-axis needs to be "fraction of structural
+positions corrupted" or per-unit flips (e.g., flips per 1,000 segments), not an
+absolute bit count.
+
+**C. The HL7v2 recovery overcounts.** It counts a line as recovered if its
+first 3 bytes are a known segment name — nothing else:
+- A `\r` flip MERGES two segments; the merged line still starts with the first
+  segment's name → counted recovered, though a boundary (and both segments'
+  integrity) is destroyed.
+- A name-char flip on, e.g., 'B' of OBX → "OCX" → uncounted (correct) — but a
+  flip on the SEGMENT's field content (a `|` inside a field) is not even in the
+  structural set, so the corrupted field is never tested.
+- No parse verification: the recovery never checks that the segment splits into
+  the expected field count or that any field value survived. It detects
+  boundaries, not content.
+
+**D. The HL7v2 structural set excludes the real-world cascade triggers.**
+Per FastFHIR's own README §3: "HL7v2 ... a delimiter flip cascades." The
+cascade triggers are `|` (field), `^` (component), `&` (sub-component), `~`
+(repetition). The test corrupts only `\r` + names — the LOWEST-blast-radius
+bytes in the format. Pipe/carrot corruption is both the real failure mode and
+the damaging one; excluding it systematically understates v2's vulnerability.
+(FFHR and JSON get their syntax-critical bytes; v2 does not.)
+
+**E. Blast-radius asymmetry.** Each `\r`/name flip damages at most one hl7v2
+line. FFHR header flips can invalidate the root (whole-stream fallback) and
+adjacent block damage chains. The formats are not under symmetric attack.
+
+### What is sound in the test (keep)
+
+- Corruption and recovery are INDEPENDENT processes (subprocess pairs) — the
+  recoverer genuinely sees only corrupted bytes.
+- The FFHR recovery lives in the library (`FastFHIR::Recovery`) with the
+  CAPI-13 ctor fix (throws, not SEGV) and the adjacent-damage dedup guard.
+- The protobuf collapse and the FastFHIR≈JSON mid-damage tracking are honest.
+- The per-format recovery semantics (resync at the next self-consistent unit)
+  are the right idea; the UNITS and the DENSITY are the problem.
+
+### Fix directions for next session (not started)
+
+1. **One semantic for the y-axis**: "% of the bundle's clinical units a scanner
+   can still extract INTACT" — with content verification in every format:
+   FFHR entries whose block parses; JSON entries whose span parses; protobuf
+   records whose `ParseFromArray` succeeds; **HL7v2 segments that parse to
+   their expected field count AND whose name is intact** (merged-line
+   detection: a `\r`-joined line has too many fields or an embedded `\r`).
+2. **Normalize the x-axis**: flips per 1,000 recoverable units (or % of
+   structural positions), not an absolute `k` shared across formats.
+3. **Add pipes/carrots/amps/tildes to the HL7v2 structural set** — the
+   cascade triggers — and let the recovery attempt real re-delimiting (v2
+   scanners resync at the next MSH; field-level recovery is genuinely harder).
+4. **Reconsider the hl7v2 unit**: messages (5 per bundle — too coarse) or
+   OBX observations (the v2 analogue of entries) with verified fields.
+5. Re-run, re-render, and re-examine whether the HL7v2 curve still claims a
+   win. If it does after content verification + pipe/carrot corruption, THAT
+   would be a real finding; today it is an artifact.
+
+---
+
 ## Release artifacts
 
 The user-facing requirement: **the FastFHIR README should cite an artifact, not
