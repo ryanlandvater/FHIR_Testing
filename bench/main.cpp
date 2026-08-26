@@ -132,6 +132,7 @@ int main(int argc, char **argv)
   // the CMake caches cannot settle. Without --results-dir the harness still
   // prints provenance to stderr; it just does not claim to be an artifact.
   std::string results_dir;
+  std::string artifacts_dir;  // --dump-artifacts: corruption-probe inputs
   std::string profile_override;
   // Bundle composition was seeded from std::random_device, so two runs of the
   // same command measured different bundles and a corruption bug reproduced
@@ -178,6 +179,12 @@ int main(int argc, char **argv)
     else if (args[i] == "--results-dir" && i + 1 < args.size())
     {
       results_dir = std::string(args[i + 1]);
+    }
+    else if (args[i] == "--dump-artifacts" && i + 1 < args.size())
+    {
+      // Instrument G test 5 (recovery comparison): write one representative
+      // bundle's Test-1 wire payload per arm for the corruption probe.
+      artifacts_dir = std::string(args[i + 1]);
     }
     else if (args[i] == "--profile" && i + 1 < args.size())
     {
@@ -263,6 +270,46 @@ int main(int argc, char **argv)
   std::cerr << "Bundle composition seed: "
             << (rng_seed != 0 ? std::to_string(rng_seed) : std::string("random")) << "\n";
   std::uniform_int_distribution<std::size_t> patient_dist(0, all_patients.size() - 1);
+
+  if (!artifacts_dir.empty())
+  {
+    // One representative bundle, one run per arm, wire payloads to files --
+    // the corruption probe (Instrument G test 5 comparison) consumes these.
+    bench::BundleBenchFixture bundle{};
+    bundle.target_size_bytes = 16LL * 1024 * 1024;
+    int64_t accumulated = 0;
+    while (accumulated < bundle.target_size_bytes)
+    {
+      const auto &p = all_patients[patient_dist(rng)];
+      bundle.bundle.push_back(bench::clone_bundle_patient(p.patient));
+      accumulated += p.patient.memory.size();
+    }
+    bundle.actual_ingested_bytes = accumulated;
+    const auto ff = bench::run_fastfhir_bundle(bundle);
+    const auto jf = bench::run_json_bundle(bundle);
+#if defined(HAVE_HL7V2)
+    const auto h2 = bench::run_hl7v2_bundle(bundle);
+#endif
+#if defined(HAVE_GOOGLE_FHIR)
+    const auto gf = bench::run_google_fhir_bundle(bundle);
+#endif
+    auto write = [&](const char *name, const std::string &bytes)
+    {
+      std::ofstream ofs(std::string(artifacts_dir) + "/" + name, std::ios::binary);
+      ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      std::cerr << "[artifacts] wrote " << name << " (" << bytes.size() << " bytes)\n";
+    };
+    write("fastfhir.bin", ff.test1_payload);
+    write("json.bin", jf.test1_payload);
+#if defined(HAVE_HL7V2)
+    write("hl7v2.bin", h2.test1_payload);
+#endif
+#if defined(HAVE_GOOGLE_FHIR)
+    write("google_fhir.bin", gf.test1_payload);
+#endif
+    std::cerr << "Artifact dump complete.\n";
+    return 0;
+  }
 
   // -----------------------------------------------------------------------
   // Provenance (TASKS.md IN-0)

@@ -86,6 +86,10 @@ struct ArmRunResult {
   std::vector<MetricEvent> metrics;
   std::string queried_value;
   std::string reconstructed_bundle_json;
+  // Test-1 wire payload (sealed FFHR bytes / JSON text / protobuf TLV / HL7v2
+  // batch). Used only by --dump-artifacts to produce corruption-probe inputs;
+  // a copy per sample, so populated lazily by that mode's arms.
+  std::string test1_payload;
   std::variant<std::monostate, FastFHIR::Memory, std::string> enriched_stream;
   std::string enrich_metrics_summary;
   std::string random_access_summary;

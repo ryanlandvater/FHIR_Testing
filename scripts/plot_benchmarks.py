@@ -755,51 +755,66 @@ def fig_random_access(df: pd.DataFrame, prov: Provenance, out: Path, exts: list[
 
 
 def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
-    """Instrument G test 5: % of bundle entries recovered vs structural bits corrupted.
+    """Instrument G test 5: % recoverable vs structural bits corrupted, per format.
 
-    Data source: results/recovery_curve.csv, emitted by
-    //bench:resilience_test (run from the repo root). The curve's shape is the
-    finding: sparse structural damage recovers almost fully via VALIDATION-word
-    resync; dense damage (adjacent damaged blocks, header corruption) costs
-    entries. Qualifiers: malformed-not-hostile; the recovery probe pre-validates
-    the header itself because Parser construction SEGVs on a corrupted header
-    (CAPI-13).
+    Data source: results/recovery_curve.csv, emitted by scripts/recovery_sweep.py
+    (corruption and recovery run as INDEPENDENT subprocesses per sample; the
+    recoverer sees only the corrupted bytes). Recoverable units differ by
+    format -- entries for FFHR/JSON/protobuf, SEGMENTS for HL7v2 (a v2 batch
+    has no resource-level index): a granularity finding, stated on the figure.
+    Structural flips only (syntax regions); payload bytes untouched.
+    Qualifiers: malformed-not-hostile; integrity-not-authenticity.
     """
     csv_path = Path("results/recovery_curve.csv")
     if not csv_path.is_file():
         print("  skip fig8: no results/recovery_curve.csv — run "
-              "./bazel-bin/bench/resilience_test from the repo root")
+              "scripts/recovery_sweep.py from the repo root")
         return
     rc = pd.read_csv(csv_path)
-    med = rc.groupby("bits_corrupted")["recovered_pct"].median()
-    lo = rc.groupby("bits_corrupted")["recovered_pct"].min()
-    hi = rc.groupby("bits_corrupted")["recovered_pct"].max()
+    labels = {
+        "fastfhir": "FastFHIR (entries)",
+        "json": "JSON (entries)",
+        "protobuf": "protobuf TLV (entries)",
+        "hl7v2": "HL7v2 (segments)",
+    }
 
-    fig, ax = plt.subplots(figsize=(9.5, 5.0))
+    fig, ax = plt.subplots(figsize=(9.5, 5.2))
     fig.suptitle("Recoverability under structural corruption (Instrument G, test 5)",
                  fontsize=12, y=0.985, x=0.008, ha="left", color=TEXT_PRIMARY)
-    ax.fill_between(med.index.to_numpy(), lo.to_numpy(), hi.to_numpy(),
-                    color=arm_color("fastfhir"), alpha=0.18, lw=0)
-    ax.plot(med.index.to_numpy(), med.to_numpy(), color=arm_color("fastfhir"),
-            lw=2, marker="o", ms=5, mec=SURFACE, mew=1.2)
+    for i, fmt in enumerate(labels):
+        sub = rc[rc["format"] == fmt]
+        if sub.empty:
+            continue
+        med = sub.groupby("bits_corrupted")["recovered_pct"].median()
+        lo = sub.groupby("bits_corrupted")["recovered_pct"].min()
+        hi = sub.groupby("bits_corrupted")["recovered_pct"].max()
+        color = arm_color(["fastfhir", "json_fhir", "google_fhir", "hl7v2"][i])
+        ax.fill_between(med.index.to_numpy(), lo.to_numpy(), hi.to_numpy(),
+                        color=color, alpha=0.14, lw=0)
+        ax.plot(med.index.to_numpy(), med.to_numpy(), color=color, lw=2, marker="o",
+                ms=4, mec=SURFACE, mew=1.2, label=labels[fmt])
     ax.axhline(100.0, color=TEXT_MUTED, lw=0.8)
     ax.annotate("100% = fully recoverable", xy=(0.02, 100.0), xycoords=("axes fraction", "data"),
                 xytext=(0, 4), textcoords="offset points", fontsize=6.8, color=TEXT_MUTED)
     ax.set_xscale("log", base=2)
-    ax.set_xlabel("structural bits corrupted (FF_HEADER + block headers)")
-    ax.set_ylabel("bundle entries recovered (%)")
+    ax.set_xlabel("structural bits corrupted (per-format syntax regions)")
+    ax.set_ylabel("recoverable units (%)")
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
+    ax.legend(loc="lower left", ncol=1, frameon=False, labelcolor=TEXT_SECONDARY, fontsize=8)
 
-    fig.tight_layout(rect=[0, 0.17, 1, 0.96])
+    fig.tight_layout(rect=[0, 0.18, 1, 0.95])
     finish(fig, prov, [
-        "Random bit flips in structural regions only (FF_HEADER + 10-byte block headers) — "
-        "payload bytes untouched, which is the claim's scope (integrity vs authenticity).",
-        "The recovery walk resyncs at the next self-consistent VALIDATION word; when the "
-        "header is unsafe it scans the whole stream (the probe pre-validates the header "
-        "because Parser construction SEGVs on a corrupted one — CAPI-13).",
-        "20 trials per point; band = min..max. Dense damage loses entries via adjacent-damage "
-        "chains, not via a single block failing.",
+        "Corruption and recovery are INDEPENDENT processes (scripts/recovery_sweep.py): "
+        "the recoverer reads only the corrupted bytes, a scanner's view.",
+        "Structural flips only (FFHR header+block headers; JSON brace/bracket/quote/colon/"
+        "comma; protobuf TLV record headers; HL7v2 segment terminators+names) -- payload "
+        "bytes untouched.",
+        "Granularity: recoverable units are entries for FFHR/JSON/protobuf and SEGMENTS "
+        "for HL7v2 (a v2 batch has no resource-level index) -- not the same unit, a "
+        "format finding.",
+        "20 trials per point; band = min..max. The FFHR recovery pre-validates the header "
+        "because Parser construction SEGVs on a corrupted one (CAPI-13).",
     ])
     save(fig, out / "fig8_recovery", exts)
 

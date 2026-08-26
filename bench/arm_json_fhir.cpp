@@ -130,6 +130,7 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   // Wire size is read AFTER the clock stops (notes.md section 6).
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+  out.test1_payload = payload;  // --dump-artifacts input
 
   if (const char* full = std::getenv("BENCH_DUMP_FULL"))
   {

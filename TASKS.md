@@ -152,6 +152,20 @@ Consequences:
 
 Newest first. One line per change, with what it did and did not settle.
 
+- **2026-08-26 (review)** — Reviewing the D4/lens/compact commit surfaced
+  **PA-14 / CAPI-13**: `as<ObservationData>()` drops singular block fields, so
+  `Observation.code` and `subject` have never reached any arm's output and the
+  LOINC query has never matched. The lens retool in that commit is a genuine
+  fix (Test 3 `as<ObservationData>()` → node lenses, 5.1x, byte-identical
+  output) but it was measured against a workload with 0 matches, so the number
+  does not stand yet. Also restored the full-traversal walk as
+  [`bench/walk_diagnostic.hpp`](bench/walk_diagnostic.hpp) — **diagnostic only,
+  never a stage, off unless `BENCH_WALK=1`** — because upstream CAPI-7/CAPI-8
+  cited measurements the retirement had made unreproducible. Re-measuring
+  corrected those figures: −22.4% (strlen) and −19.2% (`entries()` allocation)
+  reproduce; the previously claimed combined −35.1% does **not**, and is
+  withdrawn upstream.
+
 - **2026-08-26 (later)** — **JSON arm serializes effectiveDateTime correctly —
       the Test 3 FF↔JSON gate is now clean on every census field.** The hydrated
       `ChoiceEntry` for a datetime choice carries the RAW 63-bit packed slot as
@@ -303,6 +317,42 @@ cross-arm parity mismatch, not a crash.
 ## ▶ PA — parity repair
 
 **Status** OPEN · **Blocks** publishing any number
+
+- [ ] **PA-14. 🔴 The query has never matched anything, in any arm.**
+      Found 2026-08-26. Test 3 searches Observations for LOINC 2085-9 and
+      reports **0 matches over 24,583 observations**, while the corpus carries
+      ~3.75 instances of that code per Synthea file. Cause is upstream and is
+      now **CAPI-13 (P0)**: `Node::as<ObservationData>()` silently drops
+      **singular** block-typed fields. Same nodes, two readers:
+
+      | field | cardinality | lens | `as<ObservationData>()` |
+      |---|---|---:|---:|
+      | `code` | 0..1 | **93/93** | **0/93** |
+      | `subject` | 0..1 | **93/93** | **0/93** |
+      | `category` | 0..* | 93/93 | 93/93 ✔ |
+      | `component` | 0..* | 13/13 | 13/13 ✔ |
+
+      Every arm serializes from the hydrated POCO, so **no arm has ever written
+      `Observation.code`**. Consequences, all of which invalidate current
+      numbers:
+
+      1. **Test 3 is not a query.** The match branch is dead code in all four
+         arms; the stage measures a scan that cannot succeed. No Test 3 number
+         is publishable, including the 5.1x FF-over-JSON result from the lens
+         retool — that fix is real, but it was measured on a workload with no
+         matches.
+      2. **Test 1 under-serializes.** Every arm writes Observations without a
+         code, so every wire size in this repo is smaller than real FHIR.
+      3. **Bundles are not partitioned by patient.** The fixture filters on
+         `resource.subject` matching the patient id
+         ([`bench/harness.hpp:501`](bench/harness.hpp:501)); `subject` is always
+         null, so the filter never runs and every observation is attached to
+         every patient.
+
+      Reproduce: `BENCH_CODE_CENSUS=1 ./bazel-bin/bench/bench_harness --runs 1
+      --bundle-targets-mb 1`. **Blocked on CAPI-13** for the real fix; until it
+      lands, Test 3 must be reported as "scan-only, 0 matches by construction"
+      or held back entirely.
 
 - [ ] **PA-1. Test 1 is not at parity.** The FastFHIR arm serializes every POCO
       field via `append_obj`; the other three write the ~25 fields the macro
@@ -625,14 +675,18 @@ Ordered by what unblocks the most.
       Qualifiers preserved: malformed-not-hostile (G1), integrity-not-
       authenticity. Test 4's "blocked on IN-H" note was stale — the suite
       exercises the library's `claim_space` directly, not the arm's parallel      **Test 5 (recovery) added 2026-08-26:** random structural bit flips
-      (FF_HEADER + block headers) vs % entries recovered by VALIDATION-word
-      resync — sparse damage (≤64 bits) recovers ~99.5%, dense damage (512)
-      drops to ~36% via adjacent-damage chains. Curve: `results/recovery_curve.csv`
-      + `fig8_recovery`. Two upstream findings from the probe: **CAPI-13**
-      (Parser ctor SEGVs on a corrupted header instead of throwing — the probe
-      pre-validates the header manually) and **CAPI-14** (generated POCO string
-      fields are `string_view`; assigning a temporary dangles — ASan caught it
-      in the concurrent-build fixture).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
+      vs % recoverable — now a FOUR-FORMAT comparison with corruption and
+      recovery as INDEPENDENT processes (`bench/corruption_probe.cpp`
+      --corrupt/--count/--recover + `scripts/recovery_sweep.py`). Medians:
+      FastFHIR ~100% through 128 bits (70% at 512); HL7v2 94% even at 512
+      (segments — a different unit, stated on the figure); JSON 72%;
+      protobuf TLV collapses (46% at 64, 9.6% at 512 — a bad length header
+      derails the chain). Curve: `results/recovery_curve.csv` +
+      `fig8_recovery`. Harness gained `--dump-artifacts` (one bundle's
+      Test-1 wire payload per arm). Two upstream findings from the probe:
+      **CAPI-13** (Parser ctor SEGVs on a corrupted header — the probe
+      pre-validates the header manually) and **CAPI-14** (generated POCO
+      string fields are `string_view`; assigning a temporary dangles).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
 - [ ] **IN-H. Thread-scaling curve** (WF-4.2). *Blocked:* the parallel path in
       [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is
       commented out, so this repo currently exercises only the serial path and
@@ -687,6 +741,23 @@ that tree is a symlinked live checkout. Track them here; do not fix them here.
 - [ ] **HY-4. Keep `--seed` deterministic by default** (currently `20260825u`,
       [`bench/main.cpp:133`](bench/main.cpp:133)) and record it in results
       metadata alongside profile and SHA.
+- [ ] **HY-7. 🔴 A stage that produces zero results must fail the run.** The
+      LOINC query returned **0 matches over 24,583 observations** and every
+      check passed — including the cross-arm parity gate, because all four arms
+      were equally wrong. Agreement is not correctness; four readers agreeing on
+      zero is what a shared upstream defect looks like. Every counting stage
+      needs an **absolute floor** alongside its cross-arm comparison:
+      - Test 3 must assert `loinc_matches > 0` (the corpus contains ~3.75 per
+        file; a run finding none is a failure, not a fast number).
+      - Test 2 already has its byte-parity gate — add `bytes_read > 0`.
+      - Any future census field: assert non-zero before asserting equality.
+
+      This is the third time this class of defect has hidden here: the 1-node
+      Test 2 walk (notes.md §2), the HL7v2 random-access probe reading 0 bytes
+      twice, and now the query. The pattern is always the same — a gate that
+      compares two values without first requiring either to be meaningful.
+      Filed upstream as a testing-policy P0 too, since their suites share it.
+
 - [ ] **HY-5. Retire the stale Google-arm "stub" text.** notes.md §5b disproved
       it and correction banners were added to the tops of the affected
       documents, but the body text still asserts it at

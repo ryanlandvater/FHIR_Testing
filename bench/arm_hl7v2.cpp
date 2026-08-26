@@ -47,6 +47,7 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   // Wire size is read AFTER the clock stops (notes.md section 6).
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
   out.metrics.push_back({"hl7v2", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+  out.test1_payload = payload;  // --dump-artifacts input
 
   Timer test3_timer;
   test3_timer.start();

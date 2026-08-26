@@ -203,6 +203,11 @@ namespace bench
     // real operation and stop_ns() (notes.md section 6).
     const std::int64_t test1_bytes = static_cast<std::int64_t>(payload_memory.view().size());
     out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+    // --dump-artifacts input (see main.cpp): the sealed wire bytes.
+    {
+      const auto v = payload_memory.view();
+      out.test1_payload.assign(v.data(), v.size());
+    }
 
     if (std::getenv("BENCH_VALIDATE"))
     {
