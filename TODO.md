@@ -2,8 +2,12 @@
 
 > ✅ **SHIPPED 2026-08-26** — implemented as
 > [`bench/resilience_test.cpp`](bench/resilience_test.cpp), all four tests
-> passing (truncation, bit-flip, type-confusion, concurrent build). This
-> document remains the spec/record; the tracker is TASKS.md **IN-G**.
+> passing (truncation, bit-flip, type-confusion, concurrent build) plus a
+> recovery probe (test 5): structural-bit-flip curve vs % entries recovered
+> by VALIDATION-word resync (`fig8_recovery`). Two upstream findings:
+> CAPI-13 (Parser ctor SEGVs on a corrupted header) and CAPI-14 (POCO
+> `string_view` fields dangle on temporary assignment).
+> This document remains the spec/record; the tracker is TASKS.md **IN-G**.
 
 > **This is a design specification, not a task list.** The only backlog is
 > [`TASKS.md`](TASKS.md); this document is what **IN-G** there points at. Four

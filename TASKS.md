@@ -624,8 +624,15 @@ Ordered by what unblocks the most.
       concurrent `append_obj` (8×25) validates with all blocks reachable.
       Qualifiers preserved: malformed-not-hostile (G1), integrity-not-
       authenticity. Test 4's "blocked on IN-H" note was stale — the suite
-      exercises the library's `claim_space` directly, not the arm's parallel
-      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
+      exercises the library's `claim_space` directly, not the arm's parallel      **Test 5 (recovery) added 2026-08-26:** random structural bit flips
+      (FF_HEADER + block headers) vs % entries recovered by VALIDATION-word
+      resync — sparse damage (≤64 bits) recovers ~99.5%, dense damage (512)
+      drops to ~36% via adjacent-damage chains. Curve: `results/recovery_curve.csv`
+      + `fig8_recovery`. Two upstream findings from the probe: **CAPI-13**
+      (Parser ctor SEGVs on a corrupted header instead of throwing — the probe
+      pre-validates the header manually) and **CAPI-14** (generated POCO string
+      fields are `string_view`; assigning a temporary dangles — ASan caught it
+      in the concurrent-build fixture).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
 - [ ] **IN-H. Thread-scaling curve** (WF-4.2). *Blocked:* the parallel path in
       [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is
       commented out, so this repo currently exercises only the serial path and

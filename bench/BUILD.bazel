@@ -13,6 +13,7 @@ cc_library(
         "bench_test_3.hpp",
         "bench_test_4.hpp",
         "harness.hpp",
+        "walk_diagnostic.hpp",
         "hl7v2_message.hpp",
     ],
     deps = [

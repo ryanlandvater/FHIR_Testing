@@ -574,6 +574,57 @@ inline void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
   // Doing it here means every arm receives byte-identical POCOs. See the
   // sanitize_choice() commentary above and notes.md.
   sanitize_patient(bundle_patient.patient);
+  if (std::getenv("BENCH_CODE_CENSUS")) {
+    // Lens vs POCO on the SAME node: does the reflective reader find
+    // Observation.code where as<ObservationData>() does not?
+    std::size_t lens_code = 0, lens_coding = 0, poco_code = 0;
+    for (const auto& n : observation_nodes) {
+      if (auto ce = n[FastFHIR::Fields::OBSERVATION::CODE]) {
+        ++lens_code;
+        auto cc = ce.as_node();
+        if (cc) {
+          if (auto cod = cc[FastFHIR::Fields::CODEABLECONCEPT::CODING]) {
+            if (cod.size() > 0) ++lens_coding;
+          }
+        }
+      }
+      if (n.as<ObservationData>().code) ++poco_code;
+    }
+    // Which other fields does the POCO deserializer drop on the same nodes?
+    std::size_t p_cat = 0, p_subject = 0, p_id = 0, p_dar = 0, p_comp = 0;
+    std::size_t l_cat = 0, l_comp = 0, l_subj = 0;
+    for (const auto& n : observation_nodes) {
+      const auto o = n.as<ObservationData>();
+      if (!o.category.empty()) ++p_cat;
+      if (o.subject) ++p_subject;
+      if (!o.id.empty()) ++p_id;
+      if (o.dataabsentreason) ++p_dar;
+      if (!o.component.empty()) ++p_comp;
+      if (auto e = n[FastFHIR::Fields::OBSERVATION::CATEGORY]) { if (e.size() > 0) ++l_cat; }
+      if (n[FastFHIR::Fields::OBSERVATION::SUBJECT]) ++l_subj;
+      if (auto e = n[FastFHIR::Fields::OBSERVATION::COMPONENT]) { if (e.size() > 0) ++l_comp; }
+    }
+    std::fprintf(stderr,
+                 "[code-census] POCO: id=%zu subject=%zu category=%zu component=%zu "
+                 "dataAbsentReason=%zu | lens: category=%zu component=%zu subject=%zu\n",
+                 p_id, p_subject, p_cat, p_comp, p_dar, l_cat, l_comp, l_subj);
+    std::fprintf(stderr, "[code-census] source nodes=%zu | lens sees code=%zu coding[]=%zu | "
+                 "as<ObservationData>().code=%zu\n",
+                 observation_nodes.size(), lens_code, lens_coding, poco_code);
+  }
+  if (std::getenv("BENCH_CODE_CENSUS")) {
+    std::size_t with_code = 0, with_coding = 0, with_code_str = 0;
+    for (const auto& o : bundle_patient.observations) {
+      if (!o.code) continue;
+      ++with_code;
+      if (!o.code->coding.empty()) ++with_coding;
+      for (const auto& c : o.code->coding)
+        if (!c.code.empty()) { ++with_code_str; break; }
+    }
+    std::fprintf(stderr, "[code-census] pre-sanitize: %zu observations, %zu with code, "
+                 "%zu with coding[], %zu with a non-empty coding.code\n",
+                 bundle_patient.observations.size(), with_code, with_coding, with_code_str);
+  }
   for (auto& observation : bundle_patient.observations) {
     sanitize_observation(observation);
     if (std::getenv("BENCH_DROP_OBS_CODE")) observation.code.reset();

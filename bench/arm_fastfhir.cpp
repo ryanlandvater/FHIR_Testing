@@ -17,6 +17,7 @@
 #include "bench_test_2.hpp"
 #include "bench_test_3.hpp"
 #include "bench_test_4.hpp"
+#include "walk_diagnostic.hpp"
 #undef ARM_FASTFHIR
 
 namespace bench
@@ -329,6 +330,11 @@ namespace bench
         std::fprintf(stderr, "[warn] test_3_compact failed: %s\n", ex.what());
       }
     }
+
+  // Full-traversal walk -- DIAGNOSTIC ONLY, off unless BENCH_WALK=1, never a
+  // reported stage. Retained so upstream CAPI-7 / CAPI-8 stay reproducible;
+  // D4 retired the walk as a stage, not as evidence.
+  (void)walk_diag::run(payload_memory);
 
   // Test 2 -- random access (IN-B / WF-1.1). Out-of-order reads, navigating
   // from the root each time; the retired materialize walk read in layout

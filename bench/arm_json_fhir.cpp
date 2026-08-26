@@ -1,5 +1,7 @@
 #include "harness.hpp"
 
+#include <fstream>
+
 #include <algorithm>
 #include <nlohmann/json.hpp>
 
@@ -129,6 +131,11 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
 
+  if (const char* full = std::getenv("BENCH_DUMP_FULL"))
+  {
+    std::ofstream f(full);
+    f << payload;
+  }
   if (std::getenv("BENCH_DUMP_JSON"))
   {
     // Parity debugging: show what the effective/issued fields actually
