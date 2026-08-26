@@ -468,7 +468,26 @@ the damaging one; excluding it systematically understates v2's vulnerability.
 **E. Blast-radius asymmetry.** Each `\r`/name flip damages at most one hl7v2
 line. FFHR header flips can invalidate the root (whole-stream fallback) and
 adjacent block damage chains. The formats are not under symmetric attack.
-
+**F. The y-axis semantic is ASYMMETRIC — and the curves are identical by
+construction.** JSON's "recovered" is CONTENT-VERIFIED (a full nlohmann parse
+of the entry span must succeed); FFHR's "recovered" is HEADER-ONLY
+(`FastFHIR::Recovery` counts blocks with a valid VALIDATION word + known
+RECOVERY_TAG — the interior fields are never walked). Measured 2026-08-26:
+at one flip, JSON loses 1–2 entries, FFHR loses exactly 1. Both formats have
+~one-unit blast radius per structural flip, and both recovery routines resync
+past the damaged unit — so the curves track each other BY CONSTRUCTION, not
+because the formats recover comparably. Two consequences:
+- The near-identical JSON/FFHR curves do NOT demonstrate the recovery
+  routine's value — nothing in the current metric isolates what differs.
+- The asymmetry may even FAVOR FFHR: JSON does strictly more work per unit
+  (full parse) and still matches FFHR's looser count. FFHR's true
+  content-recovery rate is lower than measured.
+What the fixed test must isolate instead: (1) detection WITHOUT parsing —
+FFHR validates offsets O(1) per block; JSON discovers damage only by parsing;
+(2) self-delimiting boundaries — FFHR's VALIDATION is positional (a flip
+cannot move a block boundary), JSON's resync marker (`"resource"`) is itself
+corruptible content; (3) the cost of a flip at DENSITY (multiple flips
+interacting) rather than the per-unit rate.
 ### What is sound in the test (keep)
 
 - Corruption and recovery are INDEPENDENT processes (subprocess pairs) — the
