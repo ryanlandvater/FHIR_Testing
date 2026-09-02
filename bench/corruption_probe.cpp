@@ -676,21 +676,37 @@ int mode_extract(const std::string &format, const std::string &in)
 {
   const auto b = read_file(in);
   ValueLines lines;
+  // Repair runs outside the extractor's own try/catch, and FastFHIR::Recovery
+  // is documented to RETHROW worker exceptions -- on extreme damage
+  // recover()/apply() can throw. A recovery routine that throws on its input
+  // recovered nothing: score the trial as zero values instead of letting one
+  // bad draw abort the whole sweep (observed: k=512 FFHR trial crashed the
+  // data-axis run).
+  auto guarded = [&](std::vector<uint8_t> (*repair)(const std::vector<uint8_t> &),
+                     ValueLines (*extract)(const std::vector<uint8_t> &)) {
+    try {
+      return extract(repair(b));
+    } catch (const std::exception &ex) {
+      std::fprintf(stderr, "extract: %s repair threw -- 0 values recovered: %s\n",
+                   format.c_str(), ex.what());
+      return ValueLines{};
+    }
+  };
   if (format == "fastfhir") {
 #if defined(PROBE_HAS_FASTFHIR)
-    lines = fastfhir_extract(fastfhir_repair(b));
+    lines = guarded(fastfhir_repair, fastfhir_extract);
 #else
     return 2;
 #endif
   } else if (format == "json") {
 #if defined(PROBE_HAS_JSON)
-    lines = json_extract(json_repair(b));
+    lines = guarded(json_repair, json_extract);
 #else
     return 2;
 #endif
   } else if (format == "hl7v2") {
 #if defined(PROBE_HAS_HL7V2)
-    lines = hl7v2_extract(hl7v2_repair(b));
+    lines = guarded(hl7v2_repair, hl7v2_extract);
 #else
     return 2;
 #endif

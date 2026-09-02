@@ -12,11 +12,13 @@ cc_library(
         "bench_test_2.hpp",
         "bench_test_3.hpp",
         "bench_test_4.hpp",
+        "bench_test_5.hpp",
         "harness.hpp",
         "walk_diagnostic.hpp",
         "hl7v2_message.hpp",
     ],
     deps = [
+        ":bench_provenance",
         "//:fastfhir_runtime",
         "@nlohmann_json//:json",
     ],
@@ -38,7 +40,10 @@ cc_library(
 cc_library(
     name = "bench_core_hl7v2",
     srcs = ["arm_hl7v2.cpp"],
-    deps = [":bench_core_common"],
+    deps = [
+        ":bench_core_common",
+        ":bench_provenance",
+    ],
 )
 
 cc_library(
@@ -49,6 +54,7 @@ cc_library(
     deps = [
         ":bench_core_common",
         ":bench_core_hl7v2",
+        ":bench_provenance",
         "//:google_fhir_runtime",
     ],
 )
@@ -116,10 +122,12 @@ cc_binary(
     ],
 )
 
-# Instrument G test 5 -- cross-format corruption/recovery probe. Three
-# INDEPENDENT process modes: --corrupt (flip k structural bits per format),
-# --count (clean recoverable units), --recover (resync from corrupted bytes
-# only). Driven by scripts/recovery_sweep.py; plotted as fig8_recovery.
+# Instrument G test 5 -- FFHR content-level diagnostics (REC-15 apply():
+# --mode extract/verify report correct/lost/wrong/spurious leaf values after
+# repair; --mode count/report/recover print the reconciliation breakdown).
+# The cross-format recovery CURVE is produced by //bench:bench_test_5 +
+# scripts/recovery_sweep.py (macro-parity driver, anchored subset check);
+# this probe stays as the FFHR apply() instrumentation.
 cc_binary(
     name = "corruption_probe",
     srcs = ["corruption_probe.cpp"],
@@ -130,6 +138,24 @@ cc_binary(
         "//:google_fhir_runtime",
     ],
     defines = ["PROBE_HAS_FASTFHIR", "PROBE_HAS_JSON", "PROBE_HAS_PROTOBUF", "PROBE_HAS_HL7V2"],
+)
+
+# Instrument G test 5 driver (macro-parity restructure). Links the four arm
+# TUs -- each compiled bench_test_5.hpp under its own ARM_* macro -- and
+# dispatches five INDEPENDENT process modes: --hash (clean-wire fingerprint,
+# the baseline producer), --corrupt, --recover, --check (a third process that
+# holds the baseline and verifies recovered units are a content-verified
+# subset of it), and --positions (the structural-position count that
+# normalizes the k axis per format). See bench_test_5.cpp for the CLI and the
+# binary fingerprint-file format. Driven by scripts/recovery_sweep.py.
+cc_binary(
+    name = "bench_test_5",
+    srcs = ["bench_test_5.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":bench_core_harness",
+        ":bench_provenance",
+    ],
 )
 
 # Read-path validation binary — reports whole-document traversal costs as an

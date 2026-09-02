@@ -10,6 +10,7 @@
 #include "bench_test_2.hpp"
 #include "bench_test_3.hpp"
 #include "bench_test_4.hpp"
+#include "bench_test_5.hpp"
 #undef ARM_HL7V2
 
 namespace bench {
@@ -79,3 +80,17 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
 }
 
 }  // namespace bench
+
+namespace bench::test_5 {
+namespace {
+std::size_t count_positions(const std::vector<uint8_t>& wire) {
+  return arm_hl7v2::structural_positions(wire).size();
+}
+}  // namespace
+const ArmOps &arm_ops_hl7v2() {
+  static const ArmOps ops{"hl7v2", &arm_hl7v2::calc_stream_hash,
+                          &arm_hl7v2::corrupt_stream, &arm_hl7v2::recover_stream,
+                          &count_positions};
+  return ops;
+}
+}  // namespace bench::test_5

@@ -17,6 +17,7 @@
 #include "bench_test_2.hpp"
 #include "bench_test_3.hpp"
 #include "bench_test_4.hpp"
+#include "bench_test_5.hpp"
 #include "walk_diagnostic.hpp"
 #undef ARM_FASTFHIR
 
@@ -417,3 +418,17 @@ namespace bench
   }
 
 } // namespace bench
+
+namespace bench::test_5 {
+namespace {
+std::size_t count_positions(const std::vector<uint8_t>& wire) {
+  return arm_fastfhir::structural_positions(wire).size();
+}
+}  // namespace
+const ArmOps &arm_ops_fastfhir() {
+  static const ArmOps ops{"fastfhir", &arm_fastfhir::calc_stream_hash,
+                          &arm_fastfhir::corrupt_stream,
+                          &arm_fastfhir::recover_stream, &count_positions};
+  return ops;
+}
+}  // namespace bench::test_5

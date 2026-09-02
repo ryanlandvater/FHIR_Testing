@@ -755,13 +755,18 @@ def fig_random_access(df: pd.DataFrame, prov: Provenance, out: Path, exts: list[
 
 
 def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
-    """Instrument G test 5: % recoverable vs structural bits corrupted, per format.
+    """Instrument G test 5: content-verified recovery vs damage density, per format.
 
-    Data source: results/recovery_curve.csv, emitted by scripts/recovery_sweep.py
-    (corruption and recovery run as INDEPENDENT subprocesses per sample; the
-    recoverer sees only the corrupted bytes). Recoverable units differ by
-    format -- entries for FFHR/JSON/protobuf, SEGMENTS for HL7v2 (a v2 batch
-    has no resource-level index): a granularity finding, stated on the figure.
+    Data source: results/recovery_curve.csv, emitted by scripts/recovery_sweep.py.
+    Corruption and recovery run as INDEPENDENT subprocesses per sample; the
+    recoverer sees only the corrupted bytes. The y-axis is CONTENT-VERIFIED
+    recovery: each recovered unit must exist in the clean baseline with the
+    same identity (parent, offset, tag) AND the same data-content hash (FNV-1a
+    over the unit's own bytes -- FFHR the referenced block, JSON the entry
+    span, protobuf the record payload, HL7v2 the segment body after the
+    header). A unit that is present but whose data changed is scored WRONG,
+    not recovered: a blasted interior pipe shifts fields silently and the
+    segment no longer carries the data it carried. pct = correct/baseline.
     Structural flips only (syntax regions); payload bytes untouched.
     Qualifiers: malformed-not-hostile; integrity-not-authenticity.
     """
@@ -771,54 +776,64 @@ def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
               "scripts/recovery_sweep.py from the repo root")
         return
     rc = pd.read_csv(csv_path)
-    labels = {
-        "fastfhir": "FastFHIR (entries)",
+    units = {
+        "fastfhir": "FastFHIR (block refs)",
         "json": "JSON (entries)",
-        "protobuf": "protobuf TLV (entries)",
+        "google_fhir": "protobuf TLV (records)",
         "hl7v2": "HL7v2 (segments)",
     }
+    colors = {
+        "fastfhir": arm_color("fastfhir"),
+        "json": arm_color("json_fhir"),
+        "google_fhir": arm_color("google_fhir"),
+        "hl7v2": arm_color("hl7v2"),
+    }
+    # Density axis: bits / structural positions on the clean wire. k=0 has no
+    # density (and always scores 100.0 by construction) so it is not plotted.
+    rc = rc[rc["bits_corrupted"] > 0].copy()
+    rc["density_pct"] = 100.0 * rc["bits_corrupted"] / rc["positions_total"]
 
     fig, ax = plt.subplots(figsize=(9.5, 5.2))
-    fig.suptitle("Recoverability under structural corruption (Instrument G, test 5)",
+    fig.suptitle("Content-verified recovery under structural corruption (Instrument G, test 5)",
                  fontsize=12, y=0.985, x=0.008, ha="left", color=TEXT_PRIMARY)
-    for i, fmt in enumerate(labels):
+    for fmt in units:
         sub = rc[rc["format"] == fmt]
         if sub.empty:
             continue
-        med = sub.groupby("bits_corrupted")["recovered_pct"].median()
-        lo = sub.groupby("bits_corrupted")["recovered_pct"].min()
-        hi = sub.groupby("bits_corrupted")["recovered_pct"].max()
-        color = arm_color(["fastfhir", "json_fhir", "google_fhir", "hl7v2"][i])
-        ax.fill_between(med.index.to_numpy(), lo.to_numpy(), hi.to_numpy(),
-                        color=color, alpha=0.14, lw=0)
-        ax.plot(med.index.to_numpy(), med.to_numpy(), color=color, lw=2, marker="o",
-                ms=4, mec=SURFACE, mew=1.2, label=labels[fmt])
+        g = sub.groupby("density_pct")["recovered_pct"]
+        xs = g.median().index.to_numpy()
+        med = g.median().to_numpy()
+        lo = g.min().to_numpy()
+        hi = g.max().to_numpy()
+        ax.fill_between(xs, lo, hi, color=colors[fmt], alpha=0.14, lw=0)
+        ax.plot(xs, med, color=colors[fmt], lw=2, marker="o",
+                ms=4, mec=SURFACE, mew=1.2, label=units[fmt])
     ax.axhline(100.0, color=TEXT_MUTED, lw=0.8)
-    ax.annotate("100% = fully recoverable", xy=(0.02, 100.0), xycoords=("axes fraction", "data"),
-                xytext=(0, 4), textcoords="offset points", fontsize=6.8, color=TEXT_MUTED)
-    ax.set_xscale("log", base=2)
-    ax.set_xlabel("structural bits corrupted (per-format syntax regions)")
-    ax.set_ylabel("recoverable units (%)")
+    ax.annotate("100% = every unit back with its data", xy=(0.02, 100.0),
+                xycoords=("axes fraction", "data"), xytext=(0, 4),
+                textcoords="offset points", fontsize=6.8, color=TEXT_MUTED)
+    ax.set_xscale("log")
+    ax.set_xlabel("structural positions corrupted (%) — k bits over each format's own syntactic surface")
+    ax.set_ylabel("recovered units with intact data (%) — correct / baseline")
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.legend(loc="lower left", ncol=1, frameon=False, labelcolor=TEXT_SECONDARY, fontsize=8)
 
     fig.tight_layout(rect=[0, 0.18, 1, 0.95])
     finish(fig, prov, [
-        "METHODOLOGICALLY SUSPECT (2026-08-26): HL7v2 counts SEGMENTS, the others count "
-        "ENTRIES; k is not normalized per format; the HL7v2 recover checks only segment names, "
-        "not content, and its structural set excludes pipes/carrots. Do not cite — fix per "
-        "handoff.md §Test 5 flaws.",
-        "Corruption and recovery are INDEPENDENT processes (scripts/recovery_sweep.py): "
-        "the recoverer reads only the corrupted bytes, a scanner's view.",
-        "Structural flips only (FFHR header+block headers; JSON brace/bracket/quote/colon/"
-        "comma; protobuf TLV record headers; HL7v2 segment terminators+names) -- payload "
-        "bytes untouched.",
-        "Granularity: recoverable units are entries for FFHR/JSON/protobuf and SEGMENTS "
-        "for HL7v2 (a v2 batch has no resource-level index) -- not the same unit, a "
-        "format finding.",
-        "20 trials per point; band = min..max. The FFHR recovery pre-validates the header "
-        "because Parser construction SEGVs on a corrupted one (CAPI-13).",
+        "CONTENT-VERIFIED units (2026-09-02): identity (parent, offset, tag) AND a data-content "
+        "hash must both match the clean baseline. correct = back with its data; wrong = present "
+        "but the data changed (a blasted interior pipe shifts fields silently -- the record still "
+        "parses and reads as data that was never written); missing = honest loss; spurious = "
+        "invention. pct = correct/baseline.",
+        "Corruption = syntax elements only: FFHR FF_HEADER + VALIDATION/RECOVERY_TAG headers + "
+        "pointer-slot witnesses of the live-edge census; JSON every brace/bracket/quote/colon/"
+        "comma unless explicitly escaped (\\X exempts the pair); HL7v2 CR + 3-char type names + "
+        "every | ^ & ~ \\ byte; protobuf TLV record headers.",
+        "Density axis: k flips is normalized per format (bits / structural positions).",
+        "Units are the formats' own atoms: block refs (FastFHIR), entries (JSON), TLV records "
+        "(protobuf), segments (HL7v2) -- each content-hashed at that granularity. 20 trials per "
+        "point; band = min..max; k=0 not plotted.",
     ])
     save(fig, out / "fig8_recovery", exts)
 

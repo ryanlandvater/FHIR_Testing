@@ -674,37 +674,50 @@ Ordered by what unblocks the most.
       concurrent `append_obj` (8×25) validates with all blocks reachable.
       Qualifiers preserved: malformed-not-hostile (G1), integrity-not-
       authenticity. Test 4's "blocked on IN-H" note was stale — the suite
-      exercises the library's `claim_space` directly, not the arm's parallel      **Test 5 (recovery) added 2026-08-26:** random structural bit flips
-      vs % recoverable — now a FOUR-FORMAT comparison with corruption and
-      recovery as INDEPENDENT processes (`bench/corruption_probe.cpp`
-      --corrupt/--count/--recover + `scripts/recovery_sweep.py`). Medians:
-      FastFHIR 91.6% at 128 bits / 70.3% at 512; HL7v2 94% even at 512
-      (segments — a different unit, stated on the figure); JSON 71.6%;
-      protobuf TLV collapses (46% at 64, 9.6% at 512 — a bad length header
-      derails the chain). Adjacent-damage double-counting in the FFHR resync
-      was found and fixed (each resync target counts once) — it had masked
-      ~8.5% losses at 128 bits. Curve: `results/recovery_curve.csv` +
-      `fig8_recovery`. Harness gained `--dump-artifacts` (one bundle's
-      Test-1 wire payload per arm). Two upstream findings from the probe:
-      **CAPI-13** (Parser ctor SEGVs on a corrupted header — the probe
-      pre-validates the header manually) and **CAPI-14** (generated POCO
-      string fields are `string_view`; assigning a temporary dangles).      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
-- [ ] **IN-G2. Fix the recovery-test methodology (do not cite the current curve).**
-      handoff.md § "Test 5 — known flaws" documents six problems: (A) units
-      differ (hl7v2 counts segments, others count entries); (B) damage density
-      is not normalized (same k = different intensity per format); (C) the
-      hl7v2 recover checks only segment names, never content (a \r merge still
-      counts); (D) the hl7v2 structural set excludes the real cascade triggers
-      (`|`, `^`, `&`, `~`); (E) blast-radius asymmetry; (F) the y-axis semantic
-      is asymmetric (JSON's "recovered" is a full re-parse, FFHR's is
-      header-only) and the curves are identical by construction. Fix
-      directions in the same section: content-verified recovery per format,
-      normalized x-axis (flips per 1,000 units), pipes/carrots in the v2
-      structural set, and a defensible v2 unit. Re-run and re-examine before
-      any citation.
-
-      **The recovery semantic that can legitimately differentiate FFHR —
-      edge/relationship recovery via cross-validation (Ryan, 2026-08-26).**
+      exercises the library's `claim_space` directly, not the arm's parallel
+      path. Spec: [`TODO.md`](TODO.md) (marked shipped).
+      **Test 5 (recovery) restructured 2026-09-02** — see IN-G2. The curve
+      is produced by the macro-parity driver `//bench:bench_test_5` (content-
+      verified anchored subset; the embedded hand-rolled probe that used to
+      live in this binary was removed — it clobbered `recovery_curve.csv` on
+      every run). Upstream findings from the probe era: **CAPI-13** (Parser
+      ctor SEGV — fixed by `FF_HEADER::validate_full` + the `Recovery` API;
+      the manual header pre-validation workaround is retired) and **CAPI-14**
+      (POCO `string_view` dangles). Harness gained `--dump-artifacts` (one
+      bundle's Test-1 wire payload per arm).
+- [ ] **IN-G2. Recovery-test methodology — content-verified metric SHIPPED 2026-09-02;**
+      remaining items are format findings, not methodology. Done: the curve is now
+      produced by the macro-parity driver `//bench:bench_test_5` +
+      `scripts/recovery_sweep.py` — corruption and recovery remain INDEPENDENT
+      processes, and `--check` is a THIRD process that (a) re-derives each
+      recoverer's digest from its own units and (b) verifies recovered ⊆ baseline
+      on the anchored (parent, offset, tag) triple, so a unit counts only when its
+      two halves corroborate the clean structure (fixes flaws C/F: content-verified,
+      and misattachment/invented references surface as spurious). The CSV carries
+      `positions_total` per format (flaw B's density denominator) and fig8 now
+      plots damage DENSITY (bits / structural positions) so one format does not get
+      a free pass from a smaller syntactic surface. Clean-stream k=0 scores 100.0
+      for every format (the clean-baseline control). Syntax-only corruption
+      (2026-09-02 round 2, matching FastFHIR tests/cpp/test_recovery.cpp): FFHR
+      flips the live-edge census witnesses (header + child headers + pointer
+      slots via Recovery::reachable_blocks); JSON blasts EVERY unescaped
+      brace/bracket/quote/colon/comma (`\X` exempts the pair) in or out of
+      strings -- an unescaped brace inside a value looks like syntax to a blind
+      scanner, so it gets hit like a structural one; HL7v2 flips CR + type
+      names + the full `| ^ & ~ \\` delimiter set; protobuf flips TLV
+      headers. v2 recovery resyncs on segment-header patterns (known 3-char
+      type + `|`); unit tags carry the full 3-char name. Medians (20 trials):
+      FastFHIR 98.2% at 512 bits (0.14% density), JSON 72.0, HL7v2 96.6,
+      protobuf TLV 7.7 at 6.9% density -- CONTENT-VERIFIED per unit (each unit
+      carries an FNV-1a hash of its own data bytes; correct = identity AND
+      data match, wrong = present but data changed, pct = correct/baseline).
+      REMAINING, per handoff.md § "What remains": v2's pct floor is unit
+      granularity (512 flips can damage at most 512 of 14,701 whole-segment
+      units; interior damage shows in the wrong column, not the pct) -- the
+      per-value axis (corruption_probe extract/verify, v2 ~15% at k=16) is the
+      finer complement. Flaw D (delimiters in the v2 structural set) and flaw B
+      (density axis) are DONE. The 2026-08-26 curve remains do-not-cite.
+      Context — the recovery semantic that can legitimately differentiate FFHR:
       FastFHIR's arena encodes every parent→child edge TWICE, and the two
       halves corroborate each other:
 

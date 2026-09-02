@@ -477,6 +477,12 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture);
 
 namespace detail {
 
+// A resource belongs to the fixture's patient when its subject reference names
+// that patient. The Synthea corpus writes intra-bundle references two ways:
+// the canonical "Patient/<id>" and the raw "urn:uuid:<id>" form (the file's
+// fullUrl style). Both must match, or the whole corpus hydrates to patient-only
+// fixtures -- measured 2026-09-02: 93-171 Observation nodes per Synthea file,
+// zero surviving the filter, and the test-5 artifacts shrank ~50x as a result.
 inline bool reference_matches_patient_id(const ReferenceData& reference,
                                          std::string_view patient_id) {
   if (patient_id.empty() || reference.reference.empty()) {
@@ -488,9 +494,15 @@ inline bool reference_matches_patient_id(const ReferenceData& reference,
   }
 
   constexpr std::string_view kPatientPrefix = "Patient/";
-  return reference.reference.size() == kPatientPrefix.size() + patient_id.size() &&
-         reference.reference.substr(0, kPatientPrefix.size()) == kPatientPrefix &&
-         reference.reference.substr(kPatientPrefix.size()) == patient_id;
+  constexpr std::string_view kUuidPrefix = "urn:uuid:";
+  if (reference.reference.size() == kPatientPrefix.size() + patient_id.size() &&
+      reference.reference.substr(0, kPatientPrefix.size()) == kPatientPrefix &&
+      reference.reference.substr(kPatientPrefix.size()) == patient_id) {
+    return true;
+  }
+  return reference.reference.size() == kUuidPrefix.size() + patient_id.size() &&
+         reference.reference.substr(0, kUuidPrefix.size()) == kUuidPrefix &&
+         reference.reference.substr(kUuidPrefix.size()) == patient_id;
 }
 
 template <typename Resource>

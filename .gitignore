@@ -28,6 +28,7 @@ BENCHMARK_SUMMARY.txt
 
 # Build outputs
 build/
+build-*/
 out/
 cmake-build-*/
 dist/
