@@ -364,7 +364,22 @@ int mode_check(const std::string& base_path, const std::string& rec_path) {
 
 }  // namespace
 
+#if defined(BENCH_CMAKE_DEBUG_BUILD)
+// This build exists to be STEPPED THROUGH, not to be quoted. Say so on every
+// run rather than trusting whoever reads the output to remember which build
+// produced it -- the numbers are correctness counts here, but the binary is
+// -O0 and any timing taken from it is meaningless.
+static void announce_debug_build() {
+  std::fprintf(stderr,
+               "*** CMake DEBUG build (-O0) -- for the debugger, NOT for results. ***\n"
+               "*** Publishable numbers come from Bazel (--compilation_mode=opt). ***\n");
+}
+#else
+static void announce_debug_build() {}
+#endif
+
 int main(int argc, char** argv) {
+  announce_debug_build();
   enum class Mode { None, Hash, Corrupt, Recover, Check, Positions };
   Mode mode = Mode::None;
   std::string format, in_path, out_path, base_path, rec_path;

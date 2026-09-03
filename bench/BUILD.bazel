@@ -14,6 +14,8 @@ cc_library(
         "bench_test_4.hpp",
         "bench_test_5.hpp",
         "harness.hpp",
+        "poco_leaves.hpp",
+        "poco_set.hpp",
         "walk_diagnostic.hpp",
         "hl7v2_message.hpp",
     ],
@@ -35,8 +37,18 @@ cc_library(
     hdrs = ["provenance.hpp"],
 )
 
-# hl7v2 arm is pure C++ with zero platform or Google FHIR deps.
-# Split from bench_core_harness so it can run on Windows.
+# Split from bench_core_harness to keep //:google_fhir_runtime -- protobuf plus
+# the generated google-fhir protos -- OUT of this arm. That is the dependency
+# that makes a Windows build awkward, and it is the whole reason for the split.
+#
+# NOT dependency-free, and never was: bench_core_common brings //:fastfhir_runtime
+# and @nlohmann_json, so the older "pure C++ with zero platform deps" wording
+# overstated it from the start. nlohmann is now a DIRECT need as well -- the v2
+# arm decodes the ZFX passthrough segments, whose payloads are JSON fragments --
+# rather than something inherited and unused.
+#
+# Both remaining deps are header-portable, so the Windows rationale still holds;
+# it is narrower than it read.
 cc_library(
     name = "bench_core_hl7v2",
     srcs = ["arm_hl7v2.cpp"],

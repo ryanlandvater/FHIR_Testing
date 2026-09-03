@@ -3,6 +3,8 @@
 // Platform differences gated by __APPLE__ and HAVE_GOOGLE_FHIR macros.
 
 #include "harness.hpp"
+#include "poco_leaves.hpp"
+#include "poco_set.hpp"
 #include "provenance.hpp"
 
 #include <algorithm>
@@ -307,6 +309,59 @@ int main(int argc, char **argv)
 #if defined(HAVE_GOOGLE_FHIR)
     write("google_fhir.bin", gf.test1_payload);
 #endif
+    // POCO 1 -- the model every arm was HANDED, and the neutral reference the
+    // arms are measured against. Written beside the wires so the comparison
+    // never has to nominate one branch's output as the truth.
+    {
+        std::vector<bench::poco::Leaf> truth;
+        for (const auto& item : bundle.bundle) {
+            auto ls = bench::poco::leaves(item);
+            truth.insert(truth.end(), ls.begin(), ls.end());
+        }
+        std::sort(truth.begin(), truth.end());
+        std::ostringstream os;
+        for (const auto& [path, value] : truth) os << path << '\t' << value << '\n';
+        write("poco1.leaves", os.str());
+        std::cerr << "[artifacts] POCO 1: " << truth.size() << " leaves (neutral reference)\n";
+
+        // SELF-TEST of the inverse mechanism, before any arm relies on it.
+        // Feeding POCO 1's own leaves back through set_path must rebuild POCO 1:
+        // if that is not identity, every arm's decoder is measuring the setter's
+        // gaps rather than the format's.
+        std::size_t rebuilt = 0, refused = 0;
+        std::vector<bench::poco::Leaf> back;
+        {
+            std::map<std::string, PatientData> patients;
+            std::map<std::string, ObservationData> observations;
+            for (const auto& [path, value] : truth) {
+                const auto dot = path.find('.');
+                if (dot == std::string::npos) continue;
+                const std::string key = path.substr(0, dot);
+                const std::string rest = path.substr(dot + 1);
+                nlohmann::json v;
+                try { v = nlohmann::json::parse(value); } catch (const std::exception&) { continue; }
+                const bool ok = key.rfind("Patient/", 0) == 0
+                                    ? bench::poco::set_path(patients[key], rest, v)
+                                    : bench::poco::set_path(observations[key], rest, v);
+                if (ok) { ++rebuilt; }
+                else {
+                    if (refused < 8) std::cerr << "[selftest] refused: " << path << "\n";
+                    ++refused;
+                }
+            }
+            for (auto& [k, d] : patients) bench::poco::walk(d, k, back);
+            for (auto& [k, d] : observations) bench::poco::walk(d, k, back);
+            std::sort(back.begin(), back.end());
+        }
+        {
+            std::ostringstream bs;
+            for (const auto& [path, value] : back) bs << path << '\t' << value << '\n';
+            write("poco1_rebuilt.leaves", bs.str());
+        }
+        std::cerr << "[selftest] set_path rebuilt " << rebuilt << " leaves, refused "
+                  << refused << "; re-walk yields " << back.size() << " (want "
+                  << truth.size() << ")\n";
+    }
     std::cerr << "Artifact dump complete.\n";
     return 0;
   }

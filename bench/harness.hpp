@@ -278,6 +278,9 @@ void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
 }
 
 BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path);
+// Same ingest, from TEXT: the shared back half of every arm's decoder.
+BundlePatient make_bundle_patient_from_json_text(std::string_view json,
+                                                 std::string_view label);
 EnrichmentObservationFixture load_enrichment_observation_from_json(const std::filesystem::path& json_path);
 
 inline BundlePatient clone_bundle_patient(const BundlePatient& src) {

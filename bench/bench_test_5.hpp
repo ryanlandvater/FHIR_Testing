@@ -641,71 +641,149 @@ inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
   return fp;
 }
 #elif defined(ARM_HL7V2)
-// v2's segment types as little-endian 3-byte tags. The dictionary is the set
-// the arm actually emits (hl7v2_message.hpp): MSH/PID once per message, OBX
-// per observation, ZFX for the JSON passthrough -- measured on the fresh
-// artifact: MSH=5, PID=5, OBX=1,468, ZFX=13,223. It is the v2 analogue of the
-// FFHR reflection table or the protobuf arm's P/O pair: v2 declares no type
-// set in-band, so a scanner can only recognize what the writer emits.
-inline constexpr std::uint32_t v2_tag(char a, char b, char c) {
-  return static_cast<std::uint32_t>(static_cast<unsigned char>(a)) |
-         (static_cast<std::uint32_t>(static_cast<unsigned char>(b)) << 8) |
-         (static_cast<std::uint32_t>(static_cast<unsigned char>(c)) << 16);
-}
-inline constexpr std::uint32_t kV2NameTags[] = {
-    v2_tag('M', 'S', 'H'), v2_tag('P', 'I', 'D'),
-    v2_tag('O', 'B', 'X'), v2_tag('Z', 'F', 'X')};
-
-inline bool is_v2_known_tag(std::uint32_t tag) {
-  for (std::uint32_t known : kV2NameTags)
-    if (tag == known)
-      return true;
-  return false;
-}
-
-inline std::uint32_t v2_tag_at(const std::vector<uint8_t>& wire, std::size_t i) {
-  return v2_tag(static_cast<char>(wire[i]), static_cast<char>(wire[i + 1]),
-                static_cast<char>(wire[i + 2]));
-}
-
-// A segment header: the 3-char type name immediately followed by the field
-// separator (|). This is v2's ONLY self-identifying structural anchor -- the
-// analogue of a VALIDATION word / TLV header / {"resource" marker: it is what
-// lets a receiver resync when a \r terminator is destroyed (the next segment
-// is still findable inside the merged line, at its true offset).
-inline bool v2_segment_start(const std::vector<uint8_t>& wire, std::size_t i) {
-  return i + 4 <= wire.size() && wire[i + 3] == '|' &&
-         is_v2_known_tag(v2_tag_at(wire, i));
-}
-
-// Whole-stream header scan. Baseline (clean bytes) and recovery (damaged
-// bytes) are the SAME enumeration, so recovered ⊆ baseline is like-for-like:
-// on the clean artifact this scan finds exactly the 14,701 \r-delimited
-// segments, at identical offsets, with zero content false positives.
-// A segment's DATA: everything after the `XXX|` header up to the terminator.
-// Unterminated (the \r was destroyed) runs to end-of-wire, which is the point
-// -- a merged record must not hash like an intact one.
-inline std::size_t v2_segment_end(const std::vector<uint8_t>& wire, std::size_t i) {
-  const auto cr = std::find(wire.begin() + static_cast<std::ptrdiff_t>(i), wire.end(),
-                            static_cast<uint8_t>('\r'));
-  return static_cast<std::size_t>(cr - wire.begin());
+// ── THE INVERSE OF THE v2 ENCODER ───────────────────────────────────────────
+//
+// Derived from the forward mapping (hl7v2_message.hpp + the ARM_HL7V2 assign
+// path), not from reading the bytes and guessing. Each rule below names the
+// encoder line it inverts:
+//
+//   MSH ... |<message_control_id>|P|2.5      MshSegment::serialize -- field 9
+//                                            carries the PATIENT id.
+//   PID|1||<id>||<name>||<dob>|<sex>|||...   PidSegment::serialize -- fixed
+//                                            positions; birthDate and gender
+//                                            reach the wire ONLY here.
+//   OBX|<n>|<type>|<code>||<value>|<units>   ObxSegment::serialize -- the
+//                                            observation VALUE is only here.
+//   ZFX|<fhir.path>|<json>                   CustomFieldSegment::serialize --
+//                                            the path is literal, the payload
+//                                            is JSON. `.details` means "the
+//                                            whole object at this path"
+//                                            (hl7_append_json_field(...,
+//                                            "patient.name[0].details", ...)),
+//                                            so the inverse drops the marker
+//                                            and walks the payload beneath it.
+//
+// Grouping is by ORDER, and the encoder makes that safe: assign_observation
+// writes `observation.id` FIRST, so every observation.* segment after one
+// belongs to it until the next.
+inline std::string hl7_unescape(std::string_view src) {
+    std::string out;
+    out.reserve(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        if (src[i] == '\\' && i + 2 < src.size() && src[i + 2] == '\\') {
+            switch (src[i + 1]) {
+                case 'F': out += '|'; i += 2; continue;
+                case 'S': out += '^'; i += 2; continue;
+                case 'T': out += '&'; i += 2; continue;
+                case 'R': out += '~'; i += 2; continue;
+                case 'E': out += '\\'; i += 2; continue;
+                default: break;
+            }
+        }
+        out += src[i];
+    }
+    return out;
 }
 
-inline StreamFingerprint scan_v2_segments(const std::vector<uint8_t>& wire) {
-  StreamFingerprint fp;
-  for (std::size_t i = 0; i + 4 <= wire.size(); ++i)
-    if (v2_segment_start(wire, i))
-      // Content spans the payload only (past `XXX|`): the header is already
-      // the identity, and hashing it twice would just double-count a name
-      // flip that the tag half reports on its own.
-      fp.units.push_back(UnitRef{0, i, v2_tag_at(wire, i),
-                                 content_of(wire, i + 4, v2_segment_end(wire, i))});
-  fp.finalize();
-  return fp;
+inline std::vector<std::string> hl7_split(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (true) {
+        const auto at = s.find(sep, start);
+        out.push_back(s.substr(start, at == std::string::npos ? std::string::npos : at - start));
+        if (at == std::string::npos) break;
+        start = at + 1;
+    }
+    return out;
+}
+
+// Walk a ZFX payload, which is a JSON fragment rooted at `path`.
+inline void hl7_walk_json(const nlohmann::json& node, const std::string& path,
+                          StreamFingerprint& fp) {
+    if (node.is_object()) {
+        for (auto it = node.begin(); it != node.end(); ++it)
+            hl7_walk_json(it.value(), path + "." + it.key(), fp);
+    } else if (node.is_array()) {
+        for (std::size_t i = 0; i < node.size(); ++i)
+            hl7_walk_json(node[i], path + "[" + std::to_string(i) + "]", fp);
+    } else {
+        fp.units.push_back(canonical_leaf(path, node.dump()));
+    }
+}
+
+inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
+    StreamFingerprint fp;
+    const std::string text(wire.begin(), wire.end());
+    std::string patient_key, obs_key;
+
+    for (const auto& seg : hl7_split(text, '\r')) {
+        if (seg.size() < 4) continue;
+        const auto f = hl7_split(seg, '|');
+        const std::string& name = f[0];
+
+        if (name == "MSH" && f.size() > 9) {
+            patient_key = resource_key("Patient", f[9]);
+        } else if (name == "PID" && f.size() > 8) {
+            // birthDate and gender exist ONLY here; name/address/telecom are
+            // carried structurally by ZFX `.details` and would double-count.
+            if (!patient_key.empty()) {
+                if (!f[7].empty())
+                    fp.units.push_back(canonical_leaf(patient_key + ".birthDate",
+                                                      nlohmann::json(f[7]).dump()));
+                if (!f[8].empty())
+                    fp.units.push_back(canonical_leaf(patient_key + ".gender",
+                                                      nlohmann::json(f[8]).dump()));
+            }
+        } else if (name == "OBX" && f.size() > 5) {
+            // The observation VALUE reaches the wire only here.
+            if (!obs_key.empty() && !f[5].empty())
+                fp.units.push_back(
+                    canonical_leaf(obs_key + ".value", nlohmann::json(f[5]).dump()));
+        } else if (name == "ZFX" && f.size() > 2) {
+            const std::string field = hl7_unescape(f[1]);
+            const std::string payload = hl7_unescape(f[2]);
+
+            std::string key;
+            std::string sub;
+            if (field.rfind("patient.", 0) == 0) {
+                key = patient_key;
+                sub = field.substr(8);
+            } else if (field.rfind("observation.", 0) == 0) {
+                key = obs_key;
+                sub = field.substr(12);
+            } else {
+                continue;
+            }
+
+            nlohmann::json payload_json;
+            try { payload_json = nlohmann::json::parse(payload); }
+            catch (const std::exception&) { continue; }
+
+            if (sub == "id") {
+                // Starts a new scope AND is a leaf in its own right.
+                if (field.rfind("observation.", 0) == 0 && payload_json.is_string())
+                    obs_key = resource_key("Observation", payload_json.get<std::string>());
+                key = (field.rfind("observation.", 0) == 0) ? obs_key : patient_key;
+                if (!key.empty())
+                    fp.units.push_back(canonical_leaf(key + ".id", payload_json.dump()));
+                continue;
+            }
+            if (key.empty()) continue;
+
+            // `.details` / `[*]` are container markers, not path elements.
+            if (sub.size() > 8 && sub.compare(sub.size() - 8, 8, ".details") == 0)
+                sub.erase(sub.size() - 8);
+            if (sub.size() > 3 && sub.compare(sub.size() - 3, 3, "[*]") == 0)
+                sub.erase(sub.size() - 3);
+            hl7_walk_json(payload_json, key + "." + sub, fp);
+        }
+    }
+    fp.finalize();
+    return fp;
 }
 
 inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
-  return scan_v2_segments(wire);
+    return scan_v2_canonical(wire);
 }
 #endif
 
@@ -990,7 +1068,10 @@ inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {
 // still contains the next segment's header) and a type-name or separator
 // flip unrecoverable (v2 has no second witness to repair either).
 inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {
-  return scan_v2_segments(wire);
+    // Same walk as the baseline: v2 has no repair step to apply, which IS the
+    // finding -- its "recovery" reads whatever survived, and a segment whose
+    // header or field positions were damaged simply yields nothing.
+    return scan_v2_canonical(wire);
 }
 #endif
 

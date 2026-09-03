@@ -12,17 +12,17 @@
 
 namespace bench {
 
-BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path) {
-  simdjson::padded_string json_buffer;
-  try {
-    json_buffer = simdjson::padded_string::load(json_path.string());
-  } catch (const std::exception& ex) {
-    throw std::runtime_error("Failed to load JSON payload: " + std::string(ex.what()));
-  }
-
+// Split from the path loader so a wire that has been RECONSTRUCTED as FHIR
+// JSON -- not read off disk -- can reach the same ingest. That is the shared
+// back half of every arm's decoder: each arm rebuilds FHIR JSON from its own
+// format, and this turns that into the POCO the comparison actually needs.
+BundlePatient make_bundle_patient_from_json_text(std::string_view json,
+                                                 std::string_view label) {
+  simdjson::padded_string json_buffer(json);
   if (json_buffer.size() == 0) {
-    throw std::runtime_error("Empty file: " + json_path.string());
+    throw std::runtime_error("Empty JSON payload: " + std::string(label));
   }
+  const std::filesystem::path json_path{std::string(label)};
 
   const auto file_size = static_cast<std::size_t>(json_buffer.size());
   const std::string_view ingest_payload(json_buffer.data(), json_buffer.size());
@@ -100,6 +100,17 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
                  json_path.filename().string().c_str(), (int)vr.code, vr.message.c_str());
   }
   return item;
+}
+
+BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_path) {
+  simdjson::padded_string buf;
+  try {
+    buf = simdjson::padded_string::load(json_path.string());
+  } catch (const std::exception& ex) {
+    throw std::runtime_error("Failed to load JSON payload: " + std::string(ex.what()));
+  }
+  return make_bundle_patient_from_json_text(std::string_view(buf.data(), buf.size()),
+                                            json_path.string());
 }
 
 EnrichmentObservationFixture load_enrichment_observation_from_json(const std::filesystem::path& json_path) {
