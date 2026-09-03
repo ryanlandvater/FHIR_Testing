@@ -53,6 +53,9 @@ namespace bench
       auto *context = static_cast<EntryBuildContext *>(raw_context);
       const auto &item = (*context->bundle)[idx];
       auto patient_handle = context->builder->append_obj(PatientData{});
+      // This item's interned URLs, for the extension converters (which every
+      // arm reaches -- v2's ZFX passthrough serializes JSON too).
+      const assign::detail::ScopedUrlTable urls(item.url_table);
       assign::assign_patient(item.patient, patient_handle);
       (*context->entries)[idx] = BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
     }

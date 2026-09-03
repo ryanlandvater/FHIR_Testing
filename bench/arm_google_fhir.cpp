@@ -53,6 +53,9 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture) {
   for (const auto& item : fixture.bundle) {
     google::fhir::r4::core::Patient patient;
     assign::GooglePatientTarget patient_target{patient};
+    // This item's interned URLs, for the extension converters (which every
+    // arm reaches -- v2's ZFX passthrough serializes JSON too).
+    const assign::detail::ScopedUrlTable urls(item.url_table);
     assign::assign_patient(item.patient, patient_target);
 
     std::string patient_bytes;

@@ -41,7 +41,13 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
     FastFHIR::Ingest::IngestRequest request{
         .builder = *stream,
         .source_type = FF_SOURCE_FHIR_JSON,
-        .extension_filter = FF_ExtensionFilterMode::FILTER_ALL_KNOWN,
+        // FILTER_NONE, not the FILTER_ALL_KNOWN default: that mode SUPPRESSES
+        // profile-native and HL7-known-safe extension URLs -- a real size win
+        // in production (a URL the profile already knows need not be stored),
+        // but it means the URL is not in the trie and cannot be regenerated.
+        // The benchmark corpus has to hold the whole document, or the JSON arm
+        // cannot emit `"url"` and the arms stop encoding the same data.
+        .extension_filter = FF_ExtensionFilterMode::FILTER_NONE,
         .json_string = ingest_payload,
         // padded_string guarantees SIMDJSON_PADDING slack past size(), so the
         // ingestor can parse in place instead of making a padded copy of the
@@ -70,6 +76,23 @@ BundlePatient make_bundle_patient_from_json(const std::filesystem::path& json_pa
   }
 
   (void)seal_stream(stream, root, json_path.string());
+
+  // Rebuild every interned URL (see BundlePatient::url_table). MUST run AFTER
+  // seal_stream: Parser validates the FF_HEADER on construction, and the
+  // header -- with the URL_DIR_OFFSET this needs -- is written by finalize().
+  // Before the seal there is no magic to match and every ingest is skipped.
+  {
+    FastFHIR::Parser url_reader(item.memory);
+    if (url_reader.has_url_directory()) {
+      const auto* base = reinterpret_cast<const BYTE*>(item.memory.base());
+      const auto dir = url_reader.url_directory();
+      const uint32_t n = dir.entry_count(base);
+      item.url_table.reserve(n);
+      for (uint32_t i = 0; i < n; ++i)
+        item.url_table.push_back(dir.get_url(base, i));
+
+    }
+  }
   if (std::getenv("BENCH_VALIDATE_INGEST")) {
     FastFHIR::Parser check(item.memory);
     const FF_Result vr = check.validate_FFHR_stream();

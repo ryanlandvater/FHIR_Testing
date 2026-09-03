@@ -155,92 +155,305 @@ struct StreamFingerprint {
   }
 };
 
+// ── CANONICAL FHIR LEAF PATHS ───────────────────────────────────────────────
+//
+// Every arm emits the SAME key for the same datum:
+//
+//     <ResourceType>/<id>.<element path>     e.g. Patient/0fb515d6.address[0].city
+//
+// Keyed by RESOURCE ID, never by entry index. A positional key would require all
+// four encodings to preserve Bundle ordering, and nothing guarantees that --
+// protobuf is a record stream, v2 is a segment stream. Every encoding carries
+// resourceType and id, so this key survives re-encoding.
+//
+// `resourceType` is NOT emitted as a leaf: it is already in the key, and the
+// encodings disagree about whether it is a stored field at all (FastFHIR
+// synthesizes it from the block tag). A field that only some arms can produce
+// is a difference in the ENCODERS, not in the data, and counting it would
+// charge that difference to the format.
+//
+// Identity is the path hash, content is the value hash -- which fits the
+// existing UnitRef and fingerprint layout unchanged: `offset` carries the path
+// hash, `parent`/`tag` go unused, and --check's linear merge already compares
+// identity first and content second. That is precisely the four-outcome
+// comparison, now over a population all four arms can agree on.
+// NUMBERS COMPARE AS NUMBERS.
+//
+// FastFHIR preserves a decimal's source SCALE (that is a feature -- 1.50 and 1.5
+// are different in FHIR), while nlohmann emits shortest-round-trip. So the same
+// datum rendered by two arms can differ in text while being the same value, and
+// 576 of 1,496 float leaves did. Hashing the text would charge a RENDERING
+// difference to the format.
+//
+// Only bare numbers are normalized: a JSON string arrives quoted, so a string
+// field holding "6.07" is untouched and still compares as text. %.17g is
+// round-trip exact for a double, so genuinely different values stay different.
+inline std::string canonical_number(const std::string& value) {
+    if (value.empty() || value.front() == '"') return value;
+    const char* begin = value.c_str();
+    char* end = nullptr;
+    const double d = std::strtod(begin, &end);
+    if (end == begin || *end != '\0') return value;  // not a bare number
+    char buf[40];
+    std::snprintf(buf, sizeof buf, "%.17g", d);
+    return buf;
+}
+
+inline UnitRef canonical_leaf(const std::string& path, const std::string& value_raw) {
+    const std::string value = canonical_number(value_raw);
+    return UnitRef{
+        0,
+        static_cast<std::size_t>(
+            content_hash(reinterpret_cast<const std::uint8_t*>(path.data()), path.size())),
+        0,
+        content_hash(reinterpret_cast<const std::uint8_t*>(value.data()), value.size()),
+    };
+}
+
+// The key a resource's leaves hang from. Empty when either half is missing --
+// an unidentifiable resource cannot be compared across encodings, and guessing
+// a key would manufacture agreement.
+inline std::string resource_key(const std::string& type, const std::string& id) {
+    if (type.empty() || id.empty()) return {};
+    return type + "/" + id;
+}
+
 // ---------------------------------------------------------------------------
 // 1. calc_stream_hash -- structural fingerprint of a CLEAN stream
 // ---------------------------------------------------------------------------
 #if defined(ARM_FASTFHIR)
-// Block-level baseline (IN-G2/F3): built from the block-reference enumerator
-// over the offset-chain walk (Recovery::reachable_blocks), NOT the recovery
-// pipeline —
-// recover() exists for damaged streams and a baseline never touches it.
-// The per-block enumerator is shared with recovery, so recovered ⊆ baseline
-// is like-for-like. The unit is the referenced child block (offset, tag) —
-// the two halves corroborated.
-// A block's own bytes, sized from the COMPILED reflection table so the
-// baseline and the recovery measure the same span for the same unit. This is
-// what makes a repaired-but-mis-attached reference visible: the reference is
-// present and its identity matches, but the block it now names carries
-// another block's data, so the content halves disagree.
-inline std::uint64_t ffhr_block_content(const std::vector<uint8_t>& wire,
-                                        std::size_t child, RECOVERY_TAG tag) {
-  // PAYLOAD ONLY -- past the VALIDATION word and RECOVERY tag.
-  //
-  // Those two are WITNESSES, not data. They are also the bytes corruption
-  // targets, so hashing them made a block that recovery had correctly
-  // diagnosed and repaired still compare unequal: the repair fixed the
-  // witness, and the witness was in the hash. Identity already carries the
-  // tag, so content asks only "is the DATA the same".
-  const std::size_t span =
-      static_cast<std::size_t>(FastFHIR::Recovery::derived_block_size(tag));
-  const std::size_t head = static_cast<std::size_t>(DATA_BLOCK::HEADER_SIZE);
-  if (span <= head)
-    return 0;  // header-only block: no payload to compare
-  return content_of(wire, child + head, child + span);
+// THE FORWARD MAPPING, USED BACKWARDS.
+//
+// A choice ([x]) element is written as base + variant type name --
+// `value` + `Quantity` -> `valueQuantity` -- and the EXPORTER already knows how
+// to build that (FF_Parser.cpp's choice_suffix, which defers complex variants to
+// reflected_choice_suffix). Mirroring it here is what lets the lens name a leaf
+// the same way the JSON document does; deriving the rule independently is how
+// the two arms end up 10,753 paths apart while holding identical data.
+//
+// reflected_resource_type is deliberately NOT the lookup: it enumerates
+// resources only and returns "" for Quantity, CodeableConcept, Period and every
+// other datatype -- the exporter records that it printed a bare `value` for
+// 1,416 fields that way.
+inline std::string bench_choice_suffix(RECOVERY_TAG tag) {
+    switch (tag) {
+        case RECOVER_FF_BOOL:     return "Boolean";
+        case RECOVER_FF_INT32:    return "Integer";
+        case RECOVER_FF_FLOAT64:  return "Decimal";
+        case RECOVER_FF_STRING:   return "String";
+        case RECOVER_FF_CODE:     return "Code";
+        case RECOVER_FF_DATE:     return "Date";
+        case RECOVER_FF_DATETIME: return "DateTime";
+        case RECOVER_FF_TIME:     return "Time";
+        case RECOVER_FF_INSTANT:  return "Instant";
+        default:                  return std::string(FastFHIR::reflected_choice_suffix(tag));
+    }
+}
+
+// The lens walk, emitting the SAME canonical paths the JSON arm does.
+//
+// This replaces a block-REFERENCE fingerprint (Recovery::reachable_blocks): the
+// two counted different populations -- 54,504 edges against JSON's 1,473
+// resources -- so a percentage over either meant nothing next to the other.
+// Both now count FHIR leaves, which is the thing the formats are actually being
+// asked to preserve.
+//
+// PER LEAF, not per document: print_json() over the whole tree would make one
+// broken subtree unparseable and score every surviving value as lost, which
+// flatters the failure. Walking leaf by leaf keeps the damage local, which is
+// the honest accounting.
+inline void ffhr_walk_leaves(const Reflective::Node& node, const std::string& path,
+                             StreamFingerprint& fp, uint32_t version, int depth) {
+    if (!node || depth > 64) return;
+
+    if (node.is_array()) {
+        std::size_t n = 0;
+        try { n = node.size(); } catch (const std::exception&) { return; }
+        for (std::size_t i = 0; i < n; ++i) {
+            try {
+                ffhr_walk_leaves(node[i], path + "[" + std::to_string(i) + "]", fp, version,
+                                 depth + 1);
+            } catch (const std::exception&) {
+                // this element is unreadable; the rest of the array is not
+            }
+        }
+        return;
+    }
+
+    if (!node.is_object()) {
+        std::ostringstream v;
+        node.print_json(v);
+        fp.units.push_back(canonical_leaf(path, v.str()));
+        return;
+    }
+
+    std::span<const FF_FieldInfo> fields;
+    try { fields = node.fields(); } catch (const std::exception&) { return; }
+    for (const auto& f : fields) {
+        const FF_FieldKey key = FF_FieldKey::from_cstr(node.recovery(), f.kind, f.field_offset,
+                                                       f.child_recovery,
+                                                       f.array_entries_are_offsets, f.name);
+        const Reflective::Entry e = node[key];
+        if (!e) continue;
+        std::string child = path + "." + std::string(f.name);
+        if (f.kind == FF_FIELD_CHOICE) {
+            try { child += bench_choice_suffix(e.as_node().recovery()); }
+            catch (const std::exception&) {}
+        }
+        if (ff_kind_is_inline_scalar(f.kind)) {
+            std::ostringstream v;
+            try { e.print_scalar_json(v, version); } catch (const std::exception&) { continue; }
+            fp.units.push_back(canonical_leaf(child, v.str()));
+            continue;
+        }
+        try { ffhr_walk_leaves(e.as_node(), child, fp, version, depth + 1); }
+        catch (const std::exception&) {}
+    }
+}
+
+inline void ffhr_collect(const Reflective::Node& root, StreamFingerprint& fp,
+                         uint32_t version) {
+    if (!root) return;
+    std::vector<Reflective::Node> entries;
+    try { entries = root[FastFHIR::Fields::BUNDLE::ENTRY].as_node().entries(); }
+    catch (const std::exception&) { return; }
+
+    for (const auto& entry : entries) {
+        Reflective::Node resource;
+        try { resource = entry[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE].as_node(); }
+        catch (const std::exception&) { continue; }
+        if (!resource) continue;
+
+        // The type comes from the block's own tag (FastFHIR does not store
+        // resourceType as a field), the id from the wire.
+        const std::string type(reflected_resource_type(resource.recovery()));
+        std::span<const FF_FieldInfo> fields;
+        try { fields = resource.fields(); } catch (const std::exception&) { continue; }
+
+        // `id` is found through the reflection table, not a type-specific key:
+        // Fields::PATIENT::ID names Patient's slot, so using it for every
+        // resource left every Observation keyless and silently skipped -- 437
+        // leaves against the JSON arm's 34,831.
+        std::string id;
+        for (const auto& f : fields) {
+            if (std::string_view(f.name) != "id") continue;
+            const FF_FieldKey idk = FF_FieldKey::from_cstr(resource.recovery(), f.kind,
+                                                           f.field_offset, f.child_recovery,
+                                                           f.array_entries_are_offsets, f.name);
+            try {
+                const Reflective::Entry e = resource[idk];
+                if (e) id = std::string(e.as<std::string_view>());
+            } catch (const std::exception&) {}
+            break;
+        }
+        const std::string key = resource_key(type, id);
+        if (key.empty()) continue;
+        for (const auto& f : fields) {
+            const FF_FieldKey fk = FF_FieldKey::from_cstr(resource.recovery(), f.kind,
+                                                          f.field_offset, f.child_recovery,
+                                                          f.array_entries_are_offsets, f.name);
+            const Reflective::Entry e = resource[fk];
+            if (!e) continue;
+            std::string child = key + "." + std::string(f.name);
+            if (f.kind == FF_FIELD_CHOICE) {
+                try { child += bench_choice_suffix(e.as_node().recovery()); }
+                catch (const std::exception&) {}
+            }
+            if (ff_kind_is_inline_scalar(f.kind)) {
+                std::ostringstream v;
+                try { e.print_scalar_json(v, version); } catch (const std::exception&) { continue; }
+                fp.units.push_back(canonical_leaf(child, v.str()));
+                continue;
+            }
+            try { ffhr_walk_leaves(e.as_node(), child, fp, version, 1); }
+            catch (const std::exception&) {}
+        }
+    }
 }
 
 inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
-  StreamFingerprint fp;
-  FastFHIR::Memory mem = wrap_wire_bytes(wire);
-  FastFHIR::Recovery rec(mem);
-  const auto refs = rec.reachable_blocks();
-  for (const auto& ref : refs)
-    fp.units.push_back(UnitRef{static_cast<std::size_t>(ref.parent + ref.field),
-                               static_cast<std::size_t>(ref.child),
-                               static_cast<std::uint16_t>(ref.declared),
-                               ffhr_block_content(wire, static_cast<std::size_t>(ref.child),
-                                                  ref.declared)});
-  std::sort(fp.units.begin(), fp.units.end(),
-            [](const UnitRef& a, const UnitRef& b) { return a.offset < b.offset; });
-  fp.finalize();
-  return fp;
+    StreamFingerprint fp;
+    FastFHIR::Memory mem = wrap_wire_bytes(wire);
+    FastFHIR::Parser parser(mem);
+    ffhr_collect(parser.root(), fp, FHIR_VERSION_R5);
+    fp.finalize();
+    return fp;
 }
 #elif defined(ARM_JSON)
 // The byte span of the resource object a `"resource"` marker introduces: back
 // up to its opening brace, forward to the closing one before the next marker.
-// Shared by the baseline and both recovery paths -- a content comparison is
-// only meaningful if every path hashes the SAME bytes.
+// Used by the resync path when the document as a whole will not parse.
 inline std::pair<std::size_t, std::size_t> json_resource_extent(const std::string& text,
                                                                 std::size_t marker) {
-  const auto next = text.find("\"resource\"", marker + 10);
-  const auto end = (next == std::string::npos) ? text.size() : next;
-  std::size_t open = marker;
-  while (open > 0 && text[open] != '{')
-    --open;
-  std::size_t close = end;
-  while (close > open) {
-    const auto brace = text.rfind('}', close - 1);
-    if (brace == std::string::npos || brace < open)
-      break;
-    if (brace + 1 >= end || text[brace + 1] == ',' || text[brace + 1] == ']' ||
-        text[brace + 1] == '}') {
-      close = brace + 1;
-      break;
+    const auto next = text.find("\"resource\"", marker + 10);
+    const auto end = (next == std::string::npos) ? text.size() : next;
+    std::size_t open = marker;
+    while (open > 0 && text[open] != '{')
+        --open;
+    std::size_t close = end;
+    while (close > open) {
+        const auto brace = text.rfind('}', close - 1);
+        if (brace == std::string::npos || brace < open)
+            break;
+        if (brace + 1 >= end || text[brace + 1] == ',' || text[brace + 1] == ']' ||
+            text[brace + 1] == '}') {
+            close = brace + 1;
+            break;
+        }
+        close = brace;
     }
-    close = brace;
-  }
-  return {open, close};
+    return {open, close};
+}
+
+// The JSON arm's document IS FHIR, so it defines the canonical scheme the other
+// arms are measured against: walk to every scalar and name it by its element
+// path under <ResourceType>/<id>.
+inline void json_walk_leaves(const nlohmann::json& node, const std::string& path,
+                             StreamFingerprint& fp) {
+    if (node.is_object()) {
+        for (auto it = node.begin(); it != node.end(); ++it)
+            json_walk_leaves(it.value(), path + "." + it.key(), fp);
+    } else if (node.is_array()) {
+        for (std::size_t i = 0; i < node.size(); ++i)
+            json_walk_leaves(node[i], path + "[" + std::to_string(i) + "]", fp);
+    } else {
+        // dump() rather than a type-specific formatter: every arm has to render
+        // the value the SAME way or equal data compares unequal. JSON's own
+        // canonical form is the one all four can reach.
+        fp.units.push_back(canonical_leaf(path, node.dump()));
+    }
+}
+
+inline void json_collect(const nlohmann::json& doc, StreamFingerprint& fp) {
+    const auto entries = doc.find("entry");
+    if (entries == doc.end() || !entries->is_array()) return;
+    for (const auto& entry : *entries) {
+        const auto res = entry.find("resource");
+        if (res == entry.end() || !res->is_object()) continue;
+        const auto type = res->value("resourceType", std::string{});
+        const auto id = res->value("id", std::string{});
+        const auto key = resource_key(type, id);
+        if (key.empty()) continue;  // unidentifiable -- not comparable
+        // Walk the resource's members with the key already in the path: the
+        // prefix is part of what gets hashed, not something bolted on after.
+        for (auto it = res->begin(); it != res->end(); ++it) {
+            if (it.key() == "resourceType") continue;  // it IS the key
+            json_walk_leaves(it.value(), key + "." + it.key(), fp);
+        }
+    }
 }
 
 inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
-  StreamFingerprint fp;
-  const std::string text(wire.begin(), wire.end());
-  for (std::size_t i = 0; i + 10 <= text.size(); ++i)
-    if (text.compare(i, 10, "\"resource\"") == 0) {
-      const auto [open, close] = json_resource_extent(text, i);
-      fp.units.push_back(UnitRef{0, i, 0, content_of(wire, open, close)});
+    StreamFingerprint fp;
+    try {
+        const auto doc = nlohmann::json::parse(std::string(wire.begin(), wire.end()));
+        json_collect(doc, fp);
+    } catch (const std::exception&) {
+        // Unparseable: no units. The check reports the loss rather than this
+        // throwing and taking the whole measurement with it.
     }
-  fp.finalize();
-  return fp;
+    fp.finalize();
+    return fp;
 }
 #elif defined(ARM_GOOGLE_FHIR)
 // FIELD-LEVEL PROTOBUF, via reflection.
@@ -261,6 +474,31 @@ inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
 //   content = a hash of the value itself
 inline std::uint64_t pb_path_hash(const std::string& path) {
   return content_hash(reinterpret_cast<const std::uint8_t*>(path.data()), path.size());
+}
+
+// JSON-RENDERED, like every other arm. The canonical value is the JSON form
+// (a string arrives quoted and escaped), and returning a bare string here made
+// 16,213 matched paths compare unequal on every single one -- the arms agreed
+// on WHERE the datum was and disagreed only on how to spell it.
+// proto generation lowercases FHIR's camelCase into snake_case
+// (multipleBirth -> multiple_birth), so the inverse is the mapping that lets
+// this arm name an element the way the document does. Without it every
+// multi-word field lands as a path JSON does not have -- counted spurious on
+// one side and missing on the other, from data that is present and correct.
+inline std::string pb_camel(const std::string& snake) {
+    std::string out;
+    out.reserve(snake.size());
+    bool up = false;
+    for (const char c : snake) {
+        if (c == '_') { up = true; continue; }
+        out.push_back(up ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c);
+        up = false;
+    }
+    return out;
+}
+
+inline std::string pb_json_value(const std::string& raw, bool is_string) {
+    return is_string ? nlohmann::json(raw).dump() : raw;
 }
 
 inline std::string pb_scalar_string(const google::protobuf::Message& m,
@@ -290,32 +528,77 @@ inline std::string pb_scalar_string(const google::protobuf::Message& m,
   }
 }
 
-inline void pb_walk(const google::protobuf::Message& msg, std::size_t record_off,
-                    const std::string& prefix, StreamFingerprint& fp) {
-  const auto* refl = msg.GetReflection();
-  std::vector<const google::protobuf::FieldDescriptor*> fields;
-  refl->ListFields(msg, &fields);
-  for (const auto* f : fields) {
-    const std::string base = prefix + "." + std::to_string(f->number());
-    const bool is_msg =
-        f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE;
-    const int count = f->is_repeated() ? refl->FieldSize(msg, f) : 1;
-    for (int i = 0; i < count; ++i) {
-      const std::string path =
-          f->is_repeated() ? base + "[" + std::to_string(i) + "]" : base;
-      if (is_msg) {
-        pb_walk(f->is_repeated() ? refl->GetRepeatedMessage(msg, f, i)
-                                 : refl->GetMessage(msg, f),
-                record_off, path, fp);
-        continue;
-      }
-      const std::string value = pb_scalar_string(msg, refl, f, i);
-      fp.units.push_back(UnitRef{
-          record_off, static_cast<std::size_t>(pb_path_hash(path)),
-          static_cast<std::uint32_t>(f->number()),
-          content_hash(reinterpret_cast<const std::uint8_t*>(value.data()), value.size())});
+// google-fhir WRAPS PRIMITIVES: `Patient.id` is a message `Id { value }`, and
+// the encoder writes it as mutable_id()->set_value(...). So a proto path is one
+// level deeper than the FHIR element path everywhere. Collapsing a wrapper --
+// a message whose populated content is a single `value` -- is what makes this
+// arm name a leaf the way the JSON document does.
+inline bool pb_is_primitive_wrapper(const google::protobuf::Message& m,
+                                    const google::protobuf::FieldDescriptor** out) {
+    const auto* refl = m.GetReflection();
+    std::vector<const google::protobuf::FieldDescriptor*> fields;
+    refl->ListFields(m, &fields);
+    if (fields.size() != 1) return false;
+    const auto* f = fields.front();
+    if (f->name() != "value" || f->is_repeated()) return false;
+    if (f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) return false;
+    *out = f;
+    return true;
+}
+
+inline void pb_walk(const google::protobuf::Message& msg, const std::string& path,
+                    StreamFingerprint& fp) {
+    const auto* refl = msg.GetReflection();
+    std::vector<const google::protobuf::FieldDescriptor*> fields;
+    refl->ListFields(msg, &fields);
+    for (const auto* f : fields) {
+        const std::string base = path + "." + pb_camel(f->name());
+        const bool is_msg =
+            f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE;
+        const int count = f->is_repeated() ? refl->FieldSize(msg, f) : 1;
+        for (int i = 0; i < count; ++i) {
+            const std::string here =
+                f->is_repeated() ? base + "[" + std::to_string(i) + "]" : base;
+            if (is_msg) {
+                const auto& sub = f->is_repeated() ? refl->GetRepeatedMessage(msg, f, i)
+                                                   : refl->GetMessage(msg, f);
+                const google::protobuf::FieldDescriptor* inner = nullptr;
+                if (pb_is_primitive_wrapper(sub, &inner)) {
+                    const bool istr =
+                        inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
+                        inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_ENUM;
+                    fp.units.push_back(canonical_leaf(
+                        here, pb_json_value(pb_scalar_string(sub, sub.GetReflection(), inner, 0),
+                                            istr)));
+                } else {
+                    pb_walk(sub, here, fp);
+                }
+                continue;
+            }
+            const bool str = f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
+                             f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_ENUM;
+            fp.units.push_back(
+                canonical_leaf(here, pb_json_value(pb_scalar_string(msg, refl, f, i), str)));
+        }
     }
-  }
+}
+
+// The resource's own key: type from the record marker, id from the wrapped
+// `id.value`. A record with neither is not comparable and contributes nothing.
+inline std::string pb_resource_key(const google::protobuf::Message& msg, char type) {
+    const auto* refl = msg.GetReflection();
+    const auto* desc = msg.GetDescriptor();
+    std::string id;
+    if (const auto* f = desc->FindFieldByName("id")) {
+        if (f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE &&
+            refl->HasField(msg, f)) {
+            const auto& sub = refl->GetMessage(msg, f);
+            const google::protobuf::FieldDescriptor* inner = nullptr;
+            if (pb_is_primitive_wrapper(sub, &inner))
+                id = pb_scalar_string(sub, sub.GetReflection(), inner, 0);
+        }
+    }
+    return resource_key(type == 'P' ? "Patient" : "Observation", id);
 }
 
 // Parse one length-prefixed record and emit its leaf fields. Returns false if
@@ -323,16 +606,21 @@ inline void pb_walk(const google::protobuf::Message& msg, std::size_t record_off
 // field it held is reported missing, which is the honest accounting.
 inline bool pb_emit_record(const std::vector<uint8_t>& wire, std::size_t pos,
                            uint32_t len, char type, StreamFingerprint& fp) {
-  if (type == 'P') {
-    google::fhir::r4::core::Patient m;
+    const auto emit = [&](const google::protobuf::Message& m) {
+        const std::string key = pb_resource_key(m, type);
+        if (key.empty()) return;
+        pb_walk(m, key, fp);
+    };
+    if (type == 'P') {
+        google::fhir::r4::core::Patient m;
+        if (!m.ParseFromArray(wire.data() + pos + 5, static_cast<int>(len))) return false;
+        emit(m);
+        return true;
+    }
+    google::fhir::r4::core::Observation m;
     if (!m.ParseFromArray(wire.data() + pos + 5, static_cast<int>(len))) return false;
-    pb_walk(m, pos, "P", fp);
+    emit(m);
     return true;
-  }
-  google::fhir::r4::core::Observation m;
-  if (!m.ParseFromArray(wire.data() + pos + 5, static_cast<int>(len))) return false;
-  pb_walk(m, pos, "O", fp);
-  return true;
 }
 
 inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
@@ -586,94 +874,71 @@ inline std::vector<uint8_t> corrupt_stream(const std::vector<uint8_t>& wire,
 // ---------------------------------------------------------------------------
 #if defined(ARM_FASTFHIR)
 inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {
-  StreamFingerprint fp;
-  FastFHIR::Memory mem = wrap_wire_bytes(wire);
-  FastFHIR::Recovery rec(mem);
-  const auto rep = rec.recover();
+    StreamFingerprint fp;
+    FastFHIR::Memory mem = wrap_wire_bytes(wire);
+    FastFHIR::Recovery rec(mem);
+    const auto rep = rec.recover();
 
-  // APPLY THE REPAIRS BEFORE READING THE DATA.
-  //
-  // recover() only DIAGNOSES; apply() is the only mutating entry point and it
-  // writes into a copy. Hashing `wire` here read the damaged bytes and scored
-  // every correctly-repaired block as `wrong` -- the arm was reporting the
-  // damage it had just fixed. The honest pipeline is
-  // uncorrupted -> corrupted -> RECOVERED -> compare, and `repaired` is the
-  // third step. A failed apply leaves the copy as-is, so this never reads
-  // better than the engine actually achieved.
-  std::vector<uint8_t> repaired;
-  rec.apply(rep, repaired);
-  const std::vector<uint8_t>& src = repaired.empty() ? wire : repaired;
+    // APPLY BEFORE READING. recover() only DIAGNOSES; apply() is the only
+    // mutating entry point and it writes into a copy. Reading the damaged bytes
+    // here would score every correctly-repaired value as wrong -- reporting the
+    // damage the engine had just fixed. A failed apply leaves the copy as-is,
+    // so this never reads better than the engine actually achieved.
+    std::vector<BYTE> repaired;
+    rec.apply(rep, repaired);
+    const std::vector<uint8_t>& src =
+        repaired.empty() ? wire : reinterpret_cast<const std::vector<uint8_t>&>(repaired);
 
-  for (const auto& verdict : rep.blocks) {
-    // Only RESTORED block references count (IN-G2): the two halves
-    // corroborate. An ambiguous or unrecovered reference produces no unit, so
-    // the subset check reports the under-recovery instead of papering over it.
-    if (verdict.class_ == FastFHIR::RepairClass::Unrecovered ||
-        verdict.class_ == FastFHIR::RepairClass::Ambiguous)
-      continue;
-    fp.units.push_back(UnitRef{static_cast<std::size_t>(verdict.block.parent + verdict.block.field),
-                               static_cast<std::size_t>(verdict.block.child),
-                               static_cast<std::uint16_t>(verdict.block.declared),
-                               ffhr_block_content(src, static_cast<std::size_t>(verdict.block.child),
-                                                  verdict.block.declared)});
-  }
-  std::sort(fp.units.begin(), fp.units.end(),
-            [](const UnitRef& a, const UnitRef& b) { return a.offset < b.offset; });
-  fp.finalize();
-  return fp;
+    FastFHIR::Memory fixed = wrap_wire_bytes(src);
+    FastFHIR::Parser parser(fixed);
+    ffhr_collect(parser.root(), fp, FHIR_VERSION_R5);
+    fp.finalize();
+    return fp;
 }
 #elif defined(ARM_JSON)
 inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {
-  StreamFingerprint fp;
-  const std::string text(wire.begin(), wire.end());
-  try {
-    (void)nlohmann::json::parse(text);
-    for (std::size_t i = 0; i + 10 <= text.size(); ++i)
-      if (text.compare(i, 10, "\"resource\"") == 0) {
-        // A parseable document is not an INTACT one: a flipped byte inside a
-        // string value keeps the JSON well-formed and changes the data.
-        const auto [open, close] = json_resource_extent(text, i);
-        fp.units.push_back(UnitRef{0, i, 0, content_of(wire, open, close)});
-      }
+    StreamFingerprint fp;
+    const std::string text(wire.begin(), wire.end());
+
+    // Whole document still parses: every leaf is reachable.
+    try {
+        json_collect(nlohmann::json::parse(text), fp);
+        fp.finalize();
+        return fp;
+    } catch (const std::exception&) {
+    }
+
+    // RESYNC. One broken brace makes the whole document unparseable, and
+    // scoring that as total loss would flatter the failure -- JSON's real
+    // behaviour is that the damage is local to the object it lands in. So
+    // recover each resource independently: find each `"resource"` marker, take
+    // its brace-matched span, and keep the ones that still parse.
+    std::size_t pos = 0;
+    while (true) {
+        const auto marker = text.find("\"resource\"", pos);
+        if (marker == std::string::npos) break;
+        const auto [open, close] = json_resource_extent(text, marker);
+        if (close > open) {
+            try {
+                const auto res = nlohmann::json::parse(text.substr(open, close - open));
+                const auto type = res.value("resourceType", std::string{});
+                const auto id = res.value("id", std::string{});
+                const auto key = resource_key(type, id);
+                if (!key.empty()) {
+                    for (auto it = res.begin(); it != res.end(); ++it) {
+                        if (it.key() == "resourceType") continue;
+                        json_walk_leaves(it.value(), key + "." + it.key(), fp);
+                    }
+                }
+            } catch (const std::exception&) {
+                // this resource is unreadable; the rest of the document is not
+            }
+        }
+        const auto next = text.find("\"resource\"", marker + 10);
+        pos = (next == std::string::npos) ? text.size() : next;
+    }
     fp.finalize();
     return fp;
-  } catch (const std::exception&) {
-  }
-  // Resync at each '"resource"' marker; a unit is recovered only when its
-  // span parses (content verification).
-  std::size_t pos = 0;
-  while (true) {
-    const auto marker = text.find("\"resource\"", pos);
-    if (marker == std::string::npos)
-      break;
-    const auto next = text.find("\"resource\"", marker + 10);
-    const auto end = (next == std::string::npos) ? text.size() : next;
-    std::size_t open = marker;
-    while (open > 0 && text[open] != '{')
-      --open;
-    std::size_t close = end;
-    while (close > open) {
-      const auto brace = text.rfind('}', close - 1);
-      if (brace == std::string::npos || brace < open)
-        break;
-      if (brace + 1 >= end || text[brace + 1] == ',' || text[brace + 1] == ']' ||
-          text[brace + 1] == '}') {
-        close = brace + 1;
-        break;
-      }
-      close = brace;
-    }
-    if (close > open) {
-      try {
-        (void)nlohmann::json::parse(text.substr(open, close - open));
-        fp.units.push_back(UnitRef{0, marker, 0, content_of(wire, open, close)});
-      } catch (const std::exception&) {
-      }
-    }
-    pos = (next == std::string::npos) ? text.size() : next;
-  }
-  fp.finalize();
-  return fp;
 }
 #elif defined(ARM_GOOGLE_FHIR)
 inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {

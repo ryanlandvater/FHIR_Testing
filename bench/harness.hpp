@@ -230,192 +230,29 @@ inline std::string read_text_field(const FastFHIR::Reflective::Node& node) {
   return std::string(node.as<std::string_view>());
 }
 
-// ---------------------------------------------------------------------------
-// Cross-arena choice[x] sanitisation -- READ THIS BEFORE TRUSTING TEST 1.
-// ---------------------------------------------------------------------------
-// FastFHIR's generated deserializer stores a BLOCK-typed choice variant
-// (valueQuantity, valueCodeableConcept, valuePeriod, ...) as the raw child
-// OFFSET of that block, in the ChoiceEntry's uint64_t alternative:
-//
-//     generated_src/FF_Observation.cpp:319
-//         else data.value.value = child_off;   // offset into the SOURCE arena
-//
-// The POCO carries no base pointer, so that offset is meaningless outside the
-// arena it was read from -- and this benchmark hydrates POCOs from one arena
-// and serializes them into another, which is precisely the unsupported move.
-//
-// The generated STORE then writes the foreign offset straight back out and
-// tags the slot as a block, so the damage is not confined to code the benchmark
-// controls: appending a hydrated POCO wholesale via Builder::append() is enough
-// to corrupt the destination stream. validate_FFHR_stream() reports "the offset
-// chain is broken", and reading it back segfaults in
-// FF_CODEABLECONCEPT::deserialize.
-//
-// Clearing these at hydration is the only place that fixes every path at once,
-// and it has a second benefit: all four arms then receive byte-identical POCOs,
-// which is what the parity axiom actually requires.
-//
-// COST: Test 1 does not measure value[x] serialization at all. Fixing it needs
-// the source arena base plumbed through so the block can be deep-copied. See
-// notes.md, "Block-typed choice[x] cannot cross arenas".
-// True when a ChoiceEntry's payload is an ARENA-RELATIVE reference rather than
-// a self-contained value, and therefore cannot be re-serialized into a
-// different arena.
-//
-// Three shapes reach the uint64_t alternative, and only some are portable:
-//
-//   BLOCK    always a child offset into the source arena         -> NOT portable
-//   CODE     dictionary index (MSB clear)                        -> portable
-//            packed FF_CODEABLE_CONCEPT offset (MSB set)         -> NOT portable
-//   DATETIME packed civil value (bit 63 clear)                   -> portable
-//            fallback offset to an FF_STRING (bit 63 set)        -> NOT portable
-//
-// Missing the CODE case is what kept this bug alive through the first three
-// attempts at a fix: Synthea's us-core-race / us-core-ethnicity extensions carry
-// valueCode, so ~337 slots per corpus slipped through a BLOCK-only test and
-// corrupted the stream anyway.
-inline bool is_cross_arena_choice(const ChoiceEntry& choice) {
-  if (choice.is_empty() || !std::holds_alternative<uint64_t>(choice.value)) {
-    return false;
-  }
-  const uint64_t raw = std::get<uint64_t>(choice.value);
-  switch (Recovery_to_Kind(choice.tag)) {
-    case FF_FIELD_BLOCK:
-      return true;
-    case FF_FIELD_CODE:
-      return (static_cast<uint32_t>(raw) & FF_CODEABLE_CONCEPT_FLAG) != 0;
-    case FF_FIELD_DATETIME:
-      return raw != FF_DATETIME_NULL && FF_DATETIME_IS_FALLBACK(raw);
-    default:
-      return false;
-  }
-}
-
-// Retained name for the arm-side call sites.
-inline bool is_cross_arena_block_choice(const ChoiceEntry& choice) {
-  return is_cross_arena_choice(choice);
-}
-
-inline void sanitize_choice(ChoiceEntry& choice) {
-  if (is_cross_arena_block_choice(choice)) {
-    choice = ChoiceEntry{};
-  }
-}
-
-inline void sanitize_extensions(std::vector<ExtensionData>& extensions) {
-  for (auto& ext : extensions) {
-    sanitize_choice(ext.value);
-    sanitize_extensions(ext.extension);
-  }
-}
-
-// Every FHIR datatype carries its own `extension` vector, so an offending
-// ChoiceEntry can hide arbitrarily deep -- Synthea alone puts extensions on
-// Patient, Patient.address (geolocation) and Patient.name. Sweep each nested
-// vector rather than only the top-level ones.
-template <typename T>
-inline void sanitize_each(std::vector<T>& items) {
-  for (auto& item : items) {
-    sanitize_extensions(item.extension);
-  }
-}
-
-inline void sanitize_codeable_concept(CodeableConceptData& concept_data) {
-  sanitize_extensions(concept_data.extension);
-  sanitize_each(concept_data.coding);
-}
-
-inline void sanitize_reference_range(ObservationreferenceRangeData& range) {
-  sanitize_extensions(range.extension);
-  sanitize_extensions(range.modifierextension);
-  if (range.low) sanitize_extensions(range.low->extension);
-  if (range.high) sanitize_extensions(range.high->extension);
-  if (range.type) sanitize_codeable_concept(*range.type);
-  for (auto& applies : range.appliesto) sanitize_codeable_concept(applies);
-  if (range.age) sanitize_extensions(range.age->extension);
-}
-
-inline void sanitize_observation(ObservationData& observation) {
-  sanitize_choice(observation.value);
-  sanitize_choice(observation.effective);
-  sanitize_choice(observation.instantiates);
-  sanitize_extensions(observation.extension);
-  sanitize_extensions(observation.modifierextension);
-
-  if (observation.meta) sanitize_extensions(observation.meta->extension);
-  if (observation.text) sanitize_extensions(observation.text->extension);
-  sanitize_each(observation.identifier);
-  sanitize_each(observation.basedon);
-  sanitize_each(observation.partof);
-  sanitize_each(observation.focus);
-  sanitize_each(observation.performer);
-  sanitize_each(observation.note);
-  sanitize_each(observation.hasmember);
-  sanitize_each(observation.derivedfrom);
-  sanitize_each(observation.triggeredby);
-
-  for (auto& category : observation.category) sanitize_codeable_concept(category);
-  for (auto& interpretation : observation.interpretation) sanitize_codeable_concept(interpretation);
-  if (observation.code) sanitize_codeable_concept(*observation.code);
-  if (observation.dataabsentreason) sanitize_codeable_concept(*observation.dataabsentreason);
-  if (observation.bodysite) sanitize_codeable_concept(*observation.bodysite);
-  if (observation.method) sanitize_codeable_concept(*observation.method);
-
-  if (observation.subject) sanitize_extensions(observation.subject->extension);
-  if (observation.encounter) sanitize_extensions(observation.encounter->extension);
-  if (observation.specimen) sanitize_extensions(observation.specimen->extension);
-  if (observation.device) sanitize_extensions(observation.device->extension);
-  if (observation.bodystructure) sanitize_extensions(observation.bodystructure->extension);
-
-  for (auto& range : observation.referencerange) sanitize_reference_range(range);
-
-  for (auto& component : observation.component) {
-    sanitize_choice(component.value);
-    sanitize_extensions(component.extension);
-    sanitize_extensions(component.modifierextension);
-    if (component.code) sanitize_codeable_concept(*component.code);
-    if (component.dataabsentreason) sanitize_codeable_concept(*component.dataabsentreason);
-    for (auto& interpretation : component.interpretation) sanitize_codeable_concept(interpretation);
-    for (auto& range : component.referencerange) sanitize_reference_range(range);
-  }
-}
-
-inline void sanitize_patient(PatientData& patient) {
-  sanitize_choice(patient.deceased);
-  sanitize_choice(patient.multiplebirth);
-  sanitize_extensions(patient.extension);
-  sanitize_extensions(patient.modifierextension);
-
-  sanitize_each(patient.identifier);
-  sanitize_each(patient.name);
-  sanitize_each(patient.telecom);
-  sanitize_each(patient.address);
-  sanitize_each(patient.photo);
-  sanitize_each(patient.contact);
-  sanitize_each(patient.communication);
-  sanitize_each(patient.generalpractitioner);
-  sanitize_each(patient.link);
-
-  if (patient.meta) sanitize_extensions(patient.meta->extension);
-  if (patient.text) sanitize_extensions(patient.text->extension);
-  if (patient.maritalstatus) sanitize_codeable_concept(*patient.maritalstatus);
-  if (patient.managingorganization) sanitize_extensions(patient.managingorganization->extension);
-
-  for (auto& contact : patient.contact) {
-    sanitize_each(contact.relationship);
-    sanitize_each(contact.telecom);
-    if (contact.name) sanitize_extensions(contact.name->extension);
-    if (contact.address) sanitize_extensions(contact.address->extension);
-  }
-  for (auto& communication : patient.communication) {
-    if (communication.language) sanitize_codeable_concept(*communication.language);
-  }
-}
 
 // One ingested Synthea patient item kept in RAM.
 // The FastFHIR::Memory arena contains the serialized FFHR patient binary.
 struct BundlePatient {
   FastFHIR::Memory memory;
+
+  // EXTENSION URLs, RESOLVED FROM THE TRIE.
+  //
+  // ExtensionData::url is a uint32 index into FastFHIR's FF_URL_DIRECTORY --
+  // a per-'/' radix trie that stores each path segment once, so repeated
+  // endpoints cost one entry rather than one string per use. That is a
+  // deliberate size win, not lost information: get_url() walks the prior
+  // chain and rebuilds the string.
+  //
+  // Nothing did that walk, so every arm serialized the raw index. The JSON
+  // arm emitted {"urlIndex": 16} where FHIR requires
+  // {"url": "http://hl7.org/fhir/StructureDefinition/geolocation"} -- which
+  // is not FHIR, and made the JSON competitor unparseable by anything else.
+  //
+  // Resolved ONCE here, at ingest, because the trie lives in this arena and
+  // the encoders only ever see the structs.
+  std::vector<std::string> url_table;
+
   PatientData patient;
   std::vector<EncounterData> encounters;
   std::vector<ConditionData> conditions;
@@ -446,6 +283,12 @@ EnrichmentObservationFixture load_enrichment_observation_from_json(const std::fi
 inline BundlePatient clone_bundle_patient(const BundlePatient& src) {
   BundlePatient dst{};
   dst.memory = src.memory;
+  // The resolved URL strings travel with the arena they were rebuilt from.
+  // Re-hydration below restores the POCOs but not this: it reads the structs,
+  // and ExtensionData carries the intern INDEX, not the string. Dropping it
+  // here left every cloned item with an empty table, so the encoders resolved
+  // nothing and the JSON arm emitted extensions with no url at all.
+  dst.url_table = src.url_table;
 
   // Re-hydrate the POCO bundle from copied FFHR memory so cloned fixtures keep
   // string-backed fields valid after arena duplication.
@@ -584,12 +427,12 @@ inline void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
   copy_resources_for_patient(procedure_nodes, bundle_patient.patient.id, bundle_patient.procedures);
   copy_resources_for_patient(observation_nodes, bundle_patient.patient.id, bundle_patient.observations);
 
-  // Drop choice[x] variants that carry a source-arena offset. They cannot be
-  // re-serialized into another arena, and leaving them in corrupts the FastFHIR
-  // arm's stream and feeds the other arms a raw offset as if it were a value.
-  // Doing it here means every arm receives byte-identical POCOs. See the
-  // sanitize_choice() commentary above and notes.md.
-  sanitize_patient(bundle_patient.patient);
+  // choice[x] sanitisation used to run here, clearing every block-typed value
+  // because the POCO carried a raw source-arena OFFSET that could not be
+  // re-serialized. FastFHIR now hands back the DECODED value instead
+  // (ChoiceEntry::block for blocks; resolved text for codes and date/time
+  // fallbacks), so there is nothing left to cut -- all three arms of the old
+  // cross-arena test are unreachable, and Test 1 measures value[x] again.
   if (std::getenv("BENCH_CODE_CENSUS")) {
     // Lens vs POCO on the SAME node: does the reflective reader find
     // Observation.code where as<ObservationData>() does not?
@@ -642,7 +485,6 @@ inline void hydrate_bundle_resources(const FastFHIR::Reflective::Node& root,
                  bundle_patient.observations.size(), with_code, with_coding, with_code_str);
   }
   for (auto& observation : bundle_patient.observations) {
-    sanitize_observation(observation);
     if (std::getenv("BENCH_DROP_OBS_CODE")) observation.code.reset();
     if (std::getenv("BENCH_DROP_OBS_CAT")) observation.category.clear();
     if (std::getenv("BENCH_DROP_OBS_COMP")) observation.component.clear();

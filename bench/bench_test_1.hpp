@@ -110,6 +110,32 @@ inline namespace BENCH_ARM_NS {
 
   namespace detail
   {
+    // The URL table of the document being serialized (BundlePatient::url_table,
+    // rebuilt from FastFHIR's trie at ingest). Installed for the duration of one
+    // bundle item: the to_json_* chain is ~20 recursive converters deep, and
+    // threading a resolver through every one of them to reach the single site
+    // that needs it is the worse trade. RAII so a stale table can never outlive
+    // the document it belongs to.
+    // thread_local: arms serialize bundle items in PARALLEL (dispatch_apply),
+    // and each item has its own arena, so intern index 16 names a different URL
+    // in different patients. A single shared pointer here would be both a data
+    // race and silently wrong.
+    inline thread_local const std::vector<std::string> *g_url_table = nullptr;
+
+    struct ScopedUrlTable {
+      explicit ScopedUrlTable(const std::vector<std::string> &t) noexcept { g_url_table = &t; }
+      ~ScopedUrlTable() noexcept { g_url_table = nullptr; }
+      ScopedUrlTable(const ScopedUrlTable &) = delete;
+      ScopedUrlTable &operator=(const ScopedUrlTable &) = delete;
+    };
+
+    inline std::string resolve_extension_url(std::uint32_t idx) {
+      if (g_url_table == nullptr || idx >= g_url_table->size())
+        return {};
+      return (*g_url_table)[idx];
+    }
+
+
 
     using Json = nlohmann::json;
 
@@ -146,12 +172,6 @@ inline namespace BENCH_ARM_NS {
     // sink so the block can be deep-copied (deserialize from source, append into
     // destination). That is the single biggest correctness gap in the benchmark
     // -- see notes.md, "Block-typed choice[x] cannot cross arenas".
-    inline bool is_cross_arena_block_choice(const ChoiceEntry &choice)
-    {
-      return !choice.is_empty() &&
-             std::holds_alternative<uint64_t>(choice.value) &&
-             Recovery_to_Kind(choice.tag) == FF_FIELD_BLOCK;
-    }
 
     inline bool has_u8(uint8_t v) { return v != FF_NULL_UINT8; }
     inline bool has_u32(uint32_t v) { return v != FF_NULL_UINT32; }
@@ -300,7 +320,15 @@ inline namespace BENCH_ARM_NS {
       // faithful arm would resolve it via Parser::url_directory(); mocking keeps
       // the pre-port behaviour. See notes.md "Extension URL interning".
       if (src.url != FF_NULL_UINT32)
-        pb_ext->mutable_url()->set_value("http://example.org/ext/" + std::to_string(src.url));
+        // The REAL url, resolved from FastFHIR's trie -- not a synthetic
+        // "http://example.org/ext/<index>". Fabricating it here meant the
+        // protobuf arm never encoded the document's actual extension URLs, so
+        // the arms were not holding the same data at all. Same resolution the
+        // JSON arm uses; an unresolvable index writes nothing rather than a
+        // plausible-looking lie.
+        if (const std::string __u = resolve_extension_url(src.url); !__u.empty()) {
+          pb_ext->mutable_url()->set_value(__u);
+        }
 
       // Map the ChoiceEntry variant to Extension.value[x]
       if (!src.value.is_empty())
@@ -364,16 +392,33 @@ inline namespace BENCH_ARM_NS {
       }
     }
 
+
+    // Defined below, once the per-datatype converters it forwards to have been
+    // declared. See "Rendering a DECODED block-typed choice".
+    // Complete here, not forward-declared: std::optional<T> requires T complete
+    // at the point the declaration below is parsed.
+    struct RenderedChoice {
+        std::string suffix;  // the DATATYPE name, e.g. "Quantity"
+        Json        value;
+    };
+
+    inline std::optional<RenderedChoice> choice_block_json(const ChoiceBlock &blk);
+
     inline void write_choice(Json &out, const std::string_view base, const ChoiceEntry &choice)
     {
       if (choice.is_empty())
       {
         return;
       }
-      // See is_cross_arena_block_choice(): this used to emit the raw source-arena
-      // offset as a JSON number (e.g. {"valueQuantity": 55683}).
-      if (is_cross_arena_block_choice(choice))
+      // A block-typed variant lives in `.block`; `.value` is monostate for it,
+      // so the visitor below would emit nothing at all. Its key carries the
+      // DATATYPE's name, taken from the variant rather than from the tag.
+      if (choice.block)
       {
+        if (auto rendered = choice_block_json(*choice.block))
+        {
+          out[std::string(base) + rendered->suffix] = std::move(rendered->value);
+        }
         return;
       }
 
@@ -430,7 +475,16 @@ inline namespace BENCH_ARM_NS {
     }
     inline void put_if_enum(Json &out, const char *key, int value)
     {
-      if (value != 0)
+      // FF_NULL_UINT8 is the ABSENT sentinel for these uint8_t enum fields, and
+      // testing only `!= 0` let it through as a literal 255 -- so a Quantity
+      // carried {"comparator": 255}, which is an integer where FHIR requires a
+      // code, and 1,521 such leaves across the corpus. They were invisible
+      // while block-typed choices were dropped entirely; rendering the Quantity
+      // is what surfaced them.
+      //
+      // No FHIR code enum has 255 ordinals, and has_u8() above already treats
+      // that value as absence.
+      if (value != 0 && value != static_cast<int>(FF_NULL_UINT8))
         out[key] = value;
     }
 
@@ -454,6 +508,84 @@ inline namespace BENCH_ARM_NS {
     inline Json to_json_observation_triggered_by(const ObservationtriggeredByData &src);
     inline Json to_json_observation_reference_range(const ObservationreferenceRangeData &src);
     inline Json to_json_observation_component(const ObservationcomponentData &src);
+
+    // ── Rendering a DECODED block-typed choice ──────────────────────────────
+    //
+    // ChoiceEntry used to hand out a raw source-arena OFFSET for a block-typed
+    // value[x], so every arm either wrote it out as a bare number
+    // ({"valueQuantity": 55683}) or, once that was noticed, dropped the field
+    // outright. FastFHIR now carries the DECODED value in `.block`, so the
+    // measurement it always should have been is finally available: the arms can
+    // render the Quantity.
+    //
+    // One dispatch for every arm. The overloads below forward to the existing
+    // per-datatype converters, and `requires` lets a datatype this build has no
+    // converter for degrade EXPLICITLY -- counted, not silently skipped, which
+    // is how the offset survived in the first place.
+    inline Json to_json_choice_value(const AddressData &v) { return to_json_address(v); }
+    inline Json to_json_choice_value(const AnnotationData &v) { return to_json_annotation(v); }
+    inline Json to_json_choice_value(const AttachmentData &v) { return to_json_attachment(v); }
+    inline Json to_json_choice_value(const CodeableConceptData &v) { return to_json_codeable_concept(v); }
+    inline Json to_json_choice_value(const CodingData &v) { return to_json_coding(v); }
+    inline Json to_json_choice_value(const ContactPointData &v) { return to_json_contact_point(v); }
+    inline Json to_json_choice_value(const ExtensionData &v) { return to_json_extension(v); }
+    inline Json to_json_choice_value(const HumanNameData &v) { return to_json_human_name(v); }
+    inline Json to_json_choice_value(const IdentifierData &v) { return to_json_identifier(v); }
+    inline Json to_json_choice_value(const MetaData &v) { return to_json_meta(v); }
+    inline Json to_json_choice_value(const NarrativeData &v) { return to_json_narrative(v); }
+    inline Json to_json_choice_value(const PeriodData &v) { return to_json_period(v); }
+    inline Json to_json_choice_value(const QuantityData &v) { return to_json_quantity(v); }
+    inline Json to_json_choice_value(const RangeData &v) { return to_json_range(v); }
+    inline Json to_json_choice_value(const ReferenceData &v) { return to_json_reference(v); }
+
+    // Datatypes with no converter yet. Counted so a gap shows up as a number
+    // rather than as a field that quietly is not there; ChoiceBlock has 29
+    // members and 15 are covered today.
+    inline std::size_t &unrendered_choice_count() {
+        static std::size_t n = 0;
+        return n;
+    }
+
+    // THE SUFFIX COMES FROM THE VARIANT, NOT FROM THE TAG.
+    //
+    // choice_suffix() defaults to "String" for any tag it does not list, and it
+    // lists only the scalars -- so a Quantity rendered as {"valueString": {...}}:
+    // an object under a primitive's key, invalid FHIR, and silent. Reading the
+    // name off the alternative that is actually stored cannot default wrong;
+    // a datatype with no overload here fails to compile rather than mislabel.
+    inline const char *choice_suffix_for(const AddressData &) { return "Address"; }
+    inline const char *choice_suffix_for(const AnnotationData &) { return "Annotation"; }
+    inline const char *choice_suffix_for(const AttachmentData &) { return "Attachment"; }
+    inline const char *choice_suffix_for(const CodeableConceptData &) { return "CodeableConcept"; }
+    inline const char *choice_suffix_for(const CodingData &) { return "Coding"; }
+    inline const char *choice_suffix_for(const ContactPointData &) { return "ContactPoint"; }
+    inline const char *choice_suffix_for(const ExtensionData &) { return "Extension"; }
+    inline const char *choice_suffix_for(const HumanNameData &) { return "HumanName"; }
+    inline const char *choice_suffix_for(const IdentifierData &) { return "Identifier"; }
+    inline const char *choice_suffix_for(const MetaData &) { return "Meta"; }
+    inline const char *choice_suffix_for(const NarrativeData &) { return "Narrative"; }
+    inline const char *choice_suffix_for(const PeriodData &) { return "Period"; }
+    inline const char *choice_suffix_for(const QuantityData &) { return "Quantity"; }
+    inline const char *choice_suffix_for(const RangeData &) { return "Range"; }
+    inline const char *choice_suffix_for(const ReferenceData &) { return "Reference"; }
+
+    inline std::optional<RenderedChoice> choice_block_json(const ChoiceBlock &blk) {
+        std::optional<RenderedChoice> out;
+        std::visit(
+            [&](const auto &v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                    // An empty variant is not a gap: nothing was stored.
+                } else if constexpr (requires { to_json_choice_value(v); }) {
+                    out = RenderedChoice{choice_suffix_for(v), to_json_choice_value(v)};
+                } else {
+                    ++unrendered_choice_count();
+                }
+            },
+            blk.value);
+        return out;
+    }
+
     inline Json to_json_extension(const ExtensionData &src)
     {
       Json out = Json::object();
@@ -465,8 +597,17 @@ inline namespace BENCH_ARM_NS {
           out["extension"].push_back(to_json_extension(e));
       }
       // FF_NULL_UINT32 is "absent"; 0 is a legitimate intern index.
-      if (src.url != FF_NULL_UINT32)
-        out["urlIndex"] = src.url;
+      //
+      // Emit the URL, not the index. `urlIndex` is a FastFHIR storage detail
+      // (the radix trie that stores each path segment once); FHIR requires the
+      // string, and a JSON arm that writes the index is not producing FHIR.
+      // An index the table cannot resolve is a real gap -- omit it rather than
+      // write a non-FHIR key, and let the corpus round-trip check report it.
+      if (src.url != FF_NULL_UINT32) {
+        const std::string url = resolve_extension_url(src.url);
+        if (!url.empty())
+          out["url"] = url;
+      }
       write_choice(out, "value", src.value);
       return out;
     }
@@ -1071,13 +1212,21 @@ inline namespace BENCH_ARM_NS {
     template <typename Target>
     inline void hl7_mark_if_choice(Target &dst, const char *field_name, const ChoiceEntry &choice)
     {
-      // A block-typed choice would render as an empty {} through write_choice
-      // now that the raw-offset branch is gone -- skip it rather than emit an
-      // empty ZFX field the other arms do not write.
-      if (!choice.is_empty() && !is_cross_arena_block_choice(choice))
+      if (choice.is_empty())
+        return;
+      // A block-typed variant is in `.block`; the ZFX passthrough carries JSON,
+      // so it renders through the same dispatch the JSON arm uses -- the arms
+      // must agree on what the value IS, or the comparison measures the
+      // encoders' disagreement rather than the formats'.
+      if (choice.block)
       {
-        hl7_append_json_field(dst, field_name, hl7_json_value(choice));
+        if (auto rendered = choice_block_json(*choice.block))
+        {
+          hl7_append_json_field(dst, field_name, std::move(rendered->value));
+        }
+        return;
       }
+      hl7_append_json_field(dst, field_name, hl7_json_value(choice));
     }
 #endif
 
@@ -1157,15 +1306,30 @@ inline namespace BENCH_ARM_NS {
     {
       if (choice.is_empty())
         return;
-      // See is_cross_arena_block_choice(): writing the foreign offset here is
-      // what corrupted the arm's own stream ("the offset chain is broken").
-      if (detail::is_cross_arena_block_choice(choice))
-        return;
-
       auto assign_raw_variant = [&](uint64_t raw_bits)
       {
         dst.builder.amend_variant(dst.handle.offset(), key.field_offset, raw_bits, choice.tag);
       };
+
+      // REBUILT, NOT REPOINTED. The decoded value is appended into THIS
+      // builder's arena and the slot names the address it got here. Writing the
+      // source arena's offset is what used to corrupt this arm's own stream
+      // ("the offset chain is broken") and is the reason the field was dropped.
+      if (choice.block)
+      {
+        std::visit(
+            [&](const auto &v)
+            {
+              using T = std::decay_t<decltype(v)>;
+              if constexpr (!std::is_same_v<T, std::monostate>)
+              {
+                assign_raw_variant(
+                    static_cast<uint64_t>(dst.builder.append_obj(v).offset()));
+              }
+            },
+            choice.block->value);
+        return;
+      }
 
       if (std::holds_alternative<bool>(choice.value))
       {

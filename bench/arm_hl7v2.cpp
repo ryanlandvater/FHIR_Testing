@@ -35,6 +35,9 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
 
   for (const auto& item : fixture.bundle) {
     hl7v2::OruR01Message message;
+    // This item's interned URLs, for the extension converters (which every
+    // arm reaches -- v2's ZFX passthrough serializes JSON too).
+    const assign::detail::ScopedUrlTable urls(item.url_table);
     assign::assign_patient(item.patient, message);
 
     for (const auto& observation : item.observations) {

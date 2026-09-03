@@ -32,14 +32,23 @@ struct JsonPatientBuildContext {
   std::vector<nlohmann::json>* entries;
 };
 
+// An observation is flattened out of its BundlePatient, which is where its
+// URL table lives -- so the table has to travel with it or the index resolves
+// against the wrong patient's trie.
+struct ObservationWithUrls {
+  const ObservationData* observation;
+  const std::vector<std::string>* urls;
+};
+
 struct JsonObservationBuildContext {
-  const std::vector<const ObservationData*>* observations;
+  const std::vector<ObservationWithUrls>* observations;
   std::vector<nlohmann::json>* entries;
 };
 
 static inline void build_patient_entry(void* raw_context, std::size_t idx) {
   auto* context = static_cast<JsonPatientBuildContext*>(raw_context);
   nlohmann::json patient_json;
+  const assign::detail::ScopedUrlTable urls((*context->bundle)[idx].url_table);
   assign::assign_patient((*context->bundle)[idx].patient, patient_json);
   (*context->entries)[idx] = nlohmann::json{{"resource", std::move(patient_json)}};
 }
@@ -47,7 +56,9 @@ static inline void build_patient_entry(void* raw_context, std::size_t idx) {
 static inline void build_observation_entry(void* raw_context, std::size_t idx) {
   auto* context = static_cast<JsonObservationBuildContext*>(raw_context);
   nlohmann::json observation_json;
-  assign::assign_observation(*(*context->observations)[idx], observation_json);
+  const auto& entry = (*context->observations)[idx];
+  const assign::detail::ScopedUrlTable urls(*entry.urls);
+  assign::assign_observation(*entry.observation, observation_json);
   (*context->entries)[idx] = nlohmann::json{{"resource", std::move(observation_json)}};
 }
 #endif
@@ -79,6 +90,7 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
       patient_entries.begin(),
       [](const BundlePatient& item) -> nlohmann::json {
         nlohmann::json patient_json;
+        const assign::detail::ScopedUrlTable urls(item.url_table);
         assign::assign_patient(item.patient, patient_json);
         return nlohmann::json{{"resource", std::move(patient_json)}};
       });
@@ -89,11 +101,11 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
     total_observations += item.observations.size();
   }
 
-  std::vector<const ObservationData*> observation_ptrs;
+  std::vector<ObservationWithUrls> observation_ptrs;
   observation_ptrs.reserve(total_observations);
   for (const auto& item : fixture.bundle) {
     for (const auto& observation : item.observations) {
-      observation_ptrs.push_back(&observation);
+      observation_ptrs.push_back({&observation, &item.url_table});
     }
   }
 
@@ -109,9 +121,10 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
       observation_ptrs.begin(),
       observation_ptrs.end(),
       observation_entries.begin(),
-      [](const ObservationData* observation) -> nlohmann::json {
+      [](const ObservationWithUrls& entry) -> nlohmann::json {
         nlohmann::json observation_json;
-        assign::assign_observation(*observation, observation_json);
+        const assign::detail::ScopedUrlTable urls(*entry.urls);
+        assign::assign_observation(*entry.observation, observation_json);
         return nlohmann::json{{"resource", std::move(observation_json)}};
       });
 #endif
@@ -132,6 +145,17 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
   out.test1_payload = payload;  // --dump-artifacts input
+
+  // A counter nobody reads is the silence it was added to prevent. ChoiceBlock
+  // has 29 alternatives and this build has converters for 15; the rest are
+  // skipped, and skipped-without-a-number is exactly how a raw arena offset in
+  // a value slot survived unnoticed for so long.
+  if (const std::size_t skipped = assign::detail::unrendered_choice_count()) {
+    std::fprintf(stderr,
+                 "WARNING: %zu block-typed choice value(s) had no JSON converter "
+                 "and were omitted -- the arms are NOT encoding the same document.\n",
+                 skipped);
+  }
 
   if (const char* full = std::getenv("BENCH_DUMP_FULL"))
   {
