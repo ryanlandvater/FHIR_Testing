@@ -35,6 +35,12 @@
 #include "harness.hpp"
 #include "provenance.hpp"  // sha256
 
+// Every arm's scanner renders leaf values as JSON, so this is a direct
+// dependency of this header rather than one inherited from whichever arm
+// happens to include it first.
+#include <nlohmann/json.hpp>
+#include <set>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -199,6 +205,23 @@ inline UnitRef canonical_leaf(const std::string& path, const std::string& value_
 // Only bare numbers are normalized: a JSON string arrives quoted, so a string
 // field holding "6.07" is untouched and still compares as text. %.17g is
 // round-trip exact for a double, so genuinely different values stay different.
+// Serialising a leaf value from a CORRUPTED wire.
+//
+// nlohmann's dump() throws type_error.316 when a string holds invalid UTF-8,
+// and a corruption sweep produces exactly that: at k=512 a flipped byte inside
+// an HL7v2 ZFX payload aborted the whole run with
+// "invalid UTF-8 byte at index 36: 0xFC". A recovery benchmark cannot abort on
+// damaged input -- damaged input is the experiment.
+//
+// error_handler_t::replace substitutes U+FFFD for the bad bytes. The unit stays
+// in the census and its content hash no longer matches the baseline, so it is
+// scored `wrong` -- the datum changed. That is the accurate verdict; throwing
+// reports nothing and dropping the leaf would score it `missing`, which
+// understates the damage by calling altered data absent.
+inline std::string safe_dump(const nlohmann::json& j) {
+    return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
 inline std::string canonical_number(const std::string& value) {
     if (value.empty() || value.front() == '"') return value;
     const char* begin = value.c_str();
@@ -396,28 +419,40 @@ inline StreamFingerprint calc_stream_hash(const std::vector<uint8_t>& wire) {
     return fp;
 }
 #elif defined(ARM_JSON)
-// The byte span of the resource object a `"resource"` marker introduces: back
-// up to its opening brace, forward to the closing one before the next marker.
-// Used by the resync path when the document as a whole will not parse.
+// The byte span of the RESOURCE OBJECT a `"resource"` marker introduces: the
+// '{' after the marker's colon, brace-matched forward. Used by the resync path
+// when the document as a whole will not parse.
+//
+// The span must be the resource object itself, not the enclosing entry object.
+// Scanning BACKWARD from the marker to a brace lands on the entry's '{', and a
+// parsed entry root has no resourceType -- so the salvage parsed fine and then
+// skipped every resource as unidentifiable, scoring 0 for any damage at all
+// (measured at every k >= 1 across seeds). Matching forward from the value
+// brace keeps resourceType at the parsed root, exactly where json_collect
+// reads it. Strings and escapes are honoured: braces inside string values must
+// not count, and nested objects (contained resources, extensions) must.
 inline std::pair<std::size_t, std::size_t> json_resource_extent(const std::string& text,
                                                                 std::size_t marker) {
-    const auto next = text.find("\"resource\"", marker + 10);
-    const auto end = (next == std::string::npos) ? text.size() : next;
-    std::size_t open = marker;
-    while (open > 0 && text[open] != '{')
-        --open;
-    std::size_t close = end;
-    while (close > open) {
-        const auto brace = text.rfind('}', close - 1);
-        if (brace == std::string::npos || brace < open)
-            break;
-        if (brace + 1 >= end || text[brace + 1] == ',' || text[brace + 1] == ']' ||
-            text[brace + 1] == '}') {
-            close = brace + 1;
-            break;
-        }
-        close = brace;
+    const auto colon = text.find(':', marker);
+    std::size_t open = (colon == std::string::npos) ? marker : colon + 1;
+    while (open < text.size() && text[open] != '{')
+        ++open;
+    if (open >= text.size())
+        return {marker, marker};  // no resource object to salvage
+    int depth = 0;
+    bool in_str = false, esc = false;
+    std::size_t close = open;
+    for (; close < text.size(); ++close) {
+        const char c = text[close];
+        if (esc) { esc = false; continue; }
+        if (c == '\\') { esc = true; continue; }
+        if (c == '"') { in_str = !in_str; continue; }
+        if (in_str) continue;
+        if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) { ++close; break; }
     }
+    if (depth != 0)
+        return {marker, marker};  // unbalanced: nothing salvageable here
     return {open, close};
 }
 
@@ -436,7 +471,7 @@ inline void json_walk_leaves(const nlohmann::json& node, const std::string& path
         // dump() rather than a type-specific formatter: every arm has to render
         // the value the SAME way or equal data compares unequal. JSON's own
         // canonical form is the one all four can reach.
-        fp.add_leaf(path, node.dump());
+        fp.add_leaf(path, safe_dump(node));
     }
 }
 
@@ -514,7 +549,7 @@ inline std::string pb_camel(const std::string& snake) {
 }
 
 inline std::string pb_json_value(const std::string& raw, bool is_string) {
-    return is_string ? nlohmann::json(raw).dump() : raw;
+    return is_string ? safe_dump(nlohmann::json(raw)) : raw;
 }
 
 inline std::string pb_scalar_string(const google::protobuf::Message& m,
@@ -530,7 +565,12 @@ inline std::string pb_scalar_string(const google::protobuf::Message& m,
     case FD::CPPTYPE_UINT64: return std::to_string(rep ? refl->GetRepeatedUInt64(m, f, index) : refl->GetUInt64(m, f));
     case FD::CPPTYPE_DOUBLE: return std::to_string(rep ? refl->GetRepeatedDouble(m, f, index) : refl->GetDouble(m, f));
     case FD::CPPTYPE_FLOAT:  return std::to_string(rep ? refl->GetRepeatedFloat(m, f, index)  : refl->GetFloat(m, f));
-    case FD::CPPTYPE_BOOL:   return (rep ? refl->GetRepeatedBool(m, f, index) : refl->GetBool(m, f)) ? "1" : "0";
+    // "true"/"false", not "1"/"0" -- the same spelling problem as the enum
+    // case below. JSON has a boolean literal and every other arm emits it, so
+    // "0" arrived as the NUMBER 0 and the POCO setter refused it: five
+    // multipleBirthBoolean leaves, present and correct on the wire, counted as
+    // missing.
+    case FD::CPPTYPE_BOOL:   return (rep ? refl->GetRepeatedBool(m, f, index) : refl->GetBool(m, f)) ? "true" : "false";
     case FD::CPPTYPE_ENUM: {
       // proto generation upper-snakes the FHIR code (final -> FINAL,
       // not-done -> NOT_DONE), so the inverse is lowercase with underscores
@@ -559,14 +599,25 @@ inline std::string pb_scalar_string(const google::protobuf::Message& m,
 // level deeper than the FHIR element path everywhere. Collapsing a wrapper --
 // a message whose populated content is a single `value` -- is what makes this
 // arm name a leaf the way the JSON document does.
+// Recognised from the DESCRIPTOR, not from which fields happen to be set.
+//
+// ListFields omits any proto3 scalar sitting at its default, so a
+// Boolean{value:false} lists NOTHING and the old shape test (`exactly one field
+// set, named value`) rejected it -- the message was then walked as an ordinary
+// submessage, found empty, and emitted no leaf at all. Every `false`, every 0,
+// every "" inside a FhirProto primitive wrapper disappeared; in this corpus
+// that was multipleBirthBoolean for all five patients.
+//
+// It is the same mistake as reading FastFHIR's enum ordinal 0 as absence.
+// Presence is carried by the WRAPPER MESSAGE existing at all -- the parent's
+// ListFields is what decides that -- and the scalar inside is then just a
+// value, default or not.
 inline bool pb_is_primitive_wrapper(const google::protobuf::Message& m,
                                     const google::protobuf::FieldDescriptor** out) {
-    const auto* refl = m.GetReflection();
-    std::vector<const google::protobuf::FieldDescriptor*> fields;
-    refl->ListFields(m, &fields);
-    if (fields.size() != 1) return false;
-    const auto* f = fields.front();
-    if (f->name() != "value" || f->is_repeated()) return false;
+    const auto* f = m.GetDescriptor()->FindFieldByName("value");
+    if (f == nullptr || f->is_repeated()) return false;
+    // A scalar `value` is what makes it a wrapper: Quantity and ContactPoint
+    // also have a `value`, but theirs is a message and they are real datatypes.
     if (f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) return false;
     *out = f;
     return true;
@@ -729,7 +780,7 @@ inline void pb_walk(const google::protobuf::Message& msg, const std::string& pat
                 // RULE 3: a timelike primitive renders as its FHIR string.
                 std::string when;
                 if (pb_timelike_text(sub, &when)) {
-                    fp.add_leaf(here, nlohmann::json(when).dump());
+                    fp.add_leaf(here, safe_dump(nlohmann::json(when)));
                     continue;
                 }
 
@@ -749,7 +800,7 @@ inline void pb_walk(const google::protobuf::Message& msg, const std::string& pat
                 // RULE 2: a Reference collapses to one `reference` string.
                 std::string ref_text;
                 if (pb_reference_text(sub, &ref_text)) {
-                    fp.add_leaf(here + ".reference", nlohmann::json(ref_text).dump());
+                    fp.add_leaf(here + ".reference", safe_dump(nlohmann::json(ref_text)));
                     // `display`, `type` and `identifier` are ordinary siblings
                     // and still belong in the output; only the oneof folded.
                     pb_walk(sub, here, fp);
@@ -764,7 +815,7 @@ inline void pb_walk(const google::protobuf::Message& msg, const std::string& pat
                         const google::protobuf::FieldDescriptor* pinner = nullptr;
                         std::string picked_when;
                         if (pb_timelike_text(picked, &picked_when)) {
-                            fp.add_leaf(folded, nlohmann::json(picked_when).dump());
+                            fp.add_leaf(folded, safe_dump(nlohmann::json(picked_when)));
                         } else if (pb_is_primitive_wrapper(picked, &pinner)) {
                             const bool istr =
                                 !pb_is_unquoted_primitive(picked) &&
@@ -915,7 +966,7 @@ inline void hl7_walk_json(const nlohmann::json& node, const std::string& path,
         for (std::size_t i = 0; i < node.size(); ++i)
             hl7_walk_json(node[i], path + "[" + std::to_string(i) + "]", fp);
     } else {
-        fp.add_leaf(path, node.dump());
+        fp.add_leaf(path, safe_dump(node));
     }
 }
 
@@ -924,36 +975,100 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
     const std::string text(wire.begin(), wire.end());
     std::string patient_key, obs_key;
 
+    // OBX IS DECODED, which requires deferring it.
+    //
+    // A message is MSH, PID, every OBX, then the Z-segments -- Z last is the
+    // convention -- so an OBX is read before the ZFX that names the observation
+    // it belongs to. The OBX rows are therefore buffered and resolved at the end
+    // of the message, matching OBX-1 (set id, 1-based) to the Nth observation.
+    //
+    // Only observations with no ZFX value[x] are decoded from OBX: the encoder
+    // emits one carrier per datum, OBX for a Quantity and ZFX for the datatypes
+    // OBX cannot hold. Decoding both would double-count, and would let a blasted
+    // OBX resurrect from the passthrough.
+    struct PendingObx { long set_id; std::string v5, v6; };
+    std::vector<PendingObx> pending_obx;
+    std::vector<std::string> msg_obs;              // observation keys, in order
+    std::set<std::string> obs_with_zfx_value;      // had a ZFX value[x]
+
+    const auto flush_obx = [&]() {
+        for (const auto& o : pending_obx) {
+            if (o.set_id < 1 || static_cast<std::size_t>(o.set_id) > msg_obs.size()) continue;
+            const std::string& key = msg_obs[static_cast<std::size_t>(o.set_id) - 1];
+            if (key.empty() || obs_with_zfx_value.count(key)) continue;
+            if (o.v5.empty()) continue;
+            // OBX-5 is the number; OBX-6 is a CWE of units, code^unit^system.
+            try {
+                fp.add_leaf(key + ".valueQuantity.value",
+                            nlohmann::json(std::stod(o.v5)).dump());
+            } catch (const std::exception&) { continue; }
+            const auto comp = hl7_split(o.v6, '^');
+            if (comp.size() > 0 && !comp[0].empty())
+                fp.add_leaf(key + ".valueQuantity.code", safe_dump(nlohmann::json(comp[0])));
+            if (comp.size() > 1 && !comp[1].empty())
+                fp.add_leaf(key + ".valueQuantity.unit", safe_dump(nlohmann::json(comp[1])));
+            if (comp.size() > 2 && !comp[2].empty())
+                fp.add_leaf(key + ".valueQuantity.system", safe_dump(nlohmann::json(comp[2])));
+        }
+        pending_obx.clear();
+        msg_obs.clear();
+        obs_with_zfx_value.clear();
+    };
+
     for (const auto& seg : hl7_split(text, '\r')) {
         if (seg.size() < 4) continue;
         const auto f = hl7_split(seg, '|');
         const std::string& name = f[0];
 
         if (name == "MSH" && f.size() > 9) {
+            flush_obx();                      // resolve the previous message
             patient_key = resource_key("Patient", f[9]);
+            // MSH-10 carries the patient id, and it is the ONLY place this arm
+            // writes it. Using it to key the resource but never emitting it as
+            // a leaf lost `Patient.id` for every patient in the corpus.
+            if (!f[9].empty())
+                fp.add_leaf(patient_key + ".id", safe_dump(nlohmann::json(f[9])));
         } else if (name == "PID" && f.size() > 8) {
             // birthDate and gender exist ONLY here; name/address/telecom are
             // carried structurally by ZFX `.details` and would double-count.
             if (!patient_key.empty()) {
-                if (!f[7].empty())
-                    fp.add_leaf(patient_key + ".birthDate",
-                                                      nlohmann::json(f[7]).dump());
-                if (!f[8].empty())
-                    fp.add_leaf(patient_key + ".gender",
-                                                      nlohmann::json(f[8]).dump());
+                // PID-7 is a v2 DT: YYYYMMDD, no separators. Emitting it raw
+                // compared "19510216" against the document's "1951-02-16" --
+                // the same date, spelled the way v2 spells it. Converting on
+                // the way back is exactly what a v2 reader does.
+                if (!f[7].empty()) {
+                    std::string d = f[7];
+                    if (d.size() >= 8 && d.find('-') == std::string::npos)
+                        d = d.substr(0, 4) + "-" + d.substr(4, 2) + "-" + d.substr(6, 2);
+                    fp.add_leaf(patient_key + ".birthDate", safe_dump(nlohmann::json(d)));
+                }
+                // PID-8 is a v2 sex code (M/F/O/U); FHIR's ValueSet spells them
+                // out. sex_code() wrote the v2 form during Test 1, so the
+                // inverse belongs here -- the raw letter matches no FHIR code
+                // and was refused by the POCO setter for every patient.
+                if (!f[8].empty()) {
+                    const std::string &sx = f[8];
+                    const char *g = sx == "M" ? "male"
+                                  : sx == "F" ? "female"
+                                  : sx == "O" ? "other"
+                                              : "unknown";
+                    fp.add_leaf(patient_key + ".gender", safe_dump(nlohmann::json(g)));
+                }
             }
         } else if (name == "OBX") {
-            // DELIBERATELY NO LEAF. OBX-5 carries the observation value, but
-            // `<Observation>.value` is not a FHIR path -- the canonical form is
-            // `.valueQuantity.value` -- so the leaf this used to emit could
-            // never match POCO 1 no matter how well the arm performed. It was
-            // pure denominator noise, and worse under corruption: a leaf that
-            // matches nothing still SURVIVES bit flips consistently, so it
-            // scored as durable content while representing none.
-            //
-            // The value now reaches the wire structurally as
-            // ZFX|observation.value[x]|{"valueQuantity":{...}} and is decoded
-            // there, with the full component set OBX-5/-6 cannot hold.
+            if (f.size() > 6) {
+                long sid = 0;
+                try { sid = std::stol(f[1]); } catch (const std::exception&) { sid = 0; }
+                pending_obx.push_back({sid, hl7_unescape(f[5]), hl7_unescape(f[6])});
+            }
+            (void)0;
+            // Buffered above, resolved by flush_obx() at the end of the
+            // message. An earlier version emitted `<Observation>.value`, which
+            // is not a FHIR path and so matched nothing in POCO 1; the fix then
+            // was to emit no leaf at all, which left OBX unmeasured and made
+            // its 14,516 delimiter bytes free armor -- a flipped '|' inside an
+            // OBX left the digest bit-identical. The canonical path is
+            // `.valueQuantity.value`, and that is what flush_obx emits.
         } else if (name == "ZFX" && f.size() > 2) {
             const std::string field = hl7_unescape(f[1]);
             const std::string payload = hl7_unescape(f[2]);
@@ -976,14 +1091,20 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
 
             if (sub == "id") {
                 // Starts a new scope AND is a leaf in its own right.
-                if (field.rfind("observation.", 0) == 0 && payload_json.is_string())
+                if (field.rfind("observation.", 0) == 0 && payload_json.is_string()) {
                     obs_key = resource_key("Observation", payload_json.get<std::string>());
+                    msg_obs.push_back(obs_key);   // OBX-1 indexes into this
+                }
                 key = (field.rfind("observation.", 0) == 0) ? obs_key : patient_key;
                 if (!key.empty())
-                    fp.add_leaf(key + ".id", payload_json.dump());
+                    fp.add_leaf(key + ".id", safe_dump(payload_json));
                 continue;
             }
             if (key.empty()) continue;
+
+            // An observation whose value came through ZFX must not ALSO be
+            // decoded from its OBX -- one carrier per datum.
+            if (sub == "value[x]") obs_with_zfx_value.insert(key);
 
             // `.details` / `[*]` are container markers, not path elements.
             if (sub.size() > 8 && sub.compare(sub.size() - 8, 8, ".details") == 0)
@@ -1008,6 +1129,7 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
             hl7_walk_json(payload_json, key + "." + sub, fp);
         }
     }
+    flush_obx();          // the last message has no following MSH
     fp.finalize();
     return fp;
 }
@@ -1118,6 +1240,95 @@ inline std::vector<uint8_t> corrupt_stream(const std::vector<uint8_t>& wire,
   return flip_positions(wire, structural_positions(wire), k, seed);
 }
 #elif defined(ARM_GOOGLE_FHIR)
+// Protobuf's OWN structure, not just the container this benchmark wrapped
+// around it.
+//
+// The previous model enumerated the 5-byte record framing and nothing else:
+// 1,473 records x 5 = 7,365 positions, against 423,846 for FastFHIR. Protobuf's
+// actual wire structure -- the field keys, the length prefixes of every
+// embedded message -- was never corrupted, so the arm's recovery number
+// described the durability of a header this benchmark invented rather than
+// anything about protobuf.
+//
+// A protobuf field is a varint KEY (field_number << 3 | wire_type) followed by
+// a payload whose shape the wire type decides. Structural bytes are the key
+// varints and, for wire type 2, the length varints: damage there changes what
+// the following bytes ARE. Payload bytes of a string or a varint value are
+// content and stay untouched, matching every other arm.
+//
+// Embedded messages are found by descent, not by schema: a length-delimited
+// payload that scans cleanly as a message is treated as one. That is the same
+// heuristic protoc --decode_raw uses, and it is the only one available without
+// linking the descriptors into the position enumerator.
+inline bool pb_read_varint(const std::vector<uint8_t>& w, std::size_t& pos,
+                           std::size_t end, std::uint64_t& out) {
+  out = 0;
+  int shift = 0;
+  while (pos < end && shift <= 63) {
+    const uint8_t b = w[pos++];
+    out |= static_cast<std::uint64_t>(b & 0x7F) << shift;
+    if ((b & 0x80) == 0) return true;
+    shift += 7;
+  }
+  return false;
+}
+
+// Returns false if the range does not scan as a well-formed message. When
+// `positions` is null the scan only validates, which is how a length-delimited
+// payload is tested before recursing into it.
+inline bool pb_scan_message(const std::vector<uint8_t>& w, std::size_t pos, std::size_t end,
+                            std::vector<std::size_t>* positions, int depth) {
+  if (depth > 12) return false;
+  while (pos < end) {
+    const std::size_t key_start = pos;
+    std::uint64_t key = 0;
+    if (!pb_read_varint(w, pos, end, key)) return false;
+    const std::size_t key_end = pos;
+    const unsigned wire_type = static_cast<unsigned>(key & 7);
+    if ((key >> 3) == 0) return false;  // field number 0 is not legal
+
+    std::size_t len_start = 0, len_end = 0, payload_end = 0;
+    switch (wire_type) {
+      case 0: {  // varint value -- content
+        std::uint64_t v = 0;
+        if (!pb_read_varint(w, pos, end, v)) return false;
+        break;
+      }
+      case 1:                                   // 64-bit
+        if (pos + 8 > end) return false;
+        pos += 8;
+        break;
+      case 5:                                   // 32-bit
+        if (pos + 4 > end) return false;
+        pos += 4;
+        break;
+      case 2: {                                 // length-delimited
+        len_start = pos;
+        std::uint64_t len = 0;
+        if (!pb_read_varint(w, pos, end, len)) return false;
+        len_end = pos;
+        if (len > static_cast<std::uint64_t>(end - pos)) return false;
+        payload_end = pos + static_cast<std::size_t>(len);
+        // Descend only if it reads as a message; a string would otherwise have
+        // its bytes counted as structure.
+        if (len > 0 && pb_scan_message(w, pos, payload_end, nullptr, depth + 1) &&
+            positions != nullptr)
+          pb_scan_message(w, pos, payload_end, positions, depth + 1);
+        pos = payload_end;
+        break;
+      }
+      default:
+        return false;                           // 3/4 are deprecated groups
+    }
+
+    if (positions != nullptr) {
+      for (std::size_t i = key_start; i < key_end; ++i) positions->push_back(i);
+      for (std::size_t i = len_start; i < len_end; ++i) positions->push_back(i);
+    }
+  }
+  return true;
+}
+
 inline std::vector<std::size_t> structural_positions(const std::vector<uint8_t>& wire) {
   std::vector<std::size_t> positions;
   for (std::size_t pos = 0; pos + 5 <= wire.size();) {
@@ -1126,9 +1337,13 @@ inline std::vector<std::size_t> structural_positions(const std::vector<uint8_t>&
                            (static_cast<uint32_t>(wire[pos + 2]) << 8) |
                            (static_cast<uint32_t>(wire[pos + 3]) << 16) |
                            (static_cast<uint32_t>(wire[pos + 4]) << 24);
-      for (std::size_t j = 0; j < 5; ++j)
-        positions.push_back(pos + j);
-      pos += 5 + len;
+      // The container framing is real structure too -- it is what finds the
+      // record boundaries -- so it stays eligible alongside the message's own.
+      for (std::size_t j = 0; j < 5; ++j) positions.push_back(pos + j);
+      const std::size_t body = pos + 5;
+      if (body + len <= wire.size())
+        pb_scan_message(wire, body, body + len, &positions, 0);
+      pos = body + len;
     } else {
       ++pos;
     }
@@ -1142,32 +1357,88 @@ inline std::vector<uint8_t> corrupt_stream(const std::vector<uint8_t>& wire,
 }
 #elif defined(ARM_HL7V2)
 inline std::vector<std::size_t> structural_positions(const std::vector<uint8_t>& wire) {
-  // v2's syntactic elements, matching what the recovery can resync on:
-  // 1. segment terminators (\r) -- the boundary bytes;
-  // 2. the 3-char type name of every segment -- the identity a resync
-  //    recognises (a dictionary repair is impossible: nothing in-band
-  //    cross-validates a name, so damage here is genuinely lost);
-  // 3. the MSH-2 encoding-character set | ^ & ~ \ wherever they occur -- the
-  //    field/component/subcomponent/repetition/escape separators. v2 has no
-  //    in-string quoting, so a delimiter byte is syntax wherever it sits.
-  // Value bytes between delimiters are NEVER corrupted.
+  // v2's syntactic elements -- every byte whose corruption changes the SHAPE or
+  // IDENTITY of data this arm reads, and no byte that merely holds a value.
+  //
+  //  1. segment terminators (\r) and the 3-char segment name. A name cannot be
+  //     repaired: nothing in-band cross-validates it.
+  //  2. the encoding characters | ^ & ~ \ -- field, component, subcomponent,
+  //     repetition and escape separators. v2 has no in-string quoting, so a
+  //     delimiter is syntax wherever it sits.
+  //  3. inside a ZFX segment: the FHIR path in field 1, and the JSON
+  //     punctuation in field 2.
+  //
+  // (3) is what this model was missing, and it is where the data is. 91.5% of
+  // this wire is ZFX payload, and a ZFX payload is JSON -- its braces, brackets,
+  // quotes, colons and commas are exactly as structural as a pipe. Treating
+  // them as content left the arm's own carrier untouched by every run. The
+  // field-1 path is identity for the same reason a segment name is: a flipped
+  // path does not fail, it addresses something else.
+  //
+  // Bytes inside a JSON string literal stay content, which is why the scan
+  // below tracks quoting rather than matching punctuation blindly.
+  //
+  // OBX interiors ARE eligible. They were excluded while this arm emitted no
+  // leaf from an OBX -- a position that cannot change the fingerprint is free
+  // armor, and 14,516 of the 108,270 positions were exactly that. The fix was
+  // to decode OBX rather than to stop damaging it: OBX-5/-6 now carry the whole
+  // Quantity and flush_obx() reads them back, so a flipped '|' there costs real
+  // units. That is the `OBX|some|data|` -> `OBX|someLdata|` case: the fields
+  // merge, OBX-5 becomes something else and OBX-6 disappears.
   std::vector<std::size_t> positions;
-  std::size_t start = 0;
-  while (start < wire.size()) {
-    if (start + 3 <= wire.size())
-      for (std::size_t j = 0; j < 3; ++j)
-        positions.push_back(start + j);
-    const auto cr = std::find(wire.begin() + static_cast<std::ptrdiff_t>(start),
-                              wire.end(), static_cast<uint8_t>('\r'));
-    if (cr == wire.end())
-      break;
-    positions.push_back(static_cast<std::size_t>(cr - wire.begin()));
-    start = static_cast<std::size_t>(cr - wire.begin()) + 1;
+  std::size_t seg_start = 0;
+  while (seg_start < wire.size()) {
+    std::size_t seg_end = seg_start;
+    while (seg_end < wire.size() && wire[seg_end] != '\r') ++seg_end;
+
+    for (std::size_t j = 0; j < 3 && seg_start + j < seg_end; ++j)
+      positions.push_back(seg_start + j);
+    if (seg_end < wire.size()) positions.push_back(seg_end);
+
+    const bool is_zfx = seg_end - seg_start >= 3 && wire[seg_start] == 'Z' &&
+                        wire[seg_start + 1] == 'F' && wire[seg_start + 2] == 'X';
+
+    {
+      // Field boundaries within this segment.
+      std::size_t bar1 = seg_end, bar2 = seg_end;
+      for (std::size_t i = seg_start; i < seg_end; ++i) {
+        if (wire[i] == '|' || wire[i] == '^' || wire[i] == '&' || wire[i] == '~' ||
+            wire[i] == '\\')
+          positions.push_back(i);
+        if (wire[i] == '|') {
+          if (bar1 == seg_end) bar1 = i;
+          else if (bar2 == seg_end) bar2 = i;
+        }
+      }
+      if (is_zfx && bar1 < seg_end) {
+        // Field 1: the FHIR path. Identity -- every byte counts.
+        const std::size_t path_end = (bar2 < seg_end) ? bar2 : seg_end;
+        for (std::size_t i = bar1 + 1; i < path_end; ++i) positions.push_back(i);
+
+        // Field 2: JSON. Punctuation outside string literals is structure.
+        if (bar2 < seg_end) {
+          bool in_str = false, esc = false;
+          for (std::size_t i = bar2 + 1; i < seg_end; ++i) {
+            const char c = static_cast<char>(wire[i]);
+            if (esc) { esc = false; continue; }
+            if (c == '\\') { esc = true; continue; }
+            if (c == '"') { in_str = !in_str; positions.push_back(i); continue; }
+            if (in_str) continue;
+            if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',')
+              positions.push_back(i);
+          }
+        }
+      }
+    }
+    seg_start = seg_end + 1;
   }
-  for (std::size_t i = 0; i < wire.size(); ++i)
-    if (wire[i] == '|' || wire[i] == '^' || wire[i] == '&' || wire[i] == '~' ||
-        wire[i] == '\\')
-      positions.push_back(i);
+
+  // One position per byte. The two passes this replaced pushed segment names
+  // and delimiters independently, so a byte could appear twice and be selected
+  // twice -- and two flips of one bit is no flip at all, which silently made
+  // some runs less damaged than the k they reported.
+  std::sort(positions.begin(), positions.end());
+  positions.erase(std::unique(positions.begin(), positions.end()), positions.end());
   return positions;
 }
 

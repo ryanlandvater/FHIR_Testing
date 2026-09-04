@@ -153,6 +153,12 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
                          /*ops=*/0, /*entries=*/test1_entries});
   out.test1_payload = payload;  // --dump-artifacts input
+  // Leaves actually present in what this arm just wrote -- measured from the
+  // OUTPUT, not from the fixture, so an arm that dropped fields reports fewer.
+  if (bench::g_count_elements) {
+    const std::vector<uint8_t> __w(payload.begin(), payload.end());
+    out.test1_elements = static_cast<std::int64_t>(bench::test_5::BENCH_ARM_NS::calc_stream_hash(__w).units.size());
+  }
 
   // A counter nobody reads is the silence it was added to prevent. ChoiceBlock
   // has 29 alternatives and this build has converters for 15; the rest are
@@ -193,6 +199,8 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
                          /*bytes_in=*/0, /*bytes_out=*/0, /*ops=*/0,
                          /*entries=*/test_3::query_entries(query_summary)});
   out.queried_value = test_3::format_query_summary(query_summary);
+  out.query_loinc_matches =
+      static_cast<std::int64_t>(query_summary.loinc_2085_9_matches);
   out.reconstructed_bundle_json = payload;
 
   // Test 2 -- random access (IN-B / WF-1.1). Out-of-order reads, navigating

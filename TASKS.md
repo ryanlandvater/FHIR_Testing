@@ -724,9 +724,9 @@ Ordered by what unblocks the most.
       ```
       Node A (Observation)                      Node B (valueQuantity block)
         ┌──────────────────────────┐              ┌─────────────────────────┐
-        │  field slot for "value":  │  offset ──▶  │ VALIDATION == own offset│
-        │  { expected RECOVERY_TAG, │              │ RECOVERY_TAG (Quantity) │
-        │    stored offset → B }    │              │ payload bytes           │
+        │  field slot for "value": │  offset ──▶  │ VALIDATION == own offset│
+        │  { expected RECOVERY_TAG,│              │ RECOVERY_TAG (Quantity) │
+        │    stored offset → B }   │              │ payload bytes           │
         └──────────────────────────┘              └─────────────────────────┘
       ```
 

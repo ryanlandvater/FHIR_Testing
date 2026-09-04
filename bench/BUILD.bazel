@@ -152,6 +152,18 @@ cc_binary(
     defines = ["PROBE_HAS_FASTFHIR", "PROBE_HAS_JSON", "PROBE_HAS_PROTOBUF", "PROBE_HAS_HL7V2"],
 )
 
+# Diagnostic for the FFHR recovery phase transition (recovery-ON collapses
+# between k=32 and k=40 flips). Replays a corrupt+recover trial and reports
+# the FF_RecoveryReport verdict census, the FF_ApplyReport, and every byte
+# apply() wrote -- tagged AT-FLIP vs NOT-FLIP (a repair that rewrites a byte
+# the corruption never touched is wrong by construction).
+cc_binary(
+    name = "recovery_probe",
+    srcs = ["recovery_probe.cpp"],
+    copts = ["-std=c++20"],
+    deps = [":bench_core_common"],
+)
+
 # Instrument G test 5 driver (macro-parity restructure). Links the four arm
 # TUs -- each compiled bench_test_5.hpp under its own ARM_* macro -- and
 # dispatches five INDEPENDENT process modes: --hash (clean-wire fingerprint,

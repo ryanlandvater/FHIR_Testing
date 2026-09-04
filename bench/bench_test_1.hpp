@@ -568,10 +568,24 @@ inline namespace BENCH_ARM_NS {
       pb->set_value_us(*us);
       pb->set_timezone(google_timezone_of(text));
       const int frac = google_frac_digits(text);
-      pb->set_precision(text.size() <= 10 ? PbDateTime::DAY
-                        : frac == 0       ? PbDateTime::SECOND
-                        : frac <= 3       ? PbDateTime::MILLISECOND
-                                          : PbDateTime::MICROSECOND);
+      // Not every timelike type carries every precision: Date stops at DAY and
+      // has no SECOND, Instant starts at SECOND and has no DAY. Probing keeps
+      // one function for all of them and makes an impossible precision a
+      // compile error rather than a silent mis-stamp.
+      if constexpr (requires { PbDateTime::SECOND; })
+      {
+        if (text.size() <= 10)
+        {
+          if constexpr (requires { PbDateTime::DAY; }) pb->set_precision(PbDateTime::DAY);
+          else                                         pb->set_precision(PbDateTime::SECOND);
+        }
+        else
+          pb->set_precision(frac == 0 ? PbDateTime::SECOND
+                            : frac <= 3 ? PbDateTime::MILLISECOND
+                                        : PbDateTime::MICROSECOND);
+      }
+      else
+        pb->set_precision(PbDateTime::DAY);
     }
 
     inline void google_set_instant(std::string_view text,
@@ -669,12 +683,15 @@ inline namespace BENCH_ARM_NS {
         return;
       }
 
-      if (FF_IsDateTimeTag(choice.tag))
-      {
-        const std::string text = choice.to_string();
-        if (!text.empty()) google_set_datetime(text, pb->mutable_date_time());
-        return;
-      }
+      if constexpr (requires { pb->mutable_date_time(); })
+        if (FF_IsDateTimeTag(choice.tag))
+        {
+          // MultipleBirthX admits only boolean and integer -- no date/time
+          // member exists to write to, so the probe skips this arm entirely.
+          const std::string text = choice.to_string();
+          if (!text.empty()) google_set_datetime(text, pb->mutable_date_time());
+          return;
+        }
       if constexpr (requires { pb->mutable_boolean(); })
         if (std::holds_alternative<bool>(choice.value))
         { pb->mutable_boolean()->set_value(std::get<bool>(choice.value)); return; }
@@ -753,7 +770,15 @@ inline namespace BENCH_ARM_NS {
           if (!text.empty()) google_set_datetime(text, pb_val->mutable_date_time());
         }
         else if (std::holds_alternative<std::string_view>(src.value.value))
-          pb_val->mutable_string_value()->set_value(std::string(std::get<std::string_view>(src.value.value)));
+        {
+          // A `code` is not a `string`. Both arrive in the string_view
+          // alternative, and only the tag distinguishes them -- writing every
+          // one to string_value turned each valueCode into a valueString,
+          // which is a different element name in the document.
+          const std::string text(std::get<std::string_view>(src.value.value));
+          if (src.value.tag == RECOVER_FF_CODE) pb_val->mutable_code()->set_value(text);
+          else                                  pb_val->mutable_string_value()->set_value(text);
+        }
         else if (std::holds_alternative<bool>(src.value.value))
           pb_val->mutable_boolean()->set_value(std::get<bool>(src.value.value));
         else if (std::holds_alternative<int32_t>(src.value.value))
@@ -868,7 +893,15 @@ inline namespace BENCH_ARM_NS {
       //
       // No FHIR code enum has 255 ordinals, and has_u8() above already treats
       // that value as absence.
-      if (value != 0 && value != static_cast<int>(FF_NULL_UINT8))
+      //
+      // ZERO IS A VALUE, NOT AN ABSENCE. FastFHIR generates these enums
+      // ALPHABETICALLY, so ordinal 0 is a real code in every one of them --
+      // FF_AdministrativeGender::Female, FF_ContactPointUse::Home,
+      // FF_ContactPointSystem::Email, FF_NameUse::Anonymous. Excluding it
+      // dropped the first code of every ValueSet: three of five patients had
+      // no gender and every telecom lost its `use`. The sentinel is 255 and
+      // only 255; that is the whole test.
+      if (value != static_cast<int>(FF_NULL_UINT8))
         out[key] = value;
     }
 
@@ -1956,13 +1989,13 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_birth_date(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (const auto birth_us = google_birthdate_to_us(src.birthdate))
-      {
-        auto *birth_date = dst.patient.mutable_birth_date();
-        birth_date->set_value_us(*birth_us);
-        birth_date->set_timezone("UTC");
-        birth_date->set_precision(GoogleDatePrecision::Date_Precision_DAY);
-      }
+      // NOT google_birthdate_to_us: that helper returns nullopt when the epoch
+      // second is negative, i.e. for ANY DATE BEFORE 1970. In a patient corpus
+      // that is most of the population -- two of the five here, born 1951 and
+      // 1961, simply had no birthDate on the wire. google_instant_us has no
+      // such floor.
+      if (src.birthdate.empty()) return;
+      google_set_datetime(src.birthdate, dst.patient.mutable_birth_date());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_birth_date(const PatientData &src, HL7v2Sink &dst)
@@ -1981,26 +2014,11 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_deceased(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.deceased.is_empty())
-        return;
-
-      auto *pb_deceased = dst.patient.mutable_deceased();
-
-      if (std::holds_alternative<bool>(src.deceased.value))
-      {
-        pb_deceased->mutable_boolean()->set_value(std::get<bool>(src.deceased.value));
-      }
-      else if (std::holds_alternative<std::string_view>(src.deceased.value))
-      {
-        // Assuming string_view holds the dateTime string
-        if (const auto time_us = google_birthdate_to_us(std::get<std::string_view>(src.deceased.value)))
-        {
-          auto *dt = pb_deceased->mutable_date_time();
-          dt->set_value_us(*time_us);
-          dt->set_timezone("UTC");
-          dt->set_precision(google::fhir::r4::core::DateTime_Precision_DAY);
-        }
-      }
+      // Was routed through google_birthdate_to_us (pre-1970 floor, date-only)
+      // and read the raw string_view alternative, which a packed date/time
+      // choice does not use. google_set_choice handles the tag properly.
+      if (!src.deceased.is_empty())
+        google_set_choice(src.deceased, dst.patient.mutable_deceased());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_deceased(const PatientData &src, HL7v2Sink &dst)
@@ -2022,19 +2040,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_multiple_birth(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.multiplebirth.is_empty())
-        return;
-
-      auto *pb_mb = dst.patient.mutable_multiple_birth();
-
-      if (std::holds_alternative<bool>(src.multiplebirth.value))
-      {
-        pb_mb->mutable_boolean()->set_value(std::get<bool>(src.multiplebirth.value));
-      }
-      else if (std::holds_alternative<int32_t>(src.multiplebirth.value))
-      {
-        pb_mb->mutable_integer()->set_value(std::get<int32_t>(src.multiplebirth.value));
-      }
+      if (!src.multiplebirth.is_empty())
+        google_set_choice(src.multiplebirth, dst.patient.mutable_multiple_birth());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_multiple_birth(const PatientData &src, HL7v2Sink &dst)
@@ -2249,19 +2256,30 @@ inline namespace BENCH_ARM_NS {
     inline void assign_patient_name(const PatientData &src, HL7v2Sink &dst)
     {
       dst.message.pid.patient_name = bench::hl7v2::hl7_name_xpn(src);
-      if (!src.name.empty())
+      // ONE PAYLOAD PER ELEMENT, NEVER TWO. `<field>[*]` carries the WHOLE
+      // array and `<field>[0].details` carries its first element, so emitting
+      // both writes element 0 twice. The decoder strips both markers before
+      // walking, so the two land on the same canonical path and the leaf is
+      // counted twice -- 10 duplicate units in this corpus, every one of them a
+      // name.
+      //
+      // The POCO round-trip cannot see this: it rebuilds a struct and re-walks
+      // it, which normalises duplicates away, so it stayed at 100%. What sees
+      // it is the element tick, and what it would corrupt is the resilience
+      // score, where a doubled leaf survives damage twice.
+      if (src.name.size() > 1)
+      {
+        hl7_append_json_field(dst, "patient.name[*]", hl7_json_array(src.name));
+      }
+      else if (!src.name.empty())
       {
         const auto &name = src.name.front();
-        if (!name.id.empty() || !name.extension.empty() || static_cast<int>(name.use) != 0 ||
+        if (!name.id.empty() || !name.extension.empty() || has_u8(static_cast<uint8_t>(name.use)) ||
             !name.text.empty() || name.given.size() > 1 || !name.prefix.empty() ||
             !name.suffix.empty() || name.period)
         {
           hl7_append_json_field(dst, "patient.name[0].details", hl7_json_value(name));
         }
-      }
-      if (src.name.size() > 1)
-      {
-        hl7_append_json_field(dst, "patient.name[*]", hl7_json_array(src.name));
       }
     }
 #endif
@@ -2299,19 +2317,28 @@ inline namespace BENCH_ARM_NS {
     inline void assign_patient_telecom(const PatientData &src, HL7v2Sink &dst)
     {
       dst.message.pid.home_phone = bench::hl7v2::hl7_phone_xtn(src);
-      for (const auto &telecom : src.telecom)
-      {
-        if (!telecom.id.empty() || !telecom.extension.empty() ||
-            static_cast<int>(telecom.system) != 0 || static_cast<int>(telecom.use) != 0 ||
-            has_u32(telecom.rank) || telecom.period)
-        {
-          hl7_append_json_field(dst, "patient.telecom.details", hl7_json_array(src.telecom));
-          break;
-        }
-      }
+      // Mutually exclusive, for the reason spelled out in assign_patient_name --
+      // and here the two payloads were LITERALLY IDENTICAL, both
+      // hl7_json_array(src.telecom), so any patient with more than one telecom
+      // and one rich entry doubled every telecom leaf. Latent in this corpus
+      // (no patient has two), which is exactly why it needed finding by shape
+      // rather than by symptom.
       if (src.telecom.size() > 1)
       {
         hl7_append_json_field(dst, "patient.telecom[*]", hl7_json_array(src.telecom));
+      }
+      else
+      {
+        for (const auto &telecom : src.telecom)
+        {
+          if (!telecom.id.empty() || !telecom.extension.empty() ||
+              has_u8(static_cast<uint8_t>(telecom.system)) || has_u8(static_cast<uint8_t>(telecom.use)) ||
+              has_u32(telecom.rank) || telecom.period)
+          {
+            hl7_append_json_field(dst, "patient.telecom.details", hl7_json_array(src.telecom));
+            break;
+          }
+        }
       }
     }
 #endif
@@ -2354,19 +2381,20 @@ inline namespace BENCH_ARM_NS {
     inline void assign_patient_address(const PatientData &src, HL7v2Sink &dst)
     {
       dst.message.pid.patient_address = bench::hl7v2::hl7_address_xad(src);
-      if (!src.address.empty())
+      // Mutually exclusive, for the reason spelled out in assign_patient_name.
+      if (src.address.size() > 1)
+      {
+        hl7_append_json_field(dst, "patient.address[*]", hl7_json_array(src.address));
+      }
+      else if (!src.address.empty())
       {
         const auto &address = src.address.front();
-        if (!address.id.empty() || !address.extension.empty() || static_cast<int>(address.use) != 0 ||
-            static_cast<int>(address.type) != 0 || !address.text.empty() || address.line.size() > 1 ||
+        if (!address.id.empty() || !address.extension.empty() || has_u8(static_cast<uint8_t>(address.use)) ||
+            has_u8(static_cast<uint8_t>(address.type)) || !address.text.empty() || address.line.size() > 1 ||
             !address.district.empty() || address.period)
         {
           hl7_append_json_field(dst, "patient.address[0].details", hl7_json_value(address));
         }
-      }
-      if (src.address.size() > 1)
-      {
-        hl7_append_json_field(dst, "patient.address[*]", hl7_json_array(src.address));
       }
     }
 #endif
@@ -2514,26 +2542,12 @@ inline namespace BENCH_ARM_NS {
       for (const auto &comm : src.communication)
       {
         auto *pb_comm = dst.patient.add_communication();
-
         if (comm.preferred != FF_NULL_UINT8)
-        {
           pb_comm->mutable_preferred()->set_value(comm.preferred != 0);
-        }
-
+        // Every coding, and `display` with them -- this copied coding.front()
+        // and omitted the display outright.
         if (comm.language)
-        {
-          auto *pb_lang = pb_comm->mutable_language();
-          if (!comm.language->text.empty())
-          {
-            pb_lang->mutable_text()->set_value(std::string(comm.language->text));
-          }
-          if (!comm.language->coding.empty())
-          {
-            auto *pb_coding = pb_lang->add_coding();
-            pb_coding->mutable_system()->set_value(std::string(comm.language->coding.front().system));
-            pb_coding->mutable_code()->set_value(std::string(comm.language->coding.front().code));
-          }
-        }
+          google_set_codeable_concept(*comm.language, pb_comm->mutable_language());
       }
     }
 #elif defined(ARM_HL7V2)
@@ -2636,7 +2650,10 @@ inline namespace BENCH_ARM_NS {
           pb_link->mutable_other()->mutable_patient_id()->set_value(std::string(link.other->reference));
         }
 
-        if (static_cast<int>(link.type) != 0)
+        // 0 is a real ordinal (FastFHIR enums are alphabetical); FF_NULL_UINT8
+        // is the absence marker. The cast is left as-is: LinkType is not
+        // exercised by this corpus, so an explicit map would be untested code.
+        if (has_u8(static_cast<uint8_t>(link.type)))
         {
           pb_link->mutable_type()->set_value(
               static_cast<::google::fhir::r4::core::LinkTypeCode_Value>(static_cast<int>(link.type)));
@@ -3000,7 +3017,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_HL7V2)
     inline void assign_observation_status(const ObservationData &src, HL7v2Sink &dst)
     {
-      if (static_cast<int>(src.status) != 0)
+      // Observation.status ordinal 0 is a REAL status, not an absent one.
+      if (has_u8(static_cast<uint8_t>(src.status)))
       {
         hl7_append_json_field(dst, "observation.status", hl7_json_value(static_cast<int>(src.status)));
       }
@@ -3380,11 +3398,22 @@ inline namespace BENCH_ARM_NS {
           {
             dst.current_obx.value_type = "NM";                        // obx-value-nm
             dst.current_obx.value = hl7_obx_text(v.value("value", Json()));
-            // OBX-6, this arm's own: CWE of units, UCUM code plus system.
+            // OBX-6 is a CWE of units: code^text^system. CWE-2 carries the
+            // display unit, which was previously left empty -- with it, OBX
+            // holds the WHOLE Quantity (value, code, unit, system) and the ZFX
+            // passthrough below is not needed for this datatype.
             dst.current_obx.units = hl7_components({
-                hl7_obx_text(v.contains("code") ? v.at("code") : v.value("unit", Json())),
-                std::string(),
+                hl7_obx_text(v.value("code", Json())),
+                hl7_obx_text(v.value("unit", Json())),
                 hl7_obx_text(v.value("system", Json()))});
+            // NO ZFX FOR A QUANTITY.
+            //
+            // Carrying the value in OBX-5/-6 AND in ZFX meant a blasted OBX
+            // resurrected from the passthrough and scored perfect, so the only
+            // genuinely-v2 structure on this wire could not be measured or
+            // damaged. One carrier per datum: OBX is the native one, and it is
+            // sufficient here.
+            return;
           }
           else if (type == "CodeableConcept")
           {

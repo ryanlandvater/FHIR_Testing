@@ -214,6 +214,14 @@ namespace bench
     {
       const auto v = payload_memory.view();
       out.test1_payload.assign(v.data(), v.size());
+      // Leaves actually present in what this arm just wrote -- measured from
+      // the OUTPUT, not from the fixture, so an arm that dropped fields reports
+      // fewer. After the clock stops, like the byte count above.
+      if (bench::g_count_elements) {
+        const std::vector<uint8_t> __w(v.data(), v.data() + v.size());
+        out.test1_elements =
+            static_cast<std::int64_t>(bench::test_5::BENCH_ARM_NS::calc_stream_hash(__w).units.size());
+      }
     }
 
     if (std::getenv("BENCH_VALIDATE"))
@@ -318,6 +326,8 @@ namespace bench
                          /*bytes_in=*/0, /*bytes_out=*/0, /*ops=*/0,
                          /*entries=*/test_3::query_entries(query_summary)});
     out.queried_value = test_3::format_query_summary(query_summary);
+  out.query_loinc_matches =
+      static_cast<std::int64_t>(query_summary.loinc_2085_9_matches);
 
     // Test 3 over the compact archive (test_3_compact). Same census, same
     // lens reads -- the reader dispatches on the stream layout, so this must

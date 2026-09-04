@@ -109,7 +109,24 @@ struct ArmRunResult {
   std::variant<std::monostate, FastFHIR::Memory, std::string> enriched_stream;
   std::string enrich_metrics_summary;
   std::string random_access_summary;
+  // LOINC 2085-9 (HDL cholesterol) hits from Test 3. Carried as a NUMBER rather
+  // than left inside queried_value's formatted string: the cross-arm gate has to
+  // compare it, and google_fhir was never compared at all because validate_parity
+  // only ever looked at fastfhir/json/hl7.
+  std::int64_t query_loinc_matches = 0;
+  // DATA ELEMENTS (leaves) in this arm's Test 1 output -- patient.name,
+  // patient.gender, each lab value. `entries` counts RESOURCES: 1 Patient plus
+  // 316 Observations is 317, which is true and much smaller than the data. The
+  // parity question is about elements, so the table reports both.
+  //
+  // -1 means "not measured on this run": computing it re-walks the whole
+  // serialized stream, so the harness asks for it once per bundle size rather
+  // than on every timed run. It is always read AFTER the clock stops.
+  std::int64_t test1_elements = -1;
 };
+
+// Set by the harness for the first run of each size only; see test1_elements.
+inline bool g_count_elements = false;
 
 class Timer {
  public:

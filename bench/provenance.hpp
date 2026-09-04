@@ -434,11 +434,22 @@ inline CorpusFacts corpus_facts_cached(const fs::path& corpus_dir, const fs::pat
 // The compiled profile
 // ---------------------------------------------------------------------------
 
-// There is no runtime signal for FASTFHIR_PRODUCTION_PROFILE, so read it from
-// the CMake caches -- and expect them to disagree. On this machine there are
-// three build trees carrying two different values, which is exactly why the
-// generated-tree counts below are recorded alongside as evidence rather than
-// trusting the string.
+// The profile is read from generated_src/.profile, the stamp CMake writes with
+// the profile that produced the tree.
+//
+// That stamp is the right source because it describes the tree that was
+// actually COMPILED. Bazel globs generated_src/ straight out of the source tree
+// and never runs the generator, so the benchmark links whatever CMake last
+// wrote there -- which is what the stamp records. CMake also refuses to
+// regenerate the tree under a different profile, so the stamp cannot drift from
+// its contents.
+//
+// CMakeCache.txt files are the fallback and are scanned regardless, for
+// corroboration. They record what a build DIRECTORY asked for, not what the
+// shared tree holds, and several may disagree: a stale build dir left at an
+// older profile is common and says nothing about the code under test. Cache
+// disagreement is therefore recorded as evidence, and only makes the profile
+// ambiguous when there is no stamp to settle it.
 struct ProfileScan {
   std::string chosen;
   std::string source;
@@ -477,14 +488,29 @@ inline ProfileScan scan_profile(const fs::path& fastfhir_root) {
       }
     }
   }
-  if (hits.empty()) return scan;
-
   std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.mtime > b.mtime; });
   std::set<std::string> distinct;
   for (const auto& h : hits) {
     distinct.insert(h.value);
     scan.candidates.push_back(h.dir + "=" + h.value);
   }
+
+  // The stamp decides when it exists.
+  const fs::path stamp = fastfhir_root / "generated_src" / ".profile";
+  if (fs::exists(stamp, ec)) {
+    std::ifstream in(stamp);
+    std::string value;
+    std::getline(in, value);
+    value = trim(value);
+    if (!value.empty()) {
+      scan.chosen = value;
+      scan.source = "generated-tree stamp";
+      scan.ambiguous = false;
+      return scan;
+    }
+  }
+
+  if (hits.empty()) return scan;
   scan.chosen = hits.front().value;  // newest configure wins
   scan.source = "cmake-cache";
   scan.ambiguous = distinct.size() > 1;
@@ -697,7 +723,10 @@ inline std::vector<std::string> missing_fields(const Provenance& p) {
 
   // An ambiguous profile is worse than a missing one: it looks established.
   if (p.production_profile_ambiguous) {
-    missing.emplace_back("production_profile (ambiguous -- several CMake caches disagree; pin it with --profile)");
+    missing.emplace_back(
+        "production_profile (ambiguous -- several CMake caches disagree and "
+        "generated_src/.profile is absent; configure FastFHIR once to write the "
+        "stamp, or pin it with --profile)");
   }
   // The Debug trap. Same code, ~10x slower, and nothing in the numbers says so.
   if (p.compilation_mode != "opt") {

@@ -87,6 +87,12 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture) {
   out.metrics.push_back({"google_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
                          /*ops=*/0, /*entries=*/test1_entries});
   out.test1_payload = payload;  // --dump-artifacts input
+  // Leaves actually present in what this arm just wrote -- measured from the
+  // OUTPUT, not from the fixture, so an arm that dropped fields reports fewer.
+  if (bench::g_count_elements) {
+    const std::vector<uint8_t> __w(payload.begin(), payload.end());
+    out.test1_elements = static_cast<std::int64_t>(bench::test_5::BENCH_ARM_NS::calc_stream_hash(__w).units.size());
+  }
 
   Timer test3_timer;
   test3_timer.start();
@@ -96,6 +102,8 @@ ArmRunResult run_google_fhir_bundle(const BundleBenchFixture& fixture) {
                          /*entries=*/test_3::query_entries(summary)});
 
   out.queried_value = test_3::format_query_summary(summary);
+  out.query_loinc_matches =
+      static_cast<std::int64_t>(summary.loinc_2085_9_matches);
   if (std::getenv("BENCH_TOUCHED")) {
     std::cerr << "[query] google_fhir " << out.queried_value << "\n";
   }

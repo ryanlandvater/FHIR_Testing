@@ -397,10 +397,31 @@ int mode_decode(const std::string& format, const std::string& in, const std::str
   const auto wire = read_file(in);
   const t5::StreamFingerprint fp = arm->recover(wire);
 
+  // DUPLICATE LEAVES. fp.raw is a LIST, not a set, so a path emitted twice is
+  // two units for one datum -- it inflates the element count and, worse, makes
+  // the corruption sweep score that datum twice when it survives. The POCO
+  // round-trip cannot see this: it rebuilds a struct and re-walks it, which
+  // normalises duplicates away.
+  {
+    std::map<std::string, int> seen;
+    for (const auto& [path, value] : fp.raw) ++seen[path];
+    std::size_t dup_paths = 0, dup_extra = 0;
+    std::string sample;
+    for (const auto& [path, n] : seen)
+      if (n > 1) {
+        ++dup_paths; dup_extra += static_cast<std::size_t>(n - 1);
+        if (dup_paths <= 3) sample += "\n    " + path + " x" + std::to_string(n);
+      }
+    if (dup_paths != 0)
+      std::fprintf(stderr, "duplicate leaves: %zu paths, %zu extra units%s\n",
+                   dup_paths, dup_extra, sample.c_str());
+  }
+
   std::map<std::string, PatientData> patients;
   std::map<std::string, ObservationData> observations;
   std::size_t set_ok = 0, set_refused = 0;
   std::size_t refused_url = 0, refused_choice = 0, refused_enum = 0, refused_other = 0;
+  std::size_t refused_unparseable = 0;
 
   for (const auto& [path, value] : fp.raw) {
     const auto dot = path.find('.');
@@ -408,7 +429,16 @@ int mode_decode(const std::string& format, const std::string& in, const std::str
     const std::string key = path.substr(0, dot);
     const std::string rest = path.substr(dot + 1);
     nlohmann::json v;
-    try { v = nlohmann::json::parse(value); } catch (const std::exception&) { ++set_refused; continue; }
+    // A unit whose VALUE will not parse is not a classification failure, it is
+    // the scanner having emitted bytes that are not data. Counted and sampled
+    // separately: these were folded into set_refused and so were invisible,
+    // while being the bulk of the refusals on a damaged stream.
+    try { v = nlohmann::json::parse(value); }
+    catch (const std::exception&) {
+      if (refused_unparseable < 4)
+        std::fprintf(stderr, "  unparseable: %s = %.60s\n", path.c_str(), value.c_str());
+      ++refused_unparseable; ++set_refused; continue;
+    }
     const bool ok = key.rfind("Patient/", 0) == 0
                         ? bench::poco::set_path(patients[key], rest, v)
                         : bench::poco::set_path(observations[key], rest, v);
@@ -440,9 +470,10 @@ int mode_decode(const std::string& format, const std::string& in, const std::str
   for (const auto& [path, value] : leaves) os << path << '\t' << value << '\n';
   if (!out.empty()) { std::ofstream f(out); f << os.str(); }
 
-  std::printf("decoded=%zu refused=%zu (url=%zu choice=%zu enum/code=%zu other=%zu) leaves=%zu\n",
+  std::printf("decoded=%zu refused=%zu (url=%zu choice=%zu enum/code=%zu other=%zu "
+              "unparseable=%zu) leaves=%zu\n",
               set_ok, set_refused, refused_url, refused_choice, refused_enum, refused_other,
-              leaves.size());
+              refused_unparseable, leaves.size());
   return 0;
 }
 

@@ -591,6 +591,11 @@ int main(int argc, char **argv)
                     << (accumulated / (1024 * 1024)) << " MB ingested FFHR\n";
         }
 
+        // Element counting re-walks each arm's whole output, so ask for it
+        // once per bundle size rather than on every timed run. It happens after
+        // each stage's clock stops and so cannot affect a measurement.
+        bench::g_count_elements = (sample_run == 0 && iter == 0);
+
         // Warmup (unmeasured)
         warmup_arms(bundle, warmup_iterations);
 
@@ -621,13 +626,14 @@ int main(int argc, char **argv)
         // observation value. Cheap to check, and it converts a fast meaningless
         // number into a hard failure.
         {
-          const char *const kStageName[] = {"test_1 serialize", "test_1 compact",
-                                            "test_2 random-access", "test_3 query",
-                                            "test_4 enrich"};
-          const auto stage_label = [&](bench::Stage st) -> const char * {
-            const auto idx = static_cast<std::size_t>(st);
-            return idx < (sizeof kStageName / sizeof *kStageName) ? kStageName[idx] : "stage";
-          };
+          // bench::to_string(Stage), never a private list. A hand-kept parallel
+          // table drifts the moment the enum grows, and this one did
+          // immediately: Stage has EIGHT values (each test has a _compact
+          // twin) against a five-name array, so Test3Query printed under
+          // "test_4 enrich" and Test4Enrich fell off the end as "stage". The
+          // numbers were right and the labels lied, which is the worse failure
+          // -- to_string is exhaustive over the enum and cannot drift.
+          const auto stage_label = [](bench::Stage st) { return bench::to_string(st); };
 
           struct Named { const char *name; const bench::ArmRunResult *run; };
           const std::vector<Named> arms = {
@@ -640,6 +646,66 @@ int main(int argc, char **argv)
               {"google_fhir", &gf},
 #endif
           };
+
+          // SHOW THE COUNTS, do not merely gate on them. A gate that passes
+          // silently is indistinguishable from a gate that is not running, and
+          // this one is asserting the central claim of the whole suite: that
+          // the four arms handled the same content. Print it every run.
+          const auto entries_of = [](const bench::ArmRunResult &r,
+                                     bench::Stage st) -> std::int64_t {
+            for (const auto &m : r.metrics)
+              if (m.stage == st) return m.entries;
+            return -1;
+          };
+          {
+            std::cerr << "  [parity] resources handled per stage\n" << std::setw(24) << "";
+            for (const auto &a : arms) std::cerr << std::setw(14) << a.name;
+            std::cerr << "\n";
+            for (const auto st : {bench::Stage::Test1Serialize,
+                                  bench::Stage::Test2RandomAccess,
+                                  bench::Stage::Test3Query,
+                                  bench::Stage::Test4Enrich}) {
+              std::cerr << "  " << std::setw(22) << std::left << stage_label(st)
+                        << std::right;
+              for (const auto &a : arms) {
+                const std::int64_t n = entries_of(*a.run, st);
+                if (n < 0) std::cerr << std::setw(14) << "-";
+                else       std::cerr << std::setw(14) << n;
+              }
+              std::cerr << "\n";
+            }
+            std::cerr << "  " << std::setw(22) << std::left
+                      << "test_3 chol 2085-9" << std::right;
+            for (const auto &a : arms)
+              std::cerr << std::setw(14) << a.run->query_loinc_matches;
+            std::cerr << "\n";
+            if (arms.front().run->test1_elements >= 0) {
+              std::cerr << "  " << std::setw(22) << std::left
+                        << "test_1 ELEMENTS" << std::right;
+              for (const auto &a : arms)
+                std::cerr << std::setw(14) << a.run->test1_elements;
+              std::cerr << "\n";
+            }
+          }
+
+          // ELEMENT PARITY. The rows above count RESOURCES; this one counts the
+          // data itself -- every leaf the arm actually wrote. An arm can emit
+          // all 317 resources and still drop half their fields, and every
+          // resource-level check would pass. This is the row that would have
+          // caught the HL7v2 arm writing OBX-5 = "1" for every observation.
+          {
+            const std::int64_t ref = ff.test1_elements;
+            if (ref >= 0) {
+              for (const auto &a : arms) {
+                if (a.run->test1_elements != ref) {
+                  std::cerr << "[validate] test_1 ELEMENT mismatch: fastfhir=" << ref
+                            << " " << a.name << "=" << a.run->test1_elements
+                            << " -- the arms did not serialize the same data\n";
+                  validation_failed = true;
+                }
+              }
+            }
+          }
 
           const auto field_at = [](const bench::ArmRunResult &r, bench::Stage st,
                                    bool want_entries) -> std::int64_t {
@@ -681,6 +747,43 @@ int main(int argc, char **argv)
                 std::cerr << "[validate] " << stage_label(st)
                           << " entry mismatch: fastfhir=" << ref << " " << a.name << "=" << n
                           << " -- the arms did not handle the same resources\n";
+                validation_failed = true;
+              }
+            }
+          }
+
+          // CROSS-STAGE: what Test 2 reaches must be what Test 1 wrote.
+          //
+          // Comparing arms to each other is not enough on its own -- all four
+          // could agree on a number that is smaller than what they serialized,
+          // and every per-stage check would still pass. The serialize count is
+          // the only one anchored to the fixture, so every later stage is
+          // measured against it.
+          {
+            for (const auto &a : arms) {
+              const std::int64_t wrote = field_at(*a.run, bench::Stage::Test1Serialize, true);
+              const std::int64_t read  = field_at(*a.run, bench::Stage::Test2RandomAccess, true);
+              if (wrote > 0 && read >= 0 && read != wrote) {
+                std::cerr << "[validate] " << a.name << " serialized " << wrote
+                          << " resources but random-access reached " << read
+                          << " -- a stage lost resources the arm had written\n";
+                validation_failed = true;
+              }
+            }
+          }
+
+          // CHOLESTEROL PARITY (LOINC 2085-9). The query exists to find a
+          // specific clinical result; an arm that finds a different number of
+          // them has not answered the same question, however fast it was.
+          // google_fhir reached this check for the first time here --
+          // validate_parity only ever compared fastfhir, json and hl7.
+          {
+            const std::int64_t ref = ff.query_loinc_matches;
+            for (const auto &a : arms) {
+              if (a.run->query_loinc_matches != ref) {
+                std::cerr << "[validate] test_3 LOINC 2085-9 (cholesterol) mismatch: fastfhir="
+                          << ref << " " << a.name << "=" << a.run->query_loinc_matches
+                          << " -- the arms did not answer the same query\n";
                 validation_failed = true;
               }
             }
