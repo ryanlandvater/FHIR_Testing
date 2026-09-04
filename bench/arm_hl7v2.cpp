@@ -33,15 +33,18 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   std::string payload;
   payload.reserve(fixture.bundle.size() * 512);
 
+  std::int64_t test1_entries = 0;
   for (const auto& item : fixture.bundle) {
     hl7v2::OruR01Message message;
     // This item's interned URLs, for the extension converters (which every
     // arm reaches -- v2's ZFX passthrough serializes JSON too).
     const assign::detail::ScopedUrlTable urls(item.url_table);
     assign::assign_patient(item.patient, message);
+    ++test1_entries;
 
     for (const auto& observation : item.observations) {
       assign::assign_observation(observation, message);
+      ++test1_entries;
     }
 
     payload += message.dump();
@@ -50,13 +53,16 @@ ArmRunResult run_hl7v2_bundle(const BundleBenchFixture& fixture) {
   const std::int64_t test1_ns = test1_timer.stop_ns();
   // Wire size is read AFTER the clock stops (notes.md section 6).
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
-  out.metrics.push_back({"hl7v2", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+  out.metrics.push_back({"hl7v2", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
+                         /*ops=*/0, /*entries=*/test1_entries});
   out.test1_payload = payload;  // --dump-artifacts input
 
   Timer test3_timer;
   test3_timer.start();
   const auto query_summary = test_3::query(payload);
-  out.metrics.push_back({"hl7v2", Stage::Test3Query, test3_timer.stop_ns()});
+  out.metrics.push_back({"hl7v2", Stage::Test3Query, test3_timer.stop_ns(),
+                         /*bytes_in=*/0, /*bytes_out=*/0, /*ops=*/0,
+                         /*entries=*/test_3::query_entries(query_summary)});
   out.queried_value = test_3::format_query_summary(query_summary);
   out.reconstructed_bundle_json = payload;
 

@@ -80,6 +80,22 @@ struct MetricEvent {
   // same clinical content (PA-5). Field reads for Test 2. 0 where the notion
   // does not apply.
   std::int64_t ops = 0;
+
+  // RESOURCES this stage handled -- the cross-arm parity accumulator for
+  // CONTENT, as bytes_out is for Test 2's reads.
+  //
+  // Every arm is handed the same fixture, so every arm must serialize the same
+  // number of resources, query the same number, and enrich the same number. An
+  // arm that quietly drops some looks FASTER, and nothing in a duration or a
+  // byte count says otherwise: a smaller payload reads as a more compact
+  // format, not as a lossy one. Both defects found in this suite had that
+  // shape -- the v2 arm writing a literal for every observation value, and the
+  // protobuf arm never writing Meta.profile at all -- and neither was visible
+  // in any number the harness printed.
+  //
+  // 0 means "not applicable to this stage", never "handled none": a stage that
+  // processes resources and reports 0 fails the gate in main().
+  std::int64_t entries = 0;
 };
 
 struct ArmRunResult {

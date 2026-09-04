@@ -49,6 +49,8 @@
 // ===========================================================================
 
 #include "bench_test_5.hpp"
+#include "poco_leaves.hpp"
+#include "poco_set.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -378,9 +380,75 @@ static void announce_debug_build() {
 static void announce_debug_build() {}
 #endif
 
+
+// --decode: WIRE -> POCO 2 -> neutral leaves.
+//
+// The arm reads its OWN format back into (path, value) pairs, those are set
+// into fresh POCOs through the generic inverse, and the result is walked by the
+// same instrument that produced POCO 1. No arm borrows another's parser, and
+// the reference belongs to none of them.
+//
+// Recovery is applied first: the question is what a consumer gets back from
+// this wire, not what the damaged bytes literally say.
+int mode_decode(const std::string& format, const std::string& in, const std::string& out) {
+  const t5::ArmOps* arm = find_arm(format);
+  if (arm == nullptr) { std::fprintf(stderr, "unknown format '%s'\n", format.c_str()); return 2; }
+
+  const auto wire = read_file(in);
+  const t5::StreamFingerprint fp = arm->recover(wire);
+
+  std::map<std::string, PatientData> patients;
+  std::map<std::string, ObservationData> observations;
+  std::size_t set_ok = 0, set_refused = 0;
+  std::size_t refused_url = 0, refused_choice = 0, refused_enum = 0, refused_other = 0;
+
+  for (const auto& [path, value] : fp.raw) {
+    const auto dot = path.find('.');
+    if (dot == std::string::npos) continue;
+    const std::string key = path.substr(0, dot);
+    const std::string rest = path.substr(dot + 1);
+    nlohmann::json v;
+    try { v = nlohmann::json::parse(value); } catch (const std::exception&) { ++set_refused; continue; }
+    const bool ok = key.rfind("Patient/", 0) == 0
+                        ? bench::poco::set_path(patients[key], rest, v)
+                        : bench::poco::set_path(observations[key], rest, v);
+    if (ok) { ++set_ok; }
+    else {
+      // Classify, do not just count: the refusals are not one problem. Each
+      // bucket is a place the arms speak FHIR and the POCO speaks FastFHIR's
+      // internal representation, and each needs its own inverse.
+      const auto last = path.rfind('.');
+      const std::string tail = last == std::string::npos ? path : path.substr(last + 1);
+      if (tail == "url") ++refused_url;
+      else if (path.find(".value") != std::string::npos && v.is_string()) ++refused_choice;
+      else if (v.is_string()) {
+        if (refused_enum < 4) std::fprintf(stderr, "  enum-refused: %s = %s\n",
+                                          path.c_str(), value.c_str());
+        ++refused_enum;
+      }
+      else ++refused_other;
+      ++set_refused;
+    }
+  }
+
+  std::vector<bench::poco::Leaf> leaves;
+  for (auto& [k, d] : patients) bench::poco::walk(d, k, leaves);
+  for (auto& [k, d] : observations) bench::poco::walk(d, k, leaves);
+  std::sort(leaves.begin(), leaves.end());
+
+  std::ostringstream os;
+  for (const auto& [path, value] : leaves) os << path << '\t' << value << '\n';
+  if (!out.empty()) { std::ofstream f(out); f << os.str(); }
+
+  std::printf("decoded=%zu refused=%zu (url=%zu choice=%zu enum/code=%zu other=%zu) leaves=%zu\n",
+              set_ok, set_refused, refused_url, refused_choice, refused_enum, refused_other,
+              leaves.size());
+  return 0;
+}
+
 int main(int argc, char** argv) {
   announce_debug_build();
-  enum class Mode { None, Hash, Corrupt, Recover, Check, Positions };
+  enum class Mode { None, Hash, Corrupt, Recover, Check, Positions, Decode };
   Mode mode = Mode::None;
   std::string format, in_path, out_path, base_path, rec_path;
   std::size_t bits = 0;
@@ -406,6 +474,9 @@ int main(int argc, char** argv) {
       format = need("format");
     } else if (tok == "--check") {
       mode = Mode::Check;
+    } else if (tok == "--decode") {
+      mode = Mode::Decode;
+      format = need("format");
     } else if (tok == "--positions") {
       mode = Mode::Positions;
       format = need("format");
@@ -435,6 +506,8 @@ int main(int argc, char** argv) {
         if (!arm) { std::fprintf(stderr, "unknown format '%s'\n", format.c_str()); return 2; }
         return mode_hash(*arm, in_path, out_path);
       }
+      case Mode::Decode:
+        return mode_decode(format, in_path, out_path);
       case Mode::Positions: {
         const t5::ArmOps* arm = find_arm(format);
         if (!arm) { std::fprintf(stderr, "unknown format '%s'\n", format.c_str()); return 2; }

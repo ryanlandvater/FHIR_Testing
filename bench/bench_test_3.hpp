@@ -1,5 +1,6 @@
 #pragma once
 
+#include <nlohmann/json.hpp>
 #include "harness.hpp"
 
 #include <cstddef>
@@ -69,6 +70,13 @@ struct QuerySummary {
   std::size_t obs_component_value_string = 0;
   std::size_t obs_component_value_code = 0;
 };
+
+// The resources this query actually reached. An arm whose scanner misses a
+// segment returns FAST and returns FEW; without this the first is reported and
+// the second is not.
+inline std::int64_t query_entries(const QuerySummary& s) {
+  return static_cast<std::int64_t>(s.patients + s.observations);
+}
 
 inline std::string format_query_summary(const QuerySummary& summary) {
   return "patients=" + std::to_string(summary.patients) +
@@ -623,23 +631,68 @@ static inline QuerySummary query(const std::string& payload) {
           acc.note_loinc_2085_9();
         }
 
-        // ── Value classification (OBX-2 value type → ValueKind) ──────────
+        // ── Value classification (OBX-2 value type -> ValueKind) ──────────
+        //
+        // CWE IS A CodeableConcept, not a `code`. The CDC converter's
+        // OBXValue.yml routes both through the same rule --
+        // `obx-value-cwe: condition ... = "CWE" or "CE"` -> CWE.yml -- and a
+        // plain FHIR `code` is v2's IS, which is a separate rule. Mapping CWE
+        // to Code put all 26 CodeableConcept values in this corpus into the
+        // wrong bucket, and the cross-arm parity check reported it as two
+        // mismatches (codeableconcept 26->0, code 0->26) rather than one.
         const auto vt = obx.value_type();
         const auto val = obx.value();
         if (!val.empty()) {
           if (vt == "NM") {
             acc.note_observation_value(detail::ValueKind::Quantity);
-          } else if (vt == "CE") {
+          } else if (vt == "CE" || vt == "CWE" || vt == "CNE") {
             acc.note_observation_value(detail::ValueKind::CodeableConcept);
-          } else if (vt == "ST") {
-            acc.note_observation_value(detail::ValueKind::String);
-          } else if (vt == "CWE") {
+          } else if (vt == "IS") {
             acc.note_observation_value(detail::ValueKind::Code);
+          } else if (vt == "ST" || vt == "FT" || vt == "TX") {
+            acc.note_observation_value(detail::ValueKind::String);
           }
         }
-        // Note: effective, issued, and component fields are not extractable
-        // from native OBX segments — they are stored in ZFX custom segments.
-        // These QuerySummary counters remain at zero for the HL7v2 arm.
+      } else if (seg.name == "ZFX" && seg.fields.size() >= 2) {
+        // fields[] excludes the segment name, so ZFX-1 is fields[0].
+        // effective, issued and component have no native OBX field, so the
+        // arm carries them in its ZFX passthrough. This scanner used to skip
+        // ZFX entirely and leave those four counters at zero -- 316 effective
+        // date/times and 316 issued instants reported as absent from a wire
+        // that carried every one of them.
+        const std::string name = hl7v2::unescape_text(seg.fields[0].val);
+        const std::string payload = hl7v2::unescape_text(seg.fields[1].val);
+        nlohmann::json j;
+        try { j = nlohmann::json::parse(payload); }
+        catch (const std::exception&) { continue; }
+
+        const auto kind_of = [](const std::string& key) {
+          if (key.size() > 5 && key.compare(key.size() - 8, 8, "Quantity") == 0)
+            return detail::ValueKind::Quantity;
+          if (key.find("CodeableConcept") != std::string::npos)
+            return detail::ValueKind::CodeableConcept;
+          if (key.size() > 4 && key.compare(key.size() - 6, 6, "String") == 0)
+            return detail::ValueKind::String;
+          return detail::ValueKind::Code;
+        };
+
+        if (name == "observation.effective[x]" && j.is_object() && !j.empty()) {
+          const std::string k = j.begin().key();
+          if (k.find("Period") != std::string::npos) acc.note_effective_period();
+          else                                       acc.note_effective_datetime();
+        } else if (name == "observation.issued") {
+          acc.note_issued();
+        } else if (name == "observation.component" && j.is_array()) {
+          for (const auto& comp : j) {
+            if (!comp.is_object()) continue;
+            for (auto it = comp.begin(); it != comp.end(); ++it) {
+              if (it.key().rfind("value", 0) == 0 && it.key() != "value") {
+                acc.note_component_value(kind_of(it.key()));
+                break;
+              }
+            }
+          }
+        }
       }
     }
   }

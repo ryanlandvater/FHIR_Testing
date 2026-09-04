@@ -200,13 +200,16 @@ namespace bench
                           std::make_move_iterator(observation_entries.end()));
     }
 
+    // The sealed Bundle's own entry count, like the JSON arm's.
+    const std::int64_t test1_entries = static_cast<std::int64_t>(bundle.entry.size());
     const auto root = builder.append_obj(bundle);
     (void)seal_stream(stream, root, "fastfhir arm bundle");
     const std::int64_t test1_ns = test1_timer.stop_ns();
     // Wire size is read AFTER the clock stops -- nothing goes between the last
     // real operation and stop_ns() (notes.md section 6).
     const std::int64_t test1_bytes = static_cast<std::int64_t>(payload_memory.view().size());
-    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
+                           /*ops=*/0, /*entries=*/test1_entries});
     // --dump-artifacts input (see main.cpp): the sealed wire bytes.
     {
       const auto v = payload_memory.view();
@@ -311,7 +314,9 @@ namespace bench
     Timer test3_timer;
     test3_timer.start();
     const auto query_summary = test_3::query(payload_memory.view());
-    out.metrics.push_back({"fastfhir", Stage::Test3Query, test3_timer.stop_ns()});
+    out.metrics.push_back({"fastfhir", Stage::Test3Query, test3_timer.stop_ns(),
+                         /*bytes_in=*/0, /*bytes_out=*/0, /*ops=*/0,
+                         /*entries=*/test_3::query_entries(query_summary)});
     out.queried_value = test_3::format_query_summary(query_summary);
 
     // Test 3 over the compact archive (test_3_compact). Same census, same

@@ -86,9 +86,21 @@ bool assign_scalar(M &member, const nlohmann::json &v) {
         member = v.get<bool>();
         return true;
     } else if constexpr (std::is_enum_v<U>) {
-        if (!v.is_number_integer()) return false;
-        member = static_cast<U>(v.get<long long>());
-        return true;
+        // Two spellings reach here and both are legitimate. An arm that speaks
+        // FHIR sends the CODE ("generated", "final"); one that round-trips
+        // FastFHIR's own representation sends the ordinal. Accepting only the
+        // ordinal refused 2,965 leaves per arm and charged the loss to the
+        // format rather than to this reader.
+        //
+        // FF_ParseCode is the generator's uniform overload of the same
+        // per-enum parser the ingestor uses, so the code table is never
+        // duplicated here.
+        if (v.is_string()) return FF_ParseCode(v.get<std::string>(), member);
+        if (v.is_number_integer()) {
+            member = static_cast<U>(v.get<long long>());
+            return true;
+        }
+        return false;
     } else if constexpr (std::is_arithmetic_v<U>) {
         if (!v.is_number()) return false;
         member = static_cast<U>(v.get<double>());
@@ -112,6 +124,24 @@ inline bool assign_choice_scalar(ChoiceEntry &c, const nlohmann::json &v) {
         return true;
     }
     return false;
+}
+
+// The scalar half of the choice-suffix table. reflected_choice_tag enumerates
+// generated DATATYPE structs, so `valueQuantity` resolves and `effectiveDateTime`
+// does not -- the date/time tags are scalars and have no struct. This mirrors
+// the exporter's own switch (FF_Parser.cpp choice_suffix), which splits the same
+// way and for the same reason.
+inline int scalar_choice_tag(std::string_view type_name) {
+    if (type_name == "Boolean")  return RECOVER_FF_BOOL;
+    if (type_name == "Integer")  return RECOVER_FF_INT32;
+    if (type_name == "Decimal")  return RECOVER_FF_FLOAT64;
+    if (type_name == "String")   return RECOVER_FF_STRING;
+    if (type_name == "Code")     return RECOVER_FF_CODE;
+    if (type_name == "Date")     return RECOVER_FF_DATE;
+    if (type_name == "DateTime") return RECOVER_FF_DATETIME;
+    if (type_name == "Time")     return RECOVER_FF_TIME;
+    if (type_name == "Instant")  return RECOVER_FF_INSTANT;
+    return 0;
 }
 
 }  // namespace detail
@@ -151,12 +181,37 @@ bool set_path(T &target, std::string_view path, const nlohmann::json &value) {
     const std::string_view seg = path.substr(0, dot);
     const std::string_view rest =
         (dot == std::string_view::npos) ? std::string_view{} : path.substr(dot + 1);
-    const auto [tagged_name, choice_tag] = detail::split_tag(seg);
+    const auto [tagged_name, brace_tag] = detail::split_tag(seg);
     const auto [name, index] = detail::split_index(tagged_name);
+    // A choice arrives either as `value{516}` (this walker's own form, tag
+    // explicit) or as `valueQuantity` (FHIR's form, tag implied by the type
+    // name). reflected_choice_tag is the generator's inverse of the suffix the
+    // exporter appends, so both spellings resolve through one table.
+    const int choice_tag = brace_tag;
 
     bool done = false;
     visit_fields(target, [&](const char *field, auto &member) {
-        if (done || name != std::string_view(field)) return;
+        const std::string_view fname(field);
+        int tag = choice_tag;
+        std::string_view match = name;
+
+        // `valueQuantity` against a member called `value`: split the FHIR type
+        // name off the end and look the tag up. Only attempted for a member
+        // that IS a choice, so a genuine field like `birthDate` is never
+        // mistaken for `birth` + type `Date`.
+        if constexpr (std::is_same_v<std::decay_t<decltype(member)>, ChoiceEntry>) {
+            if (tag < 0 && name.size() > fname.size() && name.rfind(fname, 0) == 0) {
+                const std::string suffix(name.substr(fname.size()));
+                int t = detail::scalar_choice_tag(suffix);
+                if (t == 0) t = static_cast<int>(FastFHIR::reflected_choice_tag(suffix));
+                if (t != 0) {
+                    tag = t;
+                    match = fname;
+                }
+            }
+        }
+        if (done || match != fname) return;
+        const int choice_tag = tag;
         using M = std::decay_t<decltype(member)>;
 
         if constexpr (std::is_same_v<M, ChoiceEntry>) {

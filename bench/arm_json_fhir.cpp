@@ -138,12 +138,20 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
     all_entries.push_back(std::move(entry));
   }
   bundle["entry"] = std::move(all_entries);
+  // Read from the BUNDLE, after assignment and immediately before dump() --
+  // the entry count a reader of this document will see. Reading the staging
+  // vector instead reports what the loop INTENDED to write, which is not the
+  // same claim: a deliberate probe that dropped one entry between the count
+  // and the serialization passed this gate and was caught only by Test 2 and
+  // Test 4, which re-read the wire.
+  const std::int64_t test1_entries = static_cast<std::int64_t>(bundle["entry"].size());
 
   const std::string payload = bundle.dump();
   const std::int64_t test1_ns = test1_timer.stop_ns();
   // Wire size is read AFTER the clock stops (notes.md section 6).
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
-  out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes});
+  out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
+                         /*ops=*/0, /*entries=*/test1_entries});
   out.test1_payload = payload;  // --dump-artifacts input
 
   // A counter nobody reads is the silence it was added to prevent. ChoiceBlock
@@ -181,7 +189,9 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
   Timer test3_timer;
   test3_timer.start();
   const auto query_summary = test_3::query(payload);
-  out.metrics.push_back({"json_fhir", Stage::Test3Query, test3_timer.stop_ns()});
+  out.metrics.push_back({"json_fhir", Stage::Test3Query, test3_timer.stop_ns(),
+                         /*bytes_in=*/0, /*bytes_out=*/0, /*ops=*/0,
+                         /*entries=*/test_3::query_entries(query_summary)});
   out.queried_value = test_3::format_query_summary(query_summary);
   out.reconstructed_bundle_json = payload;
 

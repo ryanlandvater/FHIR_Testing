@@ -610,37 +610,96 @@ int main(int argc, char **argv)
 #endif
 
         // Collect and emit all metrics
-        // Test 2 parity gate: every arm must have read the same bytes. An arm
-        // that silently read nothing looks infinitely fast, which is exactly
-        // how the HL7v2 probe shipped broken twice during development (wrong
-        // segment terminator, then wrong field index). Cheap, and it turns a
-        // fast meaningless number into a hard failure.
+        //
+        // CROSS-ARM PARITY GATES. Every arm is handed the same fixture, so at
+        // every stage every arm must have touched the same content. An arm that
+        // silently handles less looks FASTER, and no duration or byte count
+        // contradicts it -- a smaller payload reads as a more compact format,
+        // not as a lossy one. Both defects this suite has actually shipped had
+        // that shape: the HL7v2 probe (wrong segment terminator, then wrong
+        // field index) and, later, an arm writing a constant for every
+        // observation value. Cheap to check, and it converts a fast meaningless
+        // number into a hard failure.
         {
-          const auto ra_bytes = [](const bench::ArmRunResult &r) -> std::int64_t {
-            for (const auto &m : r.metrics)
-              if (m.stage == bench::Stage::Test2RandomAccess)
-                return m.bytes_out;
-            return -1;
+          const char *const kStageName[] = {"test_1 serialize", "test_1 compact",
+                                            "test_2 random-access", "test_3 query",
+                                            "test_4 enrich"};
+          const auto stage_label = [&](bench::Stage st) -> const char * {
+            const auto idx = static_cast<std::size_t>(st);
+            return idx < (sizeof kStageName / sizeof *kStageName) ? kStageName[idx] : "stage";
           };
-          const std::int64_t ref = ra_bytes(ff);
-          struct Named { const char *name; std::int64_t bytes; };
-          const std::vector<Named> others = {
-              {"json_fhir", ra_bytes(jf)},
+
+          struct Named { const char *name; const bench::ArmRunResult *run; };
+          const std::vector<Named> arms = {
+              {"fastfhir", &ff},
+              {"json_fhir", &jf},
 #if defined(HAVE_HL7V2)
-              {"hl7v2", ra_bytes(h2)},
+              {"hl7v2", &h2},
 #endif
 #if defined(HAVE_GOOGLE_FHIR)
-              {"google_fhir", ra_bytes(gf)},
+              {"google_fhir", &gf},
 #endif
           };
-          for (const auto &o : others)
+
+          const auto field_at = [](const bench::ArmRunResult &r, bench::Stage st,
+                                   bool want_entries) -> std::int64_t {
+            for (const auto &m : r.metrics)
+              if (m.stage == st) return want_entries ? m.entries : m.bytes_out;
+            return -1;   // stage absent for this arm
+          };
+
+          // ENTRY PARITY, every stage. The reference is fastfhir's count; a
+          // stage no arm reports a count for is skipped, so adding a stage does
+          // not require touching this.
+          for (const auto st : {bench::Stage::Test1Serialize, bench::Stage::Test2RandomAccess,
+                                bench::Stage::Test3Query, bench::Stage::Test4Enrich})
           {
-            if (o.bytes != ref)
+            const std::int64_t ref = field_at(ff, st, /*want_entries=*/true);
+            if (ref <= 0)
             {
-              std::cerr << "[validate] test_2 random-access byte mismatch: fastfhir=" << ref
-                        << " " << o.name << "=" << o.bytes
-                        << " -- the arms did not read the same fields\n";
-              validation_failed = true;
+              // Nobody counted here. Only a problem if somebody else did --
+              // that means the stage HAS a notion of entries and this arm lost it.
+              for (const auto &a : arms)
+              {
+                const std::int64_t n = field_at(*a.run, st, true);
+                if (n > 0)
+                {
+                  std::cerr << "[validate] " << stage_label(st)
+                            << " entry count missing: fastfhir reported none but "
+                            << a.name << " reported " << n << "\n";
+                  validation_failed = true;
+                }
+              }
+              continue;
+            }
+            for (const auto &a : arms)
+            {
+              const std::int64_t n = field_at(*a.run, st, true);
+              if (n < 0) continue;            // arm does not run this stage
+              if (n != ref)
+              {
+                std::cerr << "[validate] " << stage_label(st)
+                          << " entry mismatch: fastfhir=" << ref << " " << a.name << "=" << n
+                          << " -- the arms did not handle the same resources\n";
+                validation_failed = true;
+              }
+            }
+          }
+
+          // BYTE PARITY for Test 2 specifically: the arms must have read the
+          // same fields, not merely the same number of resources.
+          {
+            const std::int64_t ref = field_at(ff, bench::Stage::Test2RandomAccess, false);
+            for (const auto &a : arms)
+            {
+              const std::int64_t b = field_at(*a.run, bench::Stage::Test2RandomAccess, false);
+              if (b >= 0 && b != ref)
+              {
+                std::cerr << "[validate] test_2 random-access byte mismatch: fastfhir=" << ref
+                          << " " << a.name << "=" << b
+                          << " -- the arms did not read the same fields\n";
+                validation_failed = true;
+              }
             }
           }
         }

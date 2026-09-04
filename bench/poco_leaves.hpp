@@ -116,6 +116,24 @@ void walk(const T& value, const std::string& path, std::vector<Leaf>& out) {
 
     } else if constexpr (detail::HasVisitor<U>) {
         visit_fields(value, [&](const char* name, const auto& member) {
+            // Extension.url is EXCLUDED, on both sides, and this is a gap in the
+            // comparison rather than a tidy-up.
+            //
+            // The POCO stores it as a uint32 intern index into the arena's URL
+            // trie -- the same class of defect as ChoiceEntry's old raw offset:
+            // a structural handle where a value belongs. The arms all emit the
+            // resolved STRING, and there is no honest way to turn that back
+            // into an index here; interning locally would mint numbers that
+            // cannot match POCO 1's, which is worse than not comparing, because
+            // it would look like a difference between the formats.
+            //
+            // Consequence worth stating plainly: this comparison CANNOT detect
+            // a format losing extension URLs. Closing it means giving the POCO
+            // the string, which is a change to FastFHIR, not to this walker.
+            using M = std::decay_t<decltype(member)>;
+            if constexpr (std::is_same_v<M, std::uint32_t>) {
+                if (std::string_view(name) == "url") return;
+            }
             walk(member, path.empty() ? std::string(name) : path + "." + name, out);
         });
     }
@@ -138,6 +156,20 @@ inline void walk_choice(const ChoiceEntry& c, const std::string& path, std::vect
             c.block->value);
         return;
     }
+    // A PACKED date/time is 8 bytes of civil parts, not a number. Dumping the
+    // raw integer made 1,470 leaves compare unequal against arms that render
+    // the text -- the same value in two spellings, counted as a difference.
+    // Verified: 1620368297335717891 re-packs from "2018-06-14T06:06:32+00:00"
+    // to the identical bits.
+    //
+    // to_string() is FastFHIR's own renderer, so the projection cannot drift
+    // from what the format says the value is.
+    if (FF_IsDateTimeTag(c.tag)) {
+        const std::string text = c.to_string();
+        if (!text.empty()) out.emplace_back(tagged, detail::quote(text));
+        return;
+    }
+
     std::visit(
         [&](const auto& v) {
             using V = std::decay_t<decltype(v)>;

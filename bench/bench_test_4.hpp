@@ -92,7 +92,9 @@ inline std::string format_enrich_summary(const EnrichMetricsSummary& summary) {
 inline MetricEvent enrich_metric(std::string_view arm, const EnrichMetricsSummary& summary) {
   return MetricEvent{std::string(arm), Stage::Test4Enrich, summary.duration_ns,
                      static_cast<std::int64_t>(summary.source_bytes),
-                     static_cast<std::int64_t>(summary.enriched_bytes)};
+                     static_cast<std::int64_t>(summary.enriched_bytes),
+                     /*ops=*/0,
+                     /*entries=*/static_cast<std::int64_t>(summary.appended_observations)};
 }
 
 inline MetricEvent enrich_metric(std::string_view arm, std::int64_t duration_ns) {

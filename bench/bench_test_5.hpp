@@ -139,6 +139,15 @@ struct StreamFingerprint {
   std::vector<UnitRef> units;  // sorted by offset
   std::string digest;          // sha256 of the unit list -- report integrity stamp
 
+  // The same leaves, UNHASHED. --check only ever needs the hashes, but a
+  // DECODER needs the strings back: rebuilding a POCO means addressing a field
+  // by name. Carrying both here means all four arms get it from the single
+  // funnel they already pass through, instead of four parallel extractions
+  // that can drift apart.
+  std::vector<std::pair<std::string, std::string>> raw;
+
+  void add_leaf(const std::string& path, const std::string& value);
+
   void finalize() {
     // Canonical, offset-sorted serialization of the unit list.
     std::string canon;
@@ -177,6 +186,8 @@ struct StreamFingerprint {
 // hash, `parent`/`tag` go unused, and --check's linear merge already compares
 // identity first and content second. That is precisely the four-outcome
 // comparison, now over a population all four arms can agree on.
+inline UnitRef canonical_leaf(const std::string& path, const std::string& value_raw);
+
 // NUMBERS COMPARE AS NUMBERS.
 //
 // FastFHIR preserves a decimal's source SCALE (that is a feature -- 1.50 and 1.5
@@ -197,6 +208,11 @@ inline std::string canonical_number(const std::string& value) {
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.17g", d);
     return buf;
+}
+
+inline void StreamFingerprint::add_leaf(const std::string& path, const std::string& value) {
+    units.push_back(canonical_leaf(path, value));
+    raw.emplace_back(path, value);
 }
 
 inline UnitRef canonical_leaf(const std::string& path, const std::string& value_raw) {
@@ -283,7 +299,7 @@ inline void ffhr_walk_leaves(const Reflective::Node& node, const std::string& pa
     if (!node.is_object()) {
         std::ostringstream v;
         node.print_json(v);
-        fp.units.push_back(canonical_leaf(path, v.str()));
+        fp.add_leaf(path, v.str());
         return;
     }
 
@@ -303,7 +319,7 @@ inline void ffhr_walk_leaves(const Reflective::Node& node, const std::string& pa
         if (ff_kind_is_inline_scalar(f.kind)) {
             std::ostringstream v;
             try { e.print_scalar_json(v, version); } catch (const std::exception&) { continue; }
-            fp.units.push_back(canonical_leaf(child, v.str()));
+            fp.add_leaf(child, v.str());
             continue;
         }
         try { ffhr_walk_leaves(e.as_node(), child, fp, version, depth + 1); }
@@ -362,7 +378,7 @@ inline void ffhr_collect(const Reflective::Node& root, StreamFingerprint& fp,
             if (ff_kind_is_inline_scalar(f.kind)) {
                 std::ostringstream v;
                 try { e.print_scalar_json(v, version); } catch (const std::exception&) { continue; }
-                fp.units.push_back(canonical_leaf(child, v.str()));
+                fp.add_leaf(child, v.str());
                 continue;
             }
             try { ffhr_walk_leaves(e.as_node(), child, fp, version, 1); }
@@ -420,7 +436,7 @@ inline void json_walk_leaves(const nlohmann::json& node, const std::string& path
         // dump() rather than a type-specific formatter: every arm has to render
         // the value the SAME way or equal data compares unequal. JSON's own
         // canonical form is the one all four can reach.
-        fp.units.push_back(canonical_leaf(path, node.dump()));
+        fp.add_leaf(path, node.dump());
     }
 }
 
@@ -516,8 +532,18 @@ inline std::string pb_scalar_string(const google::protobuf::Message& m,
     case FD::CPPTYPE_FLOAT:  return std::to_string(rep ? refl->GetRepeatedFloat(m, f, index)  : refl->GetFloat(m, f));
     case FD::CPPTYPE_BOOL:   return (rep ? refl->GetRepeatedBool(m, f, index) : refl->GetBool(m, f)) ? "1" : "0";
     case FD::CPPTYPE_ENUM: {
+      // proto generation upper-snakes the FHIR code (final -> FINAL,
+      // not-done -> NOT_DONE), so the inverse is lowercase with underscores
+      // back to hyphens. Emitting the proto spelling made this arm report
+      // "FINAL" where every other arm reports "final" -- 4,414 leaves that are
+      // the SAME datum, counted as a difference between the formats.
       const auto* e = rep ? refl->GetRepeatedEnum(m, f, index) : refl->GetEnum(m, f);
-      return e ? e->name() : std::string();
+      if (e == nullptr) return std::string();
+      std::string code = e->name();
+      for (char& c : code) {
+        c = (c == '_') ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      return code;
     }
     case FD::CPPTYPE_STRING: {
       std::string scratch;
@@ -546,12 +572,150 @@ inline bool pb_is_primitive_wrapper(const google::protobuf::Message& m,
     return true;
 }
 
+// FhirProto's JSON conventions, as its own printer implements them. There is
+// no one-to-one mapping between FhirProto fields and FHIR JSON fields, so
+// google/fhir ships custom parsers/printers rather than using protobuf's
+// generic JSON support; a reflection walk that ignores those conventions names
+// elements the FHIR document does not have. Two rules matter here, and both
+// are readable off the descriptors, so neither can drift from the schema.
+
+// Which member of a single-oneof message is set, if any.
+inline const google::protobuf::FieldDescriptor* pb_oneof_set(
+    const google::protobuf::Message& m) {
+    const auto* d = m.GetDescriptor();
+    if (d->real_oneof_decl_count() != 1) return nullptr;
+    return m.GetReflection()->GetOneofFieldDescriptor(m, d->real_oneof_decl(0));
+}
+
+inline std::string pb_ucfirst(std::string s) {
+    if (!s.empty()) s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
+    return s;
+}
+
+inline std::string pb_upper_camel(const std::string& snake) {
+    return pb_ucfirst(pb_camel(snake));
+}
+
+// RULE 3 -- a timelike primitive. FhirProto stores dateTime/instant/date/time
+// as absolute microseconds plus the timezone the event was recorded in and a
+// precision, because FHIR JSON writes some timelike primitives without any
+// zone at all. Reflection therefore sees `issued.valueUs`, `issued.timezone`
+// and `issued.precision` where the document says
+// `"issued": "2018-06-14T06:06:32.842+00:00"`. Precision is what says how much
+// of the value was actually written -- rendering every one to seconds would
+// invent a different string, and a different instant, for anything sub-second.
+inline bool pb_timelike_text(const google::protobuf::Message& m, std::string* out) {
+    const auto* d = m.GetDescriptor();
+    const auto* f_us = d->FindFieldByName("value_us");
+    const auto* f_tz = d->FindFieldByName("timezone");
+    const auto* f_pr = d->FindFieldByName("precision");
+    if (f_us == nullptr || f_tz == nullptr || f_pr == nullptr) return false;
+
+    const auto* refl = m.GetReflection();
+    const std::int64_t us = refl->GetInt64(m, f_us);
+    std::string tz = refl->GetString(m, f_tz);
+    const std::string precision = refl->GetEnum(m, f_pr)->name();
+
+    // The zone is an OFFSET in FHIR JSON; "UTC" is FhirProto's spelling of +00:00.
+    std::int64_t offset_s = 0;
+    if (tz == "UTC" || tz.empty()) tz = "+00:00";
+    if (tz != "Z" && tz.size() >= 6 && (tz[0] == '+' || tz[0] == '-')) {
+        const int sign = tz[0] == '-' ? -1 : 1;
+        offset_s = sign * (std::atoi(tz.substr(1, 2).c_str()) * 3600 +
+                           std::atoi(tz.substr(4, 2).c_str()) * 60);
+    }
+
+    // Floor-divide: a negative microsecond count must not round toward zero.
+    std::int64_t local = us + offset_s * 1000000LL;
+    std::int64_t secs = local / 1000000LL;
+    std::int64_t frac = local % 1000000LL;
+    if (frac < 0) { frac += 1000000LL; --secs; }
+
+    const std::time_t t = static_cast<std::time_t>(secs);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[64];
+    if (precision == "DAY" || precision == "YEAR" || precision == "MONTH") {
+        std::snprintf(buf, sizeof buf, "%04d-%02d-%02d",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+        *out = buf;
+        return true;
+    }
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    *out = buf;
+    if (precision == "MILLISECOND") {
+        std::snprintf(buf, sizeof buf, ".%03d", static_cast<int>(frac / 1000));
+        *out += buf;
+    } else if (precision == "MICROSECOND") {
+        std::snprintf(buf, sizeof buf, ".%06d", static_cast<int>(frac));
+        *out += buf;
+    }
+    *out += tz;
+    return true;
+}
+
+// RULE 4 -- Decimal is a JSON NUMBER. FhirProto stores it as a `string` field
+// precisely so the original lexical form survives (FHIR treats trailing zeros
+// as significant), but FHIR JSON writes it unquoted. Emitting it quoted, the
+// way every other string-typed wrapper is emitted, made 1,263 Quantity values
+// arrive as "93" where the document has 93 -- refused by the POCO setter, and
+// counted as a missing value rather than a mis-spelled one.
+inline bool pb_is_unquoted_primitive(const google::protobuf::Message& m) {
+    const std::string& n = m.GetDescriptor()->name();
+    return n == "Decimal";
+}
+
+// RULE 1 -- a choice element. `Observation.value[x]` is a nested message ValueX
+// wrapping one oneof, so reflection sees `value.quantity.value`. FHIR JSON has
+// no wrapper: the element is spelled `valueQuantity`. json_name carries the
+// FHIR datatype where the proto field name differs -- `string_value` is
+// declared [json_name = "string"], giving `valueString`, not `valueStringValue`.
+inline bool pb_is_choice_wrapper(const google::protobuf::Message& m) {
+    const auto* d = m.GetDescriptor();
+    const std::string& n = d->name();
+    return d->real_oneof_decl_count() == 1 && n.size() > 1 && n.back() == 'X' &&
+           n != "Reference";
+}
+
+// RULE 2 -- a typed reference. FhirProto splits FHIR's single `reference`
+// string into a oneof of per-resource ReferenceId fields, so `subject` arrives
+// as `subject.patientId.value = "abc"` where the document says
+// `subject.reference = "Patient/abc"`. The resource type is the field name
+// minus its `_id` suffix, which is exactly what the field's
+// (referenced_fhir_type) annotation states -- read here off the name so this
+// needs no annotation-extension linkage.
+inline bool pb_reference_text(const google::protobuf::Message& ref,
+                              std::string* out) {
+    if (ref.GetDescriptor()->name() != "Reference") return false;
+    const auto* f = pb_oneof_set(ref);
+    if (f == nullptr) return false;
+    const auto* inner = f->message_type() != nullptr ? ref.GetReflection()
+                            ->GetMessage(ref, f).GetDescriptor()->FindFieldByName("value")
+                                                    : nullptr;
+    if (inner == nullptr) return false;
+    const auto& sub = ref.GetReflection()->GetMessage(ref, f);
+    const std::string id = sub.GetReflection()->GetString(sub, inner);
+    const std::string& name = f->name();
+    if (name == "uri" || name == "fragment") { *out = id; return true; }
+    if (name.size() > 3 && name.compare(name.size() - 3, 3, "_id") == 0) {
+        *out = pb_upper_camel(name.substr(0, name.size() - 3)) + "/" + id;
+        return true;
+    }
+    return false;
+}
+
 inline void pb_walk(const google::protobuf::Message& msg, const std::string& path,
                     StreamFingerprint& fp) {
     const auto* refl = msg.GetReflection();
     std::vector<const google::protobuf::FieldDescriptor*> fields;
     refl->ListFields(msg, &fields);
+    const bool in_reference = msg.GetDescriptor()->name() == "Reference";
     for (const auto* f : fields) {
+        // Already emitted as `.reference` by RULE 2; walking it again would
+        // add `subject.patientId.value`, a path no FHIR document has.
+        if (in_reference && f->containing_oneof() != nullptr) continue;
         const std::string base = path + "." + pb_camel(f->name());
         const bool is_msg =
             f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE;
@@ -562,17 +726,61 @@ inline void pb_walk(const google::protobuf::Message& msg, const std::string& pat
             if (is_msg) {
                 const auto& sub = f->is_repeated() ? refl->GetRepeatedMessage(msg, f, i)
                                                    : refl->GetMessage(msg, f);
+                // RULE 3: a timelike primitive renders as its FHIR string.
+                std::string when;
+                if (pb_timelike_text(sub, &when)) {
+                    fp.add_leaf(here, nlohmann::json(when).dump());
+                    continue;
+                }
+
                 const google::protobuf::FieldDescriptor* inner = nullptr;
                 if (pb_is_primitive_wrapper(sub, &inner)) {
+                    // RULE 4: Decimal is stored as a string but written as a number.
                     const bool istr =
-                        inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
-                        inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_ENUM;
-                    fp.units.push_back(canonical_leaf(
+                        !pb_is_unquoted_primitive(sub) &&
+                        (inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
+                         inner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_ENUM);
+                    fp.add_leaf(
                         here, pb_json_value(pb_scalar_string(sub, sub.GetReflection(), inner, 0),
-                                            istr)));
-                } else {
-                    pb_walk(sub, here, fp);
+                                            istr));
+                    continue;
                 }
+
+                // RULE 2: a Reference collapses to one `reference` string.
+                std::string ref_text;
+                if (pb_reference_text(sub, &ref_text)) {
+                    fp.add_leaf(here + ".reference", nlohmann::json(ref_text).dump());
+                    // `display`, `type` and `identifier` are ordinary siblings
+                    // and still belong in the output; only the oneof folded.
+                    pb_walk(sub, here, fp);
+                    continue;
+                }
+
+                // RULE 1: a choice wrapper folds into the element's FHIR name.
+                if (pb_is_choice_wrapper(sub)) {
+                    if (const auto* ch = pb_oneof_set(sub)) {
+                        const std::string folded = here + pb_ucfirst(ch->json_name());
+                        const auto& picked = sub.GetReflection()->GetMessage(sub, ch);
+                        const google::protobuf::FieldDescriptor* pinner = nullptr;
+                        std::string picked_when;
+                        if (pb_timelike_text(picked, &picked_when)) {
+                            fp.add_leaf(folded, nlohmann::json(picked_when).dump());
+                        } else if (pb_is_primitive_wrapper(picked, &pinner)) {
+                            const bool istr =
+                                !pb_is_unquoted_primitive(picked) &&
+                                (pinner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
+                                 pinner->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_ENUM);
+                            fp.add_leaf(folded,
+                                        pb_json_value(pb_scalar_string(picked, picked.GetReflection(),
+                                                                       pinner, 0), istr));
+                        } else {
+                            pb_walk(picked, folded, fp);
+                        }
+                    }
+                    continue;
+                }
+
+                pb_walk(sub, here, fp);
                 continue;
             }
             const bool str = f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING ||
@@ -707,7 +915,7 @@ inline void hl7_walk_json(const nlohmann::json& node, const std::string& path,
         for (std::size_t i = 0; i < node.size(); ++i)
             hl7_walk_json(node[i], path + "[" + std::to_string(i) + "]", fp);
     } else {
-        fp.units.push_back(canonical_leaf(path, node.dump()));
+        fp.add_leaf(path, node.dump());
     }
 }
 
@@ -728,17 +936,24 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
             // carried structurally by ZFX `.details` and would double-count.
             if (!patient_key.empty()) {
                 if (!f[7].empty())
-                    fp.units.push_back(canonical_leaf(patient_key + ".birthDate",
-                                                      nlohmann::json(f[7]).dump()));
+                    fp.add_leaf(patient_key + ".birthDate",
+                                                      nlohmann::json(f[7]).dump());
                 if (!f[8].empty())
-                    fp.units.push_back(canonical_leaf(patient_key + ".gender",
-                                                      nlohmann::json(f[8]).dump()));
+                    fp.add_leaf(patient_key + ".gender",
+                                                      nlohmann::json(f[8]).dump());
             }
-        } else if (name == "OBX" && f.size() > 5) {
-            // The observation VALUE reaches the wire only here.
-            if (!obs_key.empty() && !f[5].empty())
-                fp.units.push_back(
-                    canonical_leaf(obs_key + ".value", nlohmann::json(f[5]).dump()));
+        } else if (name == "OBX") {
+            // DELIBERATELY NO LEAF. OBX-5 carries the observation value, but
+            // `<Observation>.value` is not a FHIR path -- the canonical form is
+            // `.valueQuantity.value` -- so the leaf this used to emit could
+            // never match POCO 1 no matter how well the arm performed. It was
+            // pure denominator noise, and worse under corruption: a leaf that
+            // matches nothing still SURVIVES bit flips consistently, so it
+            // scored as durable content while representing none.
+            //
+            // The value now reaches the wire structurally as
+            // ZFX|observation.value[x]|{"valueQuantity":{...}} and is decoded
+            // there, with the full component set OBX-5/-6 cannot hold.
         } else if (name == "ZFX" && f.size() > 2) {
             const std::string field = hl7_unescape(f[1]);
             const std::string payload = hl7_unescape(f[2]);
@@ -765,7 +980,7 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
                     obs_key = resource_key("Observation", payload_json.get<std::string>());
                 key = (field.rfind("observation.", 0) == 0) ? obs_key : patient_key;
                 if (!key.empty())
-                    fp.units.push_back(canonical_leaf(key + ".id", payload_json.dump()));
+                    fp.add_leaf(key + ".id", payload_json.dump());
                 continue;
             }
             if (key.empty()) continue;
@@ -775,6 +990,21 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
                 sub.erase(sub.size() - 8);
             if (sub.size() > 3 && sub.compare(sub.size() - 3, 3, "[*]") == 0)
                 sub.erase(sub.size() - 3);
+
+            // A CHOICE ELEMENT. The ZFX name is the `[x]` BASE --
+            // `observation.effective[x]` -- and the concrete element name only
+            // exists in the payload, which the encoder writes as a single-key
+            // object: {"effectiveDateTime": ...}. Walking the base would emit
+            // `Observation/<id>.effective[x].effectiveDateTime`, which matches
+            // no canonical leaf, so every choice field on this arm was refused.
+            if (sub.size() > 3 && sub.compare(sub.size() - 3, 3, "[x]") == 0) {
+                if (payload_json.is_object() && payload_json.size() == 1) {
+                    hl7_walk_json(payload_json.begin().value(),
+                                  key + "." + payload_json.begin().key(), fp);
+                    continue;
+                }
+                sub.erase(sub.size() - 3);
+            }
             hl7_walk_json(payload_json, key + "." + sub, fp);
         }
     }

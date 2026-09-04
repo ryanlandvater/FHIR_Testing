@@ -106,9 +106,10 @@ inline std::size_t default_reads() {
 }
 
 inline MetricEvent random_access_metric(std::string_view arm, const RandomAccessSummary& s) {
-  // Field order is {arm, stage, duration_ns, bytes_in, bytes_out, ops}.
+  // Field order is {arm, stage, duration_ns, bytes_in, bytes_out, ops, entries}.
   return MetricEvent{std::string(arm), Stage::Test2RandomAccess, s.duration_ns,
-                     /*bytes_in=*/0, /*bytes_out=*/s.bytes_read, /*ops=*/s.reads};
+                     /*bytes_in=*/0, /*bytes_out=*/s.bytes_read, /*ops=*/s.reads,
+                     /*entries=*/s.entries_seen};
 }
 
 inline std::string format_random_access_summary(const RandomAccessSummary& s) {
@@ -290,7 +291,19 @@ inline RandomAccessSummary random_access(const std::string& payload) {
   // memory would know them. The timed part is the scan to the target message,
   // which is the O(i) cost under test.
   const auto starts = hl7v2::find_message_starts(payload);
-  summary.entries_seen = static_cast<std::int64_t>(starts.size());
+
+  // entries_seen counts RESOURCES, not messages. HL7v2 batches one ORU^R01 per
+  // patient with that patient's results as OBX segments inside it, so
+  // starts.size() is 1 where every other arm reports 317 -- an addressing
+  // difference, not a content one, but the cross-arm entry gate compares
+  // content and would read it as this arm having lost 316 resources.
+  // Random access still ADDRESSES messages (that is the format's unit); this
+  // number says what the batch contains.
+  std::int64_t obx = 0;
+  for (std::size_t at = payload.find("\rOBX|"); at != std::string::npos;
+       at = payload.find("\rOBX|", at + 1))
+    ++obx;
+  summary.entries_seen = static_cast<std::int64_t>(starts.size()) + obx;
 
   const auto targets = pick_targets(starts.size(), default_reads());
   if (targets.empty()) return summary;

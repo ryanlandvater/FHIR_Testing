@@ -262,6 +262,62 @@ inline namespace BENCH_ARM_NS {
       }
     }
 
+    // NEVER static_cast BETWEEN THESE ENUMS. FastFHIR generates its code enums
+    // ALPHABETICALLY (Email, Fax, Other, Pager, Phone, Sms, Url) while FhirProto
+    // numbers them in the order the FHIR ValueSet declares them (PHONE = 1,
+    // FAX = 2, EMAIL = 3, PAGER = 4, ...). The two sequences agree nowhere past
+    // the first entry, so a numeric cast does not fail -- it silently returns a
+    // DIFFERENT, entirely valid code. `Phone` (4) arrived as `PAGER` (4). That
+    // is worse than a dropped field: a missing telecom.system is visible, a
+    // wrong one is a patient with a pager.
+    inline ::google::fhir::r4::core::ContactPointSystemCode_Value
+    google_map_contact_system(FF_ContactPointSystem v)
+    {
+      using G = ::google::fhir::r4::core::ContactPointSystemCode;
+      switch (v)
+      {
+      case FF_ContactPointSystem::Phone: return G::PHONE;
+      case FF_ContactPointSystem::Fax:   return G::FAX;
+      case FF_ContactPointSystem::Email: return G::EMAIL;
+      case FF_ContactPointSystem::Pager: return G::PAGER;
+      case FF_ContactPointSystem::Url:   return G::URL;
+      case FF_ContactPointSystem::Sms:   return G::SMS;
+      case FF_ContactPointSystem::Other: return G::OTHER;
+      default:                           return G::INVALID_UNINITIALIZED;
+      }
+    }
+
+    inline ::google::fhir::r4::core::ContactPointUseCode_Value
+    google_map_contact_use(FF_ContactPointUse v)
+    {
+      using G = ::google::fhir::r4::core::ContactPointUseCode;
+      switch (v)
+      {
+      case FF_ContactPointUse::Home:   return G::HOME;
+      case FF_ContactPointUse::Work:   return G::WORK;
+      case FF_ContactPointUse::Temp:   return G::TEMP;
+      case FF_ContactPointUse::Old:    return G::OLD;
+      case FF_ContactPointUse::Mobile: return G::MOBILE;
+      default:                         return G::INVALID_UNINITIALIZED;
+      }
+    }
+
+    inline ::google::fhir::r4::core::NameUseCode_Value google_map_name_use(FF_NameUse v)
+    {
+      using G = ::google::fhir::r4::core::NameUseCode;
+      switch (v)
+      {
+      case FF_NameUse::Usual:     return G::USUAL;
+      case FF_NameUse::Official:  return G::OFFICIAL;
+      case FF_NameUse::Temp:      return G::TEMP;
+      case FF_NameUse::Nickname:  return G::NICKNAME;
+      case FF_NameUse::Anonymous: return G::ANONYMOUS;
+      case FF_NameUse::Old:       return G::OLD;
+      case FF_NameUse::Maiden:    return G::MAIDEN;
+      default:                    return G::INVALID_UNINITIALIZED;
+      }
+    }
+
     inline GoogleObservationStatusValue google_map_observation_status(FF_ObservationStatus status)
     {
       switch (status)
@@ -308,59 +364,7 @@ inline namespace BENCH_ARM_NS {
     }
 
     // Recursive helper to build generic FHIR extensions
-    inline void google_build_extension(const ExtensionData &src, google::fhir::r4::core::Extension *pb_ext)
-    {
-      if (!src.id.empty())
-      {
-        pb_ext->mutable_id()->set_value(std::string(src.id));
-      }
-
-      // Google FHIR requires a URL. Mocking one from the URL intern-table index.
-      // NOTE: src.url is an index into FastFHIR's URL directory, not a URL. A
-      // faithful arm would resolve it via Parser::url_directory(); mocking keeps
-      // the pre-port behaviour. See notes.md "Extension URL interning".
-      if (src.url != FF_NULL_UINT32)
-        // The REAL url, resolved from FastFHIR's trie -- not a synthetic
-        // "http://example.org/ext/<index>". Fabricating it here meant the
-        // protobuf arm never encoded the document's actual extension URLs, so
-        // the arms were not holding the same data at all. Same resolution the
-        // JSON arm uses; an unresolvable index writes nothing rather than a
-        // plausible-looking lie.
-        if (const std::string __u = resolve_extension_url(src.url); !__u.empty()) {
-          pb_ext->mutable_url()->set_value(__u);
-        }
-
-      // Map the ChoiceEntry variant to Extension.value[x]
-      if (!src.value.is_empty())
-      {
-        auto *pb_val = pb_ext->mutable_value();
-
-        if (std::holds_alternative<std::string_view>(src.value.value))
-        {
-          pb_val->mutable_string_value()->set_value(std::string(std::get<std::string_view>(src.value.value)));
-        }
-        else if (std::holds_alternative<bool>(src.value.value))
-        {
-          pb_val->mutable_boolean()->set_value(std::get<bool>(src.value.value));
-        }
-        else if (std::holds_alternative<int32_t>(src.value.value))
-        {
-          pb_val->mutable_integer()->set_value(std::get<int32_t>(src.value.value));
-        }
-        else if (std::holds_alternative<double>(src.value.value))
-        {
-          // FHIR decimals map to string in protobuf to avoid precision loss
-          pb_val->mutable_decimal()->set_value(std::to_string(std::get<double>(src.value.value)));
-        }
-      }
-
-      // Handle nested extensions recursively
-      for (const auto &nested : src.extension)
-      {
-        google_build_extension(nested, pb_ext->add_extension());
-      }
-    }
-#endif
+            #endif
 
     inline std::string choice_suffix(RECOVERY_TAG tag)
     {
@@ -404,6 +408,369 @@ inline namespace BENCH_ARM_NS {
 
     inline std::optional<RenderedChoice> choice_block_json(const ChoiceBlock &blk);
 
+#if defined(ARM_GOOGLE_FHIR)
+    // ---- FhirProto encoding helpers -------------------------------------
+    // Written against google/fhir's own proto definitions (vendored under
+    // third_party/google_fhir) and the JSON conventions its printer implements.
+    // FhirProto is not a transliteration of FHIR JSON -- primitives are wrapped
+    // messages, choices are oneofs in a nested `<Field>X`, references are
+    // typed, and timelike values are absolute microseconds plus a timezone and
+    // a precision. Each helper below encodes one of those rules once.
+
+    // "MedicationRequest" -> "medication_request", to find `<type>_id` on
+    // Reference's oneof by name.
+    inline std::string google_snake(std::string_view camel)
+    {
+      std::string out;
+      for (std::size_t i = 0; i < camel.size(); ++i)
+      {
+        const char c = camel[i];
+        if (std::isupper(static_cast<unsigned char>(c)))
+        {
+          if (i) out.push_back('_');
+          out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        else out.push_back(c);
+      }
+      return out;
+    }
+
+    // FHIR's single `reference` string -> Reference's oneof.
+    //
+    // A RELATIVE reference is exactly `<ResourceType>/<id>`, and only that form
+    // is typed: FhirProto stores it in the matching `<type>_id` member. Anything
+    // else -- `urn:uuid:...`, an absolute URL, a `#fragment` -- is NOT a typed
+    // reference and belongs in `uri` (or `fragment`), which is what google/fhir's
+    // own parser does with it.
+    //
+    // This matters here because Synthea's bundles are urn:uuid THROUGHOUT. The
+    // previous code pushed those straight into `patient_id`, so the arm claimed
+    // a typed Patient reference whose id was the literal text "urn:uuid:0fb5...".
+    // Printed back through FhirProto's conventions that reads
+    // "Patient/urn:uuid:0fb5..." -- a reference to nothing, and 2,936 leaves
+    // that disagreed with every other arm.
+    inline void google_set_reference(const ReferenceData &src,
+                                     google::fhir::r4::core::Reference *pb)
+    {
+      if (pb == nullptr) return;
+      if (!src.display.empty())
+        pb->mutable_display()->set_value(std::string(src.display));
+
+      const std::string ref(src.reference);
+      if (ref.empty()) return;
+
+      if (ref[0] == '#')
+      {
+        pb->mutable_fragment()->set_value(ref.substr(1));
+        return;
+      }
+
+      const auto slash = ref.find('/');
+      const bool absolute = ref.rfind("urn:", 0) == 0 || ref.rfind("http://", 0) == 0 ||
+                            ref.rfind("https://", 0) == 0;
+      if (!absolute && slash != std::string::npos && slash > 0)
+      {
+        const std::string field = google_snake(ref.substr(0, slash)) + "_id";
+        const auto *desc = pb->GetDescriptor();
+        if (const auto *f = desc->FindFieldByName(field))
+        {
+          auto *id_msg = pb->GetReflection()->MutableMessage(pb, f);
+          if (const auto *vf = id_msg->GetDescriptor()->FindFieldByName("value"))
+          {
+            id_msg->GetReflection()->SetString(id_msg, vf, ref.substr(slash + 1));
+            return;
+          }
+        }
+      }
+      pb->mutable_uri()->set_value(ref);
+    }
+
+    // A FHIR instant/dateTime -> absolute microseconds. The old helper read only
+    // the first ten characters and zeroed h/m/s, so every `issued` and every
+    // `effectiveDateTime` in the corpus landed on midnight of its date -- and
+    // `meta.lastUpdated` was not even that, it was the literal 0.
+    inline std::optional<int64_t> google_instant_us(std::string_view text)
+    {
+      if (text.size() < 10) return std::nullopt;
+      std::tm tm{};
+      tm.tm_year = std::atoi(std::string(text.substr(0, 4)).c_str()) - 1900;
+      tm.tm_mon  = std::atoi(std::string(text.substr(5, 2)).c_str()) - 1;
+      tm.tm_mday = std::atoi(std::string(text.substr(8, 2)).c_str());
+
+      int64_t frac_us = 0, offset_s = 0;
+      if (text.size() >= 19 && text[10] == 'T')
+      {
+        tm.tm_hour = std::atoi(std::string(text.substr(11, 2)).c_str());
+        tm.tm_min  = std::atoi(std::string(text.substr(14, 2)).c_str());
+        tm.tm_sec  = std::atoi(std::string(text.substr(17, 2)).c_str());
+
+        std::size_t i = 19;
+        if (i < text.size() && text[i] == '.')
+        {
+          std::size_t j = i + 1;
+          std::string digits;
+          while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j])))
+            digits.push_back(text[j++]);
+          digits.resize(6, '0');                       // to microseconds
+          frac_us = std::atoll(digits.c_str());
+          i = j;
+        }
+        if (i < text.size() && (text[i] == '+' || text[i] == '-') && i + 5 < text.size() + 1)
+        {
+          const int sign = text[i] == '-' ? -1 : 1;
+          const int oh = std::atoi(std::string(text.substr(i + 1, 2)).c_str());
+          const int om = std::atoi(std::string(text.substr(i + 4, 2)).c_str());
+          offset_s = sign * (oh * 3600 + om * 60);
+        }
+      }
+      const std::time_t utc = timegm(&tm);
+      if (utc == static_cast<std::time_t>(-1)) return std::nullopt;
+      return (static_cast<int64_t>(utc) - offset_s) * 1000000LL + frac_us;
+    }
+
+    // The timezone FhirProto records alongside the value. FHIR JSON carries an
+    // OFFSET, not a zone name, and google/fhir accepts either -- round-tripping
+    // the offset is what preserves the original spelling.
+    inline std::string google_timezone_of(std::string_view text)
+    {
+      if (text.size() >= 20)
+      {
+        if (text.back() == 'Z') return "Z";
+        const auto plus = text.find_last_of("+-");
+        if (plus != std::string_view::npos && plus > 10)
+          return std::string(text.substr(plus));
+      }
+      return "UTC";
+    }
+
+    // How many fractional-second digits the text actually carried. FhirProto
+    // stores absolute microseconds, so PRECISION is the only record of how the
+    // value was written -- stamping SECOND on everything turns
+    // "06:06:32.842+00:00" into "06:06:32+00:00" on the way back out, which is
+    // a different instant and a different string.
+    inline int google_frac_digits(std::string_view text)
+    {
+      const auto dot = text.find('.');
+      if (dot == std::string_view::npos) return 0;
+      int n = 0;
+      for (std::size_t i = dot + 1; i < text.size() &&
+                                    std::isdigit(static_cast<unsigned char>(text[i])); ++i)
+        ++n;
+      return n;
+    }
+
+    template <typename PbDateTime>
+    inline void google_set_datetime(std::string_view text, PbDateTime *pb)
+    {
+      if (pb == nullptr || text.empty()) return;
+      const auto us = google_instant_us(text);
+      if (!us) return;
+      pb->set_value_us(*us);
+      pb->set_timezone(google_timezone_of(text));
+      const int frac = google_frac_digits(text);
+      pb->set_precision(text.size() <= 10 ? PbDateTime::DAY
+                        : frac == 0       ? PbDateTime::SECOND
+                        : frac <= 3       ? PbDateTime::MILLISECOND
+                                          : PbDateTime::MICROSECOND);
+    }
+
+    inline void google_set_instant(std::string_view text,
+                                   google::fhir::r4::core::Instant *pb)
+    {
+      if (pb == nullptr || text.empty()) return;
+      const auto us = google_instant_us(text);
+      if (!us) return;
+      using I = google::fhir::r4::core::Instant;
+      pb->set_value_us(*us);
+      pb->set_timezone(google_timezone_of(text));
+      const int frac = google_frac_digits(text);
+      pb->set_precision(frac == 0 ? I::SECOND : frac <= 3 ? I::MILLISECOND : I::MICROSECOND);
+    }
+
+    // EVERY coding, not just the first. `coding` is repeated in both FHIR and
+    // the proto; copying `coding.front()` alone dropped the SNOMED half of every
+    // dually-coded concept Synthea emits.
+    inline void google_set_codeable_concept(const CodeableConceptData &src,
+                                            google::fhir::r4::core::CodeableConcept *pb)
+    {
+      if (pb == nullptr) return;
+      if (!src.text.empty()) pb->mutable_text()->set_value(std::string(src.text));
+      for (const auto &c : src.coding)
+      {
+        auto *pc = pb->add_coding();
+        if (!c.system.empty())  pc->mutable_system()->set_value(std::string(c.system));
+        if (!c.code.empty())    pc->mutable_code()->set_value(std::string(c.code));
+        if (!c.display.empty()) pc->mutable_display()->set_value(std::string(c.display));
+      }
+    }
+
+    // A CodeableConcept rendered as JSON (the form a choice variant arrives in).
+    inline void google_set_codeable_concept_json(const Json &v,
+                                                 google::fhir::r4::core::CodeableConcept *pb)
+    {
+      if (pb == nullptr || !v.is_object()) return;
+      if (v.contains("text") && v.at("text").is_string())
+        pb->mutable_text()->set_value(v.at("text").get<std::string>());
+      const auto codings = v.find("coding");
+      if (codings == v.end() || !codings->is_array()) return;
+      for (const auto &c : *codings)
+      {
+        if (!c.is_object()) continue;
+        auto *pc = pb->add_coding();
+        if (c.contains("system"))  pc->mutable_system()->set_value(c.at("system").get<std::string>());
+        if (c.contains("code"))    pc->mutable_code()->set_value(c.at("code").get<std::string>());
+        if (c.contains("display")) pc->mutable_display()->set_value(c.at("display").get<std::string>());
+      }
+    }
+
+    // Quantity.value is a Decimal, and Decimal.value is a STRING -- FHIR keeps
+    // the decimal's original lexical form (trailing zeros are significant), so
+    // the proto does too. Writing it through a double would silently renormalise
+    // "4.0" to "4".
+    inline void google_set_quantity_json(const Json &v,
+                                         google::fhir::r4::core::Quantity *pb)
+    {
+      if (pb == nullptr || !v.is_object()) return;
+      if (v.contains("value"))
+      {
+        const Json &n = v.at("value");
+        pb->mutable_value()->set_value(n.is_string() ? n.get<std::string>() : n.dump());
+      }
+      if (v.contains("unit"))   pb->mutable_unit()->set_value(v.at("unit").get<std::string>());
+      if (v.contains("system")) pb->mutable_system()->set_value(v.at("system").get<std::string>());
+      if (v.contains("code"))   pb->mutable_code()->set_value(v.at("code").get<std::string>());
+    }
+
+    // One choice value -> a `<Field>X` oneof. Routed through choice_block_json,
+    // the SAME renderer the JSON and v2 arms use, so the three cannot disagree
+    // about what the value is -- only about how their format stores it.
+    template <typename PbValueX>
+    inline void google_set_choice(const ChoiceEntry &choice, PbValueX *pb)
+    {
+      if (pb == nullptr || choice.is_empty()) return;
+
+      // EACH `<Field>X` CARRIES ITS OWN ONEOF, and they are not the same set:
+      // Observation.value[x] admits Quantity/CodeableConcept/string/boolean/...,
+      // while Observation.effective[x] admits only dateTime/Period/Timing/instant.
+      // Probing with `requires` lets one function serve both and makes an arm
+      // that writes a variant its element does not allow a COMPILE error rather
+      // than a silently dropped field.
+      if (choice.block)
+      {
+        auto rendered = choice_block_json(*choice.block);
+        if (!rendered) return;
+        const Json &v = rendered->value;
+        if constexpr (requires { pb->mutable_quantity(); })
+          if (rendered->suffix == "Quantity") { google_set_quantity_json(v, pb->mutable_quantity()); return; }
+        if constexpr (requires { pb->mutable_codeable_concept(); })
+          if (rendered->suffix == "CodeableConcept") { google_set_codeable_concept_json(v, pb->mutable_codeable_concept()); return; }
+        // Range/Ratio/SampledData/Period are in the oneof but absent from this
+        // corpus; unset is visible as a missing leaf, never as a wrong one.
+        return;
+      }
+
+      if (FF_IsDateTimeTag(choice.tag))
+      {
+        const std::string text = choice.to_string();
+        if (!text.empty()) google_set_datetime(text, pb->mutable_date_time());
+        return;
+      }
+      if constexpr (requires { pb->mutable_boolean(); })
+        if (std::holds_alternative<bool>(choice.value))
+        { pb->mutable_boolean()->set_value(std::get<bool>(choice.value)); return; }
+      if constexpr (requires { pb->mutable_integer(); })
+        if (std::holds_alternative<int32_t>(choice.value))
+        { pb->mutable_integer()->set_value(std::get<int32_t>(choice.value)); return; }
+      if constexpr (requires { pb->mutable_quantity(); })
+        if (std::holds_alternative<double>(choice.value))
+        { pb->mutable_quantity()->mutable_value()->set_value(Json(std::get<double>(choice.value)).dump()); return; }
+      if constexpr (requires { pb->mutable_string_value(); })
+        if (std::holds_alternative<std::string_view>(choice.value))
+          pb->mutable_string_value()->set_value(std::string(std::get<std::string_view>(choice.value)));
+    }
+
+    inline void google_set_address_json(const Json &v, google::fhir::r4::core::Address *pb)
+    {
+      if (pb == nullptr || !v.is_object()) return;
+      if (v.contains("text"))       pb->mutable_text()->set_value(v.at("text").get<std::string>());
+      if (v.contains("city"))       pb->mutable_city()->set_value(v.at("city").get<std::string>());
+      if (v.contains("state"))      pb->mutable_state()->set_value(v.at("state").get<std::string>());
+      if (v.contains("postalCode")) pb->mutable_postal_code()->set_value(v.at("postalCode").get<std::string>());
+      if (v.contains("country"))    pb->mutable_country()->set_value(v.at("country").get<std::string>());
+      const auto lines = v.find("line");
+      if (lines != v.end() && lines->is_array())
+        for (const auto &l : *lines)
+          if (l.is_string()) pb->add_line()->set_value(l.get<std::string>());
+    }
+
+    inline void google_set_coding_json(const Json &v, google::fhir::r4::core::Coding *pb)
+    {
+      if (pb == nullptr || !v.is_object()) return;
+      if (v.contains("system"))  pb->mutable_system()->set_value(v.at("system").get<std::string>());
+      if (v.contains("code"))    pb->mutable_code()->set_value(v.at("code").get<std::string>());
+      if (v.contains("display")) pb->mutable_display()->set_value(v.at("display").get<std::string>());
+    }
+
+    inline void google_build_extension(const ExtensionData &src, google::fhir::r4::core::Extension *pb_ext)
+    {
+      if (!src.id.empty())
+        pb_ext->mutable_id()->set_value(std::string(src.id));
+
+      // The REAL url, resolved from FastFHIR's trie -- src.url is an INDEX into
+      // the URL directory, not a URL. Fabricating one meant the arm never
+      // encoded the document's actual extension URLs. An unresolvable index
+      // writes nothing rather than a plausible-looking lie.
+      if (src.url != FF_NULL_UINT32)
+        if (const std::string __u = resolve_extension_url(src.url); !__u.empty())
+          pb_ext->mutable_url()->set_value(__u);
+
+      if (!src.value.is_empty())
+      {
+        auto *pb_val = pb_ext->mutable_value();
+
+        // A BLOCK-TYPED VARIANT. Extension.value[x] admits the whole datatype
+        // list, and only the four inline scalars below were ever handled, so
+        // every Coding-, Address- and CodeableConcept-valued extension in the
+        // corpus was silently dropped -- including the US Core race and
+        // ethnicity extensions, whose payload is entirely nested Codings.
+        // Routed through choice_block_json, the same renderer the other arms
+        // use, so the arms cannot disagree about what the value is.
+        if (src.value.block)
+        {
+          if (auto rendered = choice_block_json(*src.value.block))
+          {
+            const Json &v = rendered->value;
+            const std::string &t = rendered->suffix;
+            if (t == "Coding")               google_set_coding_json(v, pb_val->mutable_coding());
+            else if (t == "Address")         google_set_address_json(v, pb_val->mutable_address());
+            else if (t == "CodeableConcept") google_set_codeable_concept_json(v, pb_val->mutable_codeable_concept());
+            else if (t == "Quantity")        google_set_quantity_json(v, pb_val->mutable_quantity());
+          }
+        }
+        else if (FF_IsDateTimeTag(src.value.tag))
+        {
+          const std::string text = src.value.to_string();
+          if (!text.empty()) google_set_datetime(text, pb_val->mutable_date_time());
+        }
+        else if (std::holds_alternative<std::string_view>(src.value.value))
+          pb_val->mutable_string_value()->set_value(std::string(std::get<std::string_view>(src.value.value)));
+        else if (std::holds_alternative<bool>(src.value.value))
+          pb_val->mutable_boolean()->set_value(std::get<bool>(src.value.value));
+        else if (std::holds_alternative<int32_t>(src.value.value))
+          pb_val->mutable_integer()->set_value(std::get<int32_t>(src.value.value));
+        else if (std::holds_alternative<double>(src.value.value))
+          // FHIR decimal keeps its lexical form, so the proto stores a string.
+          pb_val->mutable_decimal()->set_value(std::to_string(std::get<double>(src.value.value)));
+      }
+
+      for (const auto &nested : src.extension)
+        google_build_extension(nested, pb_ext->add_extension());
+    }
+
+#endif  // ARM_GOOGLE_FHIR
+
+
+
     inline void write_choice(Json &out, const std::string_view base, const ChoiceEntry &choice)
     {
       if (choice.is_empty())
@@ -423,6 +790,23 @@ inline namespace BENCH_ARM_NS {
       }
 
       const auto key = std::string(base) + choice_suffix(choice.tag);
+
+      // A DATE/TIME VARIANT IS TEXT, NOT ITS PACKED INTEGER. The four
+      // date/time tags store a packed civil value in an int64 slot, so the
+      // alternative below is genuinely an integer and would be dumped as
+      // 1619552459707908099 where every other reader of this document -- the
+      // neutral POCO walker, the JSON arm's own effective[x] path, FastFHIR's
+      // print_json -- renders "2021-04-27T18:20:59+00:00". to_string() is
+      // FastFHIR's own renderer, the same call poco_leaves.hpp makes, so the
+      // projection cannot drift from it.
+      if (FF_IsDateTimeTag(choice.tag))
+      {
+        const std::string text = choice.to_string();
+        if (!text.empty())
+          out[key] = text;
+        return;
+      }
+
       if (std::holds_alternative<bool>(choice.value))
       {
         out[key] = std::get<bool>(choice.value);
@@ -1209,24 +1593,50 @@ inline namespace BENCH_ARM_NS {
       }
     }
 
+    // "observation.effective[x]" -> "effective". The ZFX name carries the
+    // FHIR element path, so the base of a choice is recoverable from it and
+    // does not need passing separately.
+    inline std::string hl7_choice_base(const char *field_name)
+    {
+      std::string fn(field_name);
+      if (fn.size() > 3 && fn.compare(fn.size() - 3, 3, "[x]") == 0)
+        fn.resize(fn.size() - 3);
+      const auto dot = fn.rfind('.');
+      return dot == std::string::npos ? fn : fn.substr(dot + 1);
+    }
+
     template <typename Target>
     inline void hl7_mark_if_choice(Target &dst, const char *field_name, const ChoiceEntry &choice)
     {
       if (choice.is_empty())
         return;
+      // The payload is keyed by the FULL FHIR element name -- `effectiveDateTime`,
+      // not `valueDateTime`. It used to be built by hl7_json_value(ChoiceEntry),
+      // which hardcodes the base "value" for EVERY choice field, so every
+      // effective[x] on the wire announced itself as a value[x] and no decoder
+      // recombining the ZFX name with the payload key could agree with the
+      // other arms' canonical paths.
+      //
       // A block-typed variant is in `.block`; the ZFX passthrough carries JSON,
       // so it renders through the same dispatch the JSON arm uses -- the arms
       // must agree on what the value IS, or the comparison measures the
       // encoders' disagreement rather than the formats'.
+      const std::string base = hl7_choice_base(field_name);
+      Json out = Json::object();
       if (choice.block)
       {
-        if (auto rendered = choice_block_json(*choice.block))
-        {
-          hl7_append_json_field(dst, field_name, std::move(rendered->value));
-        }
-        return;
+        auto rendered = choice_block_json(*choice.block);
+        if (!rendered)
+          return;
+        // Wrapped, like the scalar arm below. Emitting the bare value here and
+        // an object there made the payload shape depend on the variant.
+        out[base + rendered->suffix] = std::move(rendered->value);
       }
-      hl7_append_json_field(dst, field_name, hl7_json_value(choice));
+      else
+      {
+        write_choice(out, base, choice);
+      }
+      hl7_append_json_field(dst, field_name, out);
     }
 #endif
 
@@ -1648,10 +2058,16 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_meta(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.meta && !src.meta->lastupdated.empty())
-      {
-        dst.patient.mutable_meta()->mutable_last_updated()->set_value_us(0); // Placeholder
-      }
+      if (!src.meta) return;
+      auto *pb = dst.patient.mutable_meta();
+      if (!src.meta->lastupdated.empty())   // see assign_observation_meta
+        google_set_instant(src.meta->lastupdated, pb->mutable_last_updated());
+      if (!src.meta->versionid.empty())
+        pb->mutable_version_id()->set_value(std::string(src.meta->versionid));
+      if (!src.meta->source.empty())
+        pb->mutable_source()->set_value(std::string(src.meta->source));
+      for (const auto &prof : src.meta->profile)
+        if (!prof.empty()) pb->add_profile()->set_value(std::string(prof));
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_meta(const PatientData &src, HL7v2Sink &dst)
@@ -1675,10 +2091,19 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_text(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.text && !src.text->div.empty())
-      {
-        dst.patient.mutable_text()->mutable_div()->set_value(std::string(src.text->div));
-      }
+      if (!src.text) return;
+      auto *pb = dst.patient.mutable_text();
+      if (!src.text->div.empty()) pb->mutable_div()->set_value(std::string(src.text->div));
+      if (src.text->status != FF_NarrativeStatus::FF_UNSET)
+        pb->mutable_status()->set_value(
+            static_cast<::google::fhir::r4::core::NarrativeStatusCode_Value>(
+                src.text->status == FF_NarrativeStatus::Generated
+                    ? ::google::fhir::r4::core::NarrativeStatusCode::GENERATED
+                : src.text->status == FF_NarrativeStatus::Extensions
+                    ? ::google::fhir::r4::core::NarrativeStatusCode::EXTENSIONS
+                : src.text->status == FF_NarrativeStatus::Additional
+                    ? ::google::fhir::r4::core::NarrativeStatusCode::ADDITIONAL
+                    : ::google::fhir::r4::core::NarrativeStatusCode::EMPTY));
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_text(const PatientData &src, HL7v2Sink &dst)
@@ -1767,15 +2192,15 @@ inline namespace BENCH_ARM_NS {
     {
       for (const auto &identifier : src.identifier)
       {
+        auto *pb_id = dst.patient.add_identifier();
         if (!identifier.value.empty())
-        {
-          auto *pb_id = dst.patient.add_identifier();
           pb_id->mutable_value()->set_value(std::string(identifier.value));
-          if (!identifier.system.empty())
-          {
-            pb_id->mutable_system()->set_value(std::string(identifier.system));
-          }
-        }
+        if (!identifier.system.empty())
+          pb_id->mutable_system()->set_value(std::string(identifier.system));
+        // Identifier.type was never written -- 80 leaves, and it is the field
+        // that says WHICH identifier this is (MRN, SSN, driver's licence).
+        if (identifier.type)
+          google_set_codeable_concept(*identifier.type, pb_id->mutable_type());
       }
     }
 #elif defined(ARM_HL7V2)
@@ -1803,27 +2228,21 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_name(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.name.empty())
+      // EVERY name, not just src.name.front(). HumanName is repeated in FHIR and
+      // in the proto; taking the first dropped maiden names outright.
+      for (const auto &name : src.name)
       {
-        return;
-      }
-
-      const auto &name = src.name.front();
-      auto *out_name = dst.patient.add_name();
-      if (!name.text.empty())
-      {
-        out_name->mutable_text()->set_value(std::string(name.text));
-      }
-      if (!name.family.empty())
-      {
-        out_name->mutable_family()->set_value(std::string(name.family));
-      }
-      for (const auto &given : name.given)
-      {
-        if (!given.empty())
-        {
-          out_name->add_given()->set_value(std::string(given));
-        }
+        auto *out_name = dst.patient.add_name();
+        if (!name.text.empty())   out_name->mutable_text()->set_value(std::string(name.text));
+        if (!name.family.empty()) out_name->mutable_family()->set_value(std::string(name.family));
+        for (const auto &given : name.given)
+          if (!given.empty()) out_name->add_given()->set_value(std::string(given));
+        for (const auto &prefix : name.prefix)
+          if (!prefix.empty()) out_name->add_prefix()->set_value(std::string(prefix));
+        for (const auto &suffix : name.suffix)
+          if (!suffix.empty()) out_name->add_suffix()->set_value(std::string(suffix));
+        if (name.use != FF_NameUse::FF_UNSET)
+          out_name->mutable_use()->set_value(google_map_name_use(name.use));
       }
     }
 #elif defined(ARM_HL7V2)
@@ -1867,15 +2286,13 @@ inline namespace BENCH_ARM_NS {
     {
       for (const auto &telecom : src.telecom)
       {
+        auto *pb_contact = dst.patient.add_telecom();
         if (!telecom.value.empty())
-        {
-          auto *pb_contact = dst.patient.add_telecom();
           pb_contact->mutable_value()->set_value(std::string(telecom.value));
-          if (static_cast<int>(telecom.system) != 0)
-          {
-            pb_contact->mutable_system()->set_value(static_cast<::google::fhir::r4::core::ContactPointSystemCode_Value>(static_cast<int>(telecom.system)));
-          }
-        }
+        if (telecom.system != FF_ContactPointSystem::FF_UNSET)
+          pb_contact->mutable_system()->set_value(google_map_contact_system(telecom.system));
+        if (telecom.use != FF_ContactPointUse::FF_UNSET)
+          pb_contact->mutable_use()->set_value(google_map_contact_use(telecom.use));
       }
     }
 #elif defined(ARM_HL7V2)
@@ -1920,26 +2337,17 @@ inline namespace BENCH_ARM_NS {
       for (const auto &address : src.address)
       {
         auto *pb_addr = dst.patient.add_address();
-        if (!address.text.empty())
-        {
-          pb_addr->mutable_text()->set_value(std::string(address.text));
-        }
-        if (!address.city.empty())
-        {
-          pb_addr->mutable_city()->set_value(std::string(address.city));
-        }
-        if (!address.state.empty())
-        {
-          pb_addr->mutable_state()->set_value(std::string(address.state));
-        }
-        if (!address.postalcode.empty())
-        {
-          pb_addr->mutable_postal_code()->set_value(std::string(address.postalcode));
-        }
-        if (!address.country.empty())
-        {
-          pb_addr->mutable_country()->set_value(std::string(address.country));
-        }
+        if (!address.text.empty())       pb_addr->mutable_text()->set_value(std::string(address.text));
+        if (!address.city.empty())       pb_addr->mutable_city()->set_value(std::string(address.city));
+        if (!address.state.empty())      pb_addr->mutable_state()->set_value(std::string(address.state));
+        if (!address.postalcode.empty()) pb_addr->mutable_postal_code()->set_value(std::string(address.postalcode));
+        if (!address.country.empty())    pb_addr->mutable_country()->set_value(std::string(address.country));
+        // Address.line is repeated and was never written -- the street itself.
+        for (const auto &line : address.line)
+          if (!line.empty()) pb_addr->add_line()->set_value(std::string(line));
+        // Synthea hangs the geolocation extension off the address.
+        for (const auto &ext : address.extension)
+          google_build_extension(ext, pb_addr->add_extension());
       }
     }
 #elif defined(ARM_HL7V2)
@@ -1980,10 +2388,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_patient_marital_status(const PatientData &src, GooglePatientTarget &dst)
     {
-      if (src.maritalstatus && !src.maritalstatus->text.empty())
-      {
-        dst.patient.mutable_marital_status()->mutable_text()->set_value(std::string(src.maritalstatus->text));
-      }
+      if (src.maritalstatus)
+        google_set_codeable_concept(*src.maritalstatus, dst.patient.mutable_marital_status());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_patient_marital_status(const PatientData &src, HL7v2Sink &dst)
@@ -2314,10 +2720,23 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_meta(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      if (src.meta && !src.meta->lastupdated.empty())
-      {
-        dst.observation.mutable_meta()->mutable_last_updated()->set_value_us(0); // Placeholder
-      }
+      if (!src.meta) return;
+      auto *pb = dst.observation.mutable_meta();
+      // GUARD BEFORE mutable_. Protobuf's mutable_<field>() CREATES the
+      // submessage and marks it present, and it is evaluated as the ARGUMENT --
+      // before the callee can decide there is nothing to write. An unguarded
+      // call therefore stamps a default-constructed message onto the wire:
+      // last_updated with value_us 0, which prints as "1970-01-01T00:00:00+00:00"
+      // and put 1,348 epoch timestamps into a document that has none.
+      if (!src.meta->lastupdated.empty())
+        google_set_instant(src.meta->lastupdated, pb->mutable_last_updated());
+      if (!src.meta->versionid.empty())
+        pb->mutable_version_id()->set_value(std::string(src.meta->versionid));
+      if (!src.meta->source.empty())
+        pb->mutable_source()->set_value(std::string(src.meta->source));
+      // Meta.profile is repeated Canonical and was never written: 2,241 leaves.
+      for (const auto &prof : src.meta->profile)
+        if (!prof.empty()) pb->add_profile()->set_value(std::string(prof));
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_meta(const ObservationData &src, HL7v2Sink &dst)
@@ -2606,34 +3025,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_category(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      for (const auto &category : src.category)
-      {
-        if (!category.text.empty() || !category.coding.empty())
-        {
-          auto *pb_cat = dst.observation.add_category();
-          if (!category.text.empty())
-          {
-            pb_cat->mutable_text()->set_value(std::string(category.text));
-          }
-          if (!category.coding.empty())
-          {
-            const auto &c = category.coding.front();
-            auto *pb_coding = pb_cat->add_coding();
-            if (!c.code.empty())
-            {
-              pb_coding->mutable_code()->set_value(std::string(c.code));
-            }
-            if (!c.display.empty())
-            {
-              pb_coding->mutable_display()->set_value(std::string(c.display));
-            }
-            if (!c.system.empty())
-            {
-              pb_coding->mutable_system()->set_value(std::string(c.system));
-            }
-          }
-        }
-      }
+      for (const auto &cat : src.category)
+        google_set_codeable_concept(cat, dst.observation.add_category());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_category(const ObservationData &src, HL7v2Sink &dst)
@@ -2657,27 +3050,7 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_code(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      if (src.code)
-      {
-        if (!src.code->text.empty())
-        {
-          dst.observation.mutable_code()->mutable_text()->set_value(std::string(src.code->text));
-        }
-        if (!src.code->coding.empty())
-        {
-          const auto &first_coding = src.code->coding.front();
-          if (!first_coding.code.empty())
-          {
-            auto *coding = dst.observation.mutable_code()->add_coding();
-            coding->mutable_system()->set_value(std::string(first_coding.system));
-            coding->mutable_code()->set_value(std::string(first_coding.code));
-            if (!first_coding.display.empty())
-            {
-              coding->mutable_display()->set_value(std::string(first_coding.display));
-            }
-          }
-        }
-      }
+      if (src.code) google_set_codeable_concept(*src.code, dst.observation.mutable_code());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_code(const ObservationData &src, HL7v2Sink &dst)
@@ -2718,11 +3091,7 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_subject(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      const auto patient_id = google_subject_patient_id(src.subject.get(), dst.fallback_patient_id);
-      if (!patient_id.empty())
-      {
-        dst.observation.mutable_subject()->mutable_patient_id()->set_value(patient_id);
-      }
+      if (src.subject) google_set_reference(*src.subject, dst.observation.mutable_subject());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_subject(const ObservationData &src, HL7v2Sink &dst)
@@ -2782,10 +3151,7 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_encounter(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      if (src.encounter && !src.encounter->reference.empty())
-      {
-        dst.observation.mutable_encounter()->mutable_encounter_id()->set_value(std::string(src.encounter->reference));
-      }
+      if (src.encounter) google_set_reference(*src.encounter, dst.observation.mutable_encounter());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_encounter(const ObservationData &src, HL7v2Sink &dst)
@@ -2841,24 +3207,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_effective(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      if (src.effective.is_empty())
-        return;
-
-      auto *pb_effective = dst.observation.mutable_effective();
-
-      // Handle DateTime variant
-      if (std::holds_alternative<std::string_view>(src.effective.value))
-      {
-        if (const auto time_us = google_birthdate_to_us(std::get<std::string_view>(src.effective.value)))
-        {
-          auto *dt = pb_effective->mutable_date_time();
-          dt->set_value_us(*time_us);
-          dt->set_timezone("UTC");
-          dt->set_precision(google::fhir::r4::core::DateTime_Precision_SECOND);
-        }
-      }
-      // Handle Period variant (simplified: just store start date)
-      // Note: Full Period handling would require dedicated Period message
+      if (!src.effective.is_empty())
+        google_set_choice(src.effective, dst.observation.mutable_effective());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_effective(const ObservationData &src, HL7v2Sink &dst)
@@ -2878,8 +3228,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_issued(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      if (!src.issued.empty())
-        dst.observation.mutable_issued()->set_value_us(0); // Placeholder
+      if (!src.issued.empty())   // mutable_ creates; see assign_observation_meta
+        google_set_instant(src.issued, dst.observation.mutable_issued());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_issued(const ObservationData &src, HL7v2Sink &dst)
@@ -2906,14 +3256,8 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_performer(const ObservationData &src, GoogleObservationTarget &dst)
     {
-      for (const auto &performer : src.performer)
-      {
-        if (!performer.reference.empty())
-        {
-          auto *pb_perf = dst.observation.add_performer();
-          pb_perf->mutable_practitioner_id()->set_value(std::string(performer.reference));
-        }
-      }
+      for (const auto &perf : src.performer)
+        google_set_reference(perf, dst.observation.add_performer());
     }
 #elif defined(ARM_HL7V2)
     inline void assign_observation_performer(const ObservationData &src, HL7v2Sink &dst)
@@ -2932,87 +3276,183 @@ inline namespace BENCH_ARM_NS {
 #elif defined(ARM_GOOGLE_FHIR)
     inline void assign_observation_value(const ObservationData &src, GoogleObservationTarget &dst)
     {
+      if (!src.value.is_empty())
+        google_set_choice(src.value, dst.observation.mutable_value());
+    }
+#elif defined(ARM_HL7V2)
+    // The OBX-5/OBX-6 text for one rendered value. An OBX field is
+    // pipe-delimited and unescaped by ObxSegment::serialize, so anything
+    // heading into it is escaped here.
+    inline std::string hl7_obx_text(const Json &v)
+    {
+      if (v.is_string())  return hl7v2::hl7_escape(v.get<std::string>());
+      if (v.is_boolean()) return v.get<bool>() ? "Y" : "N";
+      if (v.is_null())    return std::string();
+      if (v.is_number())  return hl7v2::hl7_escape(v.dump());
+      return hl7v2::hl7_escape(v.dump());
+    }
+
+    // Join HL7 components with '^', dropping trailing empties -- v2 does not
+    // write separators past the last populated component.
+    inline std::string hl7_components(std::initializer_list<std::string> parts)
+    {
+      std::vector<std::string> v(parts);
+      while (!v.empty() && v.back().empty())
+        v.pop_back();
+      std::string out;
+      for (std::size_t i = 0; i < v.size(); ++i)
+      {
+        if (i) out += '^';
+        out += v[i];
+      }
+      return out;
+    }
+
+    // CodeableConcept -> CWE, component order from the CDC converter's
+    // datatypes/codeableConcept/CWE.yml: CWE-1 identifier (coding.code),
+    // CWE-2 text (coding.display), CWE-3 name of coding system (coding.system).
+    inline std::string hl7_cwe(const Json &concept_json)
+    {
+      if (!concept_json.is_object()) return hl7_obx_text(concept_json);
+      const auto codings = concept_json.find("coding");
+      if (codings != concept_json.end() && codings->is_array() && !codings->empty())
+      {
+        const Json &c = codings->front();
+        return hl7_components({hl7_obx_text(c.value("code", Json())),
+                               hl7_obx_text(c.value("display", Json())),
+                               hl7_obx_text(c.value("system", Json()))});
+      }
+      // No coding: CWE-9 is the original text, but a bare text in CWE-1 is
+      // what a receiver without the coding can actually read.
+      return hl7_obx_text(concept_json.value("text", Json()));
+    }
+
+    // Observation.value[x] -> OBX-2/OBX-5/OBX-6.
+    //
+    // FOLLOWS bench/vendor/cdc_hl7_mapping/OBXValue.yml (CDC PRIME
+    // prime-fhir-converter, Apache-2.0) -- the ReportStream converter, and the
+    // only published FHIR->v2 mapping for this element. Rule by rule:
+    //
+    //   obx-value-nm   OBX-5 = %resource.value.value   (Quantity's number)
+    //   obx-value-cwe  OBX-5 = CWE.yml over value      (CodeableConcept)
+    //   obx-value-st   OBX-5 = %resource.value         (string)
+    //   obx-value-dtm  OBX-5 = the v2 date/time
+    //   obx-value-nr   OBX-5 = NR.yml                  (Range)
+    //   obx-value-sn   OBX-5 = SN.yml                  (Ratio/structured numeric)
+    //   obx-value-dr   OBX-5 = DR.yml                  (Period)
+    //
+    // WITH ONE DEVIATION, and it is forced. Every condition in that file picks
+    // the datatype by reading an extension carrying the ORIGINAL v2 type:
+    //
+    //   condition: '%context.extension(%`rsext-obx-observation`)
+    //                .extension.where(url = "OBX.2").value = "NM"'
+    //
+    // The converter exists for data that came from v2 and is going back to it.
+    // This corpus is Synthea -- native FHIR, never v2, no such extension, so
+    // every upstream condition would be false and OBX-5 would come out empty.
+    // OBX-2 is therefore INFERRED from the FHIR datatype, using the very
+    // correspondence those rules encode. See the vendored README.
+    //
+    // OBX-6 is NOT mapped upstream at all. A Quantity's unit has nowhere else
+    // to go, and OBX-6 is a CWE of units, so it is written as code^^system --
+    // marked below as this arm's own, not CDC's.
+    //
+    // WHAT THIS REPLACED: a stub that wrote OBX-5 = "1" and OBX-6 = "{qty}"
+    // for every observation in the corpus, whatever it measured, deriving them
+    // from the variant tag alone and never reading `src.value`. The round-trip
+    // scored those constants as surviving leaves, so the arm was credited for
+    // data it had discarded, and the corruption sweep measured how durably a
+    // literal survives bit flips. A visible gap is recoverable; fabricated
+    // agreement is not, because nothing downstream can tell it from real data.
+    inline void assign_observation_value(const ObservationData &src, HL7v2Sink &dst)
+    {
       if (src.value.is_empty())
         return;
 
-      auto *pb_value = dst.observation.mutable_value();
-
-      switch (src.value.tag)
+      if (src.value.block)
       {
-      case RECOVER_FF_STRING:
-        if (std::holds_alternative<std::string_view>(src.value.value))
+        if (auto rendered = choice_block_json(*src.value.block))
         {
-          pb_value->mutable_string_value()->set_value(
-              std::string(std::get<std::string_view>(src.value.value)));
+          const Json &v = rendered->value;
+          const std::string &type = rendered->suffix;  // the FHIR datatype name
+
+          if (type == "Quantity")
+          {
+            dst.current_obx.value_type = "NM";                        // obx-value-nm
+            dst.current_obx.value = hl7_obx_text(v.value("value", Json()));
+            // OBX-6, this arm's own: CWE of units, UCUM code plus system.
+            dst.current_obx.units = hl7_components({
+                hl7_obx_text(v.contains("code") ? v.at("code") : v.value("unit", Json())),
+                std::string(),
+                hl7_obx_text(v.value("system", Json()))});
+          }
+          else if (type == "CodeableConcept")
+          {
+            dst.current_obx.value_type = "CWE";                       // obx-value-cwe
+            dst.current_obx.value = hl7_cwe(v);
+            dst.current_obx.units.clear();
+          }
+          else if (type == "Range")
+          {
+            dst.current_obx.value_type = "NR";                        // obx-value-nr
+            dst.current_obx.value = hl7_components({
+                hl7_obx_text(v.contains("low")  ? v.at("low").value("value", Json())  : Json()),
+                hl7_obx_text(v.contains("high") ? v.at("high").value("value", Json()) : Json())});
+            dst.current_obx.units.clear();
+          }
+          else if (type == "Ratio")
+          {
+            dst.current_obx.value_type = "SN";                        // obx-value-sn
+            dst.current_obx.value = hl7_components({
+                std::string(),
+                hl7_obx_text(v.contains("numerator")   ? v.at("numerator").value("value", Json())   : Json()),
+                "/",
+                hl7_obx_text(v.contains("denominator") ? v.at("denominator").value("value", Json()) : Json())});
+            dst.current_obx.units.clear();
+          }
+          else if (type == "Period")
+          {
+            dst.current_obx.value_type = "DR";                        // obx-value-dr
+            dst.current_obx.value = hl7_components({hl7_obx_text(v.value("start", Json())),
+                                                    hl7_obx_text(v.value("end", Json()))});
+            dst.current_obx.units.clear();
+          }
+          else
+          {
+            // Every other block datatype: no OBX-5 scalar exists for it, so the
+            // segment says ST and the passthrough carries the structure.
+            dst.current_obx.value_type = "ST";
+            dst.current_obx.value = hl7_obx_text(v.value("text", Json()));
+            dst.current_obx.units.clear();
+          }
+
+          // OBX-5/-6 cannot hold a Quantity's system or a CodeableConcept's
+          // second coding, so the whole value also rides the ZFX passthrough,
+          // through the SAME helper every other choice field on this arm uses.
+          hl7_mark_if_choice(dst, "observation.value[x]", src.value);
+          return;
         }
-        break;
-
-      case RECOVER_FF_INT32:
-        if (std::holds_alternative<int32_t>(src.value.value))
-        {
-          pb_value->mutable_integer()->set_value(std::get<int32_t>(src.value.value));
-        }
-        break;
-
-      case RECOVER_FF_FLOAT64:
-        if (std::holds_alternative<double>(src.value.value))
-        {
-          // Store double as Quantity with numeric value
-          auto *qty = pb_value->mutable_quantity();
-          std::string decimal_str = std::to_string(std::get<double>(src.value.value));
-          qty->mutable_value()->set_value(decimal_str);
-        }
-        break;
-
-      case RECOVER_FF_QUANTITY:
-        // If you are rebuilding a Quantity from a choice variant, you'll need the sub-fields.
-        // If your benchmark just mocks it:
-        pb_value->mutable_quantity()->mutable_value()->set_value("1.0");
-        break;
-
-      case RECOVER_FF_BOOL:
-        if (std::holds_alternative<bool>(src.value.value))
-        {
-          pb_value->mutable_boolean()->set_value(std::get<bool>(src.value.value));
-        }
-        break;
-
-      // Add cases for CodeableConcept, Period, Range, etc.
-      default:
-        break;
       }
-    }
-#elif defined(ARM_HL7V2)
-    inline void assign_observation_value(const ObservationData &src, HL7v2Sink &dst)
-    {
-      switch (src.value.tag)
+
+      // An inline scalar variant: one value, and it fits OBX-5 exactly.
+      // obx-value-st / -nm / -dtm, by the FHIR primitive's type.
+      const Json wrapped = hl7_json_value(src.value);   // {"value<Suffix>": x}
+      Json scalar = Json();
+      std::string suffix;
+      if (wrapped.is_object() && wrapped.size() == 1)
       {
-      case RECOVER_FF_QUANTITY:
-        dst.current_obx.value_type = "NM";
-        dst.current_obx.value = "1";
-        dst.current_obx.units = "{qty}";
-        break;
-      case RECOVER_FF_CODEABLECONCEPT:
-        dst.current_obx.value_type = "CE";
-        dst.current_obx.value = "1";
-        dst.current_obx.units.clear();
-        break;
-      case RECOVER_FF_CODE:
-        dst.current_obx.value_type = "CWE";
-        dst.current_obx.value = "1";
-        dst.current_obx.units.clear();
-        break;
-      case RECOVER_FF_STRING:
-        dst.current_obx.value_type = "ST";
-        dst.current_obx.value = "1";
-        dst.current_obx.units.clear();
-        break;
-      default:
-        dst.current_obx.value_type = "ST";
-        dst.current_obx.value = src.value.is_empty() ? "" : "1";
-        dst.current_obx.units.clear();
-        break;
+        suffix = wrapped.begin().key();
+        scalar = wrapped.begin().value();
       }
+      const bool is_datetime = suffix.find("DateTime") != std::string::npos ||
+                               suffix.find("Instant") != std::string::npos ||
+                               suffix.find("Date") != std::string::npos;
+      dst.current_obx.value_type = scalar.is_number() ? "NM"
+                                  : is_datetime       ? "DTM"
+                                                      : "ST";
+      dst.current_obx.value = hl7_obx_text(scalar);
+      dst.current_obx.units.clear();
+      hl7_mark_if_choice(dst, "observation.value[x]", src.value);
     }
 #endif
 
@@ -3371,23 +3811,13 @@ inline namespace BENCH_ARM_NS {
       for (const auto &component : src.component)
       {
         auto *pb_comp = dst.observation.add_component();
-        if (component.code && !component.code->text.empty())
-        {
-          pb_comp->mutable_code()->mutable_text()->set_value(std::string(component.code->text));
-        }
-        if (component.code && !component.code->coding.empty())
-        {
-          const auto &coding = component.code->coding.front();
-          auto *pb_coding = pb_comp->mutable_code()->add_coding();
-          if (!coding.code.empty())
-          {
-            pb_coding->mutable_code()->set_value(std::string(coding.code));
-          }
-          if (!coding.display.empty())
-          {
-            pb_coding->mutable_display()->set_value(std::string(coding.display));
-          }
-        }
+        if (component.code)
+          google_set_codeable_concept(*component.code, pb_comp->mutable_code());
+        // The component's VALUE was never written at all -- 3,600+ leaves.
+        if (!component.value.is_empty())
+          google_set_choice(component.value, pb_comp->mutable_value());
+        for (const auto &interp : component.interpretation)
+          google_set_codeable_concept(interp, pb_comp->add_interpretation());
       }
     }
 #elif defined(ARM_HL7V2)

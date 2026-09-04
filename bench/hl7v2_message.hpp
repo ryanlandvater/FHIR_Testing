@@ -39,6 +39,29 @@ static inline std::string hl7_escape(std::string_view src) {
   return out;
 }
 
+// The inverse of hl7_escape. Note it is not total: hl7_escape maps both \r and
+// \n to a space, and that is not recoverable -- which is correct for HL7v2,
+// where a bare carriage return IS the segment terminator and cannot appear in
+// a field.
+static inline std::string unescape_text(std::string_view src) {
+  std::string out;
+  out.reserve(src.size());
+  for (std::size_t i = 0; i < src.size(); ++i) {
+    if (src[i] == '\\' && i + 2 < src.size() && src[i + 2] == '\\') {
+      switch (src[i + 1]) {
+        case 'F': out.push_back('|'); i += 2; continue;
+        case 'S': out.push_back('^'); i += 2; continue;
+        case 'T': out.push_back('&'); i += 2; continue;
+        case 'R': out.push_back('~'); i += 2; continue;
+        case 'E': out.push_back('\\'); i += 2; continue;
+        default: break;
+      }
+    }
+    out.push_back(src[i]);
+  }
+  return out;
+}
+
 struct MshSegment {
   std::string serialize(std::string_view message_control_id) const {
     // MSH fields: 1='|' and 2='^~\&' are encoded after segment name.
