@@ -986,16 +986,21 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
     // emits one carrier per datum, OBX for a Quantity and ZFX for the datatypes
     // OBX cannot hold. Decoding both would double-count, and would let a blasted
     // OBX resurrect from the passthrough.
-    struct PendingObx { long set_id; std::string v5, v6; };
+    struct PendingObx { std::string sub_id, v5, v6; };
     std::vector<PendingObx> pending_obx;
-    std::vector<std::string> msg_obs;              // observation keys, in order
     std::set<std::string> obs_with_zfx_value;      // had a ZFX value[x]
 
     const auto flush_obx = [&]() {
         for (const auto& o : pending_obx) {
-            if (o.set_id < 1 || static_cast<std::size_t>(o.set_id) > msg_obs.size()) continue;
-            const std::string& key = msg_obs[static_cast<std::size_t>(o.set_id) - 1];
-            if (key.empty() || obs_with_zfx_value.count(key)) continue;
+            // OBX-4 NAMES THE OWNER. Matching by OBX-1's ordinal position
+            // instead made attribution global: a single damaged observation id
+            // shifted every later row onto the wrong resource, so values did
+            // not go missing, they MOVED -- 571 changed leaves at 64 flips,
+            // units migrating between results. Keyed by id, a damaged row
+            // costs that row.
+            if (o.sub_id.empty()) continue;
+            const std::string key = resource_key("Observation", o.sub_id);
+            if (obs_with_zfx_value.count(key)) continue;
             if (o.v5.empty()) continue;
             // OBX-5 is the number; OBX-6 is a CWE of units, code^unit^system.
             try {
@@ -1011,7 +1016,6 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
                 fp.add_leaf(key + ".valueQuantity.system", safe_dump(nlohmann::json(comp[2])));
         }
         pending_obx.clear();
-        msg_obs.clear();
         obs_with_zfx_value.clear();
     };
 
@@ -1056,11 +1060,9 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
                 }
             }
         } else if (name == "OBX") {
-            if (f.size() > 6) {
-                long sid = 0;
-                try { sid = std::stol(f[1]); } catch (const std::exception&) { sid = 0; }
-                pending_obx.push_back({sid, hl7_unescape(f[5]), hl7_unescape(f[6])});
-            }
+            if (f.size() > 6)
+                pending_obx.push_back({hl7_unescape(f[4]), hl7_unescape(f[5]),
+                                       hl7_unescape(f[6])});
             (void)0;
             // Buffered above, resolved by flush_obx() at the end of the
             // message. An earlier version emitted `<Observation>.value`, which
@@ -1093,7 +1095,6 @@ inline StreamFingerprint scan_v2_canonical(const std::vector<uint8_t>& wire) {
                 // Starts a new scope AND is a leaf in its own right.
                 if (field.rfind("observation.", 0) == 0 && payload_json.is_string()) {
                     obs_key = resource_key("Observation", payload_json.get<std::string>());
-                    msg_obs.push_back(obs_key);   // OBX-1 indexes into this
                 }
                 key = (field.rfind("observation.", 0) == 0) ? obs_key : patient_key;
                 if (!key.empty())
@@ -1575,6 +1576,28 @@ inline StreamFingerprint recover_stream(const std::vector<uint8_t>& wire) {
     return scan_v2_canonical(wire);
 }
 #endif
+
+
+#if defined(ARM_FASTFHIR) || defined(ARM_JSON) || defined(ARM_HL7V2) || defined(ARM_GOOGLE_FHIR)
+// Leaves present in what an arm actually WROTE, measured from the output
+// rather than from the fixture, so an arm that dropped fields reports fewer.
+// Always called after the stage's clock has stopped.
+//
+// All four arms had this same four-line block inline (build a byte vector,
+// call calc_stream_hash, take units.size()). It lives here because
+// calc_stream_hash is the per-arm overload selected by BENCH_ARM_NS, so a
+// helper in harness.hpp could not see it.
+inline std::int64_t count_output_elements(const char* data, std::size_t size) {
+    const std::vector<uint8_t> bytes(data, data + size);
+    return static_cast<std::int64_t>(calc_stream_hash(bytes).units.size());
+}
+
+inline std::int64_t count_output_elements(std::string_view wire) {
+    return count_output_elements(wire.data(), wire.size());
+}
+#endif  // an arm is selected -- calc_stream_hash only exists under one of the
+        // four ARM_* macros, and bench_test_5.cpp compiles this header with
+        // none of them set (BENCH_ARM_NS == arm_none) to get the shared types.
 
 }  // inline namespace BENCH_ARM_NS
 

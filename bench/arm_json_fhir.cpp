@@ -78,12 +78,15 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
 
   std::vector<nlohmann::json> patient_entries(fixture.bundle.size());
 #if defined(__APPLE__)
-  JsonPatientBuildContext patient_context{&fixture.bundle, &patient_entries};
-  dispatch_apply_f(patient_entries.size(),
-                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-                   &patient_context,
-                   build_patient_entry);
-#else
+  if (!bench::g_serial_build) {
+    JsonPatientBuildContext patient_context{&fixture.bundle, &patient_entries};
+    dispatch_apply_f(patient_entries.size(),
+                     dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                     &patient_context,
+                     build_patient_entry);
+  } else
+#endif
+  {
   std::transform(
       fixture.bundle.begin(),
       fixture.bundle.end(),
@@ -94,7 +97,7 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
         assign::assign_patient(item.patient, patient_json);
         return nlohmann::json{{"resource", std::move(patient_json)}};
       });
-#endif
+  }
 
   std::size_t total_observations = 0;
   for (const auto& item : fixture.bundle) {
@@ -111,12 +114,15 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
 
   std::vector<nlohmann::json> observation_entries(observation_ptrs.size());
 #if defined(__APPLE__)
-  JsonObservationBuildContext observation_context{&observation_ptrs, &observation_entries};
-  dispatch_apply_f(observation_entries.size(),
-                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-                   &observation_context,
-                   build_observation_entry);
-#else
+  if (!bench::g_serial_build) {
+    JsonObservationBuildContext observation_context{&observation_ptrs, &observation_entries};
+    dispatch_apply_f(observation_entries.size(),
+                     dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                     &observation_context,
+                     build_observation_entry);
+  } else
+#endif
+  {
   std::transform(
       observation_ptrs.begin(),
       observation_ptrs.end(),
@@ -127,7 +133,7 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
         assign::assign_observation(*entry.observation, observation_json);
         return nlohmann::json{{"resource", std::move(observation_json)}};
       });
-#endif
+  }
 
   nlohmann::json::array_t all_entries;
   all_entries.reserve(patient_entries.size() + observation_entries.size());
@@ -148,17 +154,17 @@ ArmRunResult run_json_bundle(const BundleBenchFixture& fixture) {
 
   const std::string payload = bundle.dump();
   const std::int64_t test1_ns = test1_timer.stop_ns();
+  const std::int64_t test1_cpu_ns = test1_timer.cpu_ns();
   // Wire size is read AFTER the clock stops (notes.md section 6).
   const std::int64_t test1_bytes = static_cast<std::int64_t>(payload.size());
   out.metrics.push_back({"json_fhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
-                         /*ops=*/0, /*entries=*/test1_entries});
+                         /*ops=*/0, /*entries=*/test1_entries,
+                         /*cpu_ns=*/test1_cpu_ns});
   out.test1_payload = payload;  // --dump-artifacts input
   // Leaves actually present in what this arm just wrote -- measured from the
   // OUTPUT, not from the fixture, so an arm that dropped fields reports fewer.
-  if (bench::g_count_elements) {
-    const std::vector<uint8_t> __w(payload.begin(), payload.end());
-    out.test1_elements = static_cast<std::int64_t>(bench::test_5::BENCH_ARM_NS::calc_stream_hash(__w).units.size());
-  }
+  if (bench::g_count_elements)
+    out.test1_elements = bench::test_5::BENCH_ARM_NS::count_output_elements(payload);
 
   // A counter nobody reads is the silence it was added to prevent. ChoiceBlock
   // has 29 alternatives and this build has converters for 15; the rest are

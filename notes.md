@@ -7,8 +7,8 @@ This is the field report for the redesign. It is not a changelog — it is the s
 of things that were **wrong in ways nothing caught**, and what that implies for
 building a benchmark that is both equitable and performance-intensive.
 
-Read [TASKS.md](TASKS.md) for the task list, [handoff.md](handoff.md) for what
-to build next. Read this for the reasoning behind both.
+Read [TASKS.md](TASKS.md) for the task list and for what to build next. Read
+this for the reasoning behind it.
 
 ---
 

@@ -5,7 +5,6 @@ kind, and none of them carry open work items:
 
 | Document | Kind | Role |
 |---|---|---|
-| [`handoff.md`](handoff.md) | **claim register + instrument design** | maps every § Why FastFHIR? claim to the instrument that validates it |
 | [`notes.md`](notes.md) | **field report** | what was silently broken during the port, and how it was found |
 | [`TODO.md`](TODO.md) | **design spec for Instrument G** | the four resilience tests, in detail — not a second task list |
 | `../FastFHIR/TASKS.md` | upstream backlog | our API asks live there as **CAPI-1…CAPI-6** |
@@ -531,7 +530,7 @@ cross-arm parity mismatch, not a crash.
 
 ## ▶ IN — instruments for the claim register
 
-Designs live in [`handoff.md`](handoff.md); this is the tracker. Each instrument
+Designs lived in `handoff.md`, removed 2026-09-08; this is the tracker. Each instrument
 is a separate narrow binary, **not** another stage on the 4×4 grid. The existing
 four-arm × four-stage harness stays as a smoke and regression rig.
 

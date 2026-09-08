@@ -14,7 +14,7 @@
 > tests that exercise FastFHIR's structural integrity guarantees under
 > real-world corruption scenarios. Each maps to a failure mode observed in
 > production FHIR/HL7v2 pipelines, and to a claim in
-> [`handoff.md`](handoff.md)'s register.
+> [`TASKS.md`](TASKS.md)'s Decisions.
 
 **Claims this instrument validates:**
 
@@ -38,10 +38,20 @@ carries those qualifiers forward verbatim. Do not let a headline round them off.
 > / `finalize` are private (use `make_stream()` / `seal_stream()` in
 > `bench/harness.hpp`), and `SourceType::FHIR_JSON` is now `FF_SOURCE_FHIR_JSON`.
 
-> **Test 4 has a second blocker.** The parallel path in
-> [`bench/arm_fastfhir.cpp:124-172`](bench/arm_fastfhir.cpp:124) is commented
-> out, so nothing in this repo currently exercises concurrent generation.
-> Re-enable it before implementing Test 4 (TASKS.md **IN-H**).
+> **Test 4's second blocker is cleared (2026-09-05).** The parallel path in
+> `bench/arm_fastfhir.cpp` was commented out, so the FastFHIR arm built its
+> Bundle on one thread while the json_fhir arm ran `dispatch_apply_f` across
+> every core. Test 1 therefore compared 1 thread against 18 and reported a flat
+> ~5.4x ratio at every corpus size — the constant ratio was the artifact.
+>
+> The arm now builds through a `FIFO::Queue` worker pool in the
+> `FF_Ingestor.cpp` step-5 shape: pre-allocate the Bundle's inline entry array,
+> latch one consumer per worker before the first push, and have each worker
+> append its resource and amend its own parent slot. `--serial-build` forces
+> every arm to one thread for the encoder-only comparison; `hl7v2` and
+> `google_fhir` are serial in both configurations, which the run banner states.
+> Every Test 1 row now carries `cpu_ns`, so `cpu_ns / duration_ns` is the
+> average number of cores the stage occupied.
 
 **Data source:** All tests use Synthea FHIR JSON files from `datasets/synthea/`
 (119 real patient bundles with Observations, Conditions, Encounters, Procedures).
@@ -195,13 +205,20 @@ file produce interleaved/corrupted output. FHIR JSON bundling has no atomic
 multi-writer guarantee — two threads appending to the same NDJSON stream
 produce broken records.
 
-**FFHR-unique mechanism:** `Memory::claim_space()` uses a single `fetch_add`
-on the atomic write-head — no mutex, no condition variable, no
-producer/consumer queue. Each thread gets an exclusive byte range by
-construction. `Builder::finalize()` sets `m_finalizing`, spins on
-`m_active_mutators` until zero, then seals. The protocol guarantees that
-concurrent appends cannot interleave and a finalizer cannot seal over
-in-progress writes.
+**FFHR-unique mechanism:** `Memory::claim_space()` takes no mutex, no
+condition variable, and no producer/consumer queue. Each thread gets an
+exclusive byte range by construction. `Builder::finalize()` sets
+`m_finalizing`, spins on `m_active_mutators` until zero, then seals. The
+protocol guarantees that concurrent appends cannot interleave and a finalizer
+cannot seal over in-progress writes.
+
+⚠ **This said "a single `fetch_add`" until 2026-09-05 and the code has never
+done that** — `src/FF_Memory.cpp:386` is a `compare_exchange_strong` retry
+loop, because bit 63 of the same word is `STREAM_LOCK_BIT`. FastFHIR
+architecture.md carried the same wrong claim in four places. The correction
+matters here because this test's assertion is about **correctness under
+contention**, which holds either way; the throughput claim is a separate thing
+and it does not currently hold (see the scaling note below).
 
 **Implementation:**
 1. Ingest N Synthea patients (N=16, spread across hardware concurrency)
@@ -222,6 +239,20 @@ in-progress writes.
 contention. The final stream is structurally identical to a serial build —
 every entry is present, no data is torn, and all integrity guarantees
 (VALIDATION word, RECOVERY_TAG, checksum) hold.
+
+**Assert correctness here, not speed.** Measured 2026-09-05 on the Test 1 path
+(64 MB corpus, 4,203 resources, `-c opt`, M5 Pro / 18 logical cores): the
+concurrent build is correct — `validate_FFHR_stream` code 0, zero null
+entries, element parity exact against all three other arms — and it peaks at
+the **performance-core count** (1.93× on 6 P-cores of an M5 Pro), regressing
+past it as work spills onto E-cores. Both the engine and the arm now default to
+`FastFHIR::performance_core_count()`. Attribution and the reproducing env vars
+are in README.md ("Concurrent build scaling"); the engine-side work is
+FastFHIR
+TASKS.md CONC-0 (done; CONC-1/CONC-2 were rejected on measurement) and
+architecture.md §7.5. A Test 4 that reports a speedup number must say which
+worker count it used, or it is reporting a scheduling artifact as a concurrency
+result.
 
 ---
 

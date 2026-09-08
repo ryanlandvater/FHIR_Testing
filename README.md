@@ -21,7 +21,7 @@ Four-arm comparative benchmark measuring serialization, materialization, query, 
 > publish.** Getting it running surfaced five defects that had been live and
 > silent, including one that made every earlier crash undebuggable. Read
 > **[notes.md](notes.md)** before quoting any figure, and
-> **[handoff.md](handoff.md)** before designing new tests — the current 4×4 grid
+> **[TASKS.md](TASKS.md)** before designing new tests — the current 4×4 grid
 > does not map onto the claims in FastFHIR's § Why FastFHIR?:
 >
 > | | |
@@ -140,7 +140,6 @@ and bytes) next to any query result. Tracked in
 | Document | What it is | Freshness |
 |---|---|---|
 | [`TASKS.md`](TASKS.md) | **The only backlog**, and the standing **Decisions** (D1 macro parity · D2 `value[x]` tiering · D3 serialization model). **Start here.** | ✅ current (2026-08-26) |
-| [`handoff.md`](handoff.md) | **Claim register + instrument design.** Maps every § Why FastFHIR? claim to an instrument, an artifact, and a citable number. Amendments marked ✎. | ✅ current (2026-08-26) |
 | [`notes.md`](notes.md) | **Field report from the 2026-08-25 port.** What was silently broken and how it was found. Read before designing new tests. | ✅ current (2026-08-26) |
 | [`BENCHMARK_IMPLEMENTATION_CHECKLIST.md`](BENCHMARK_IMPLEMENTATION_CHECKLIST.md) | Per-component design vs. build status | ✅ current |
 | [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) | Curated architecture + parity overview | ✅ current |
@@ -271,6 +270,101 @@ This pattern guarantees:
 
 ---
 
+## Concurrent build scaling
+
+**Thread count is part of parity, and it was not being controlled (fixed 2026-09-05).**
+`bench/arm_fastfhir.cpp` had its parallel path commented out while
+`bench/arm_json_fhir.cpp` ran `dispatch_apply_f` across every core. Test 1 was
+therefore measuring **1 thread against 18**, which is why FastFHIR's advantage
+was a flat ~5.4× at every corpus size — a constant ratio was the signature of
+the defect, not a property of the formats.
+
+### What each arm does now
+
+| arm | Test 1 construction |
+|---|---|
+| `fastfhir` | `FIFO::Queue` worker pool — pre-allocated `Bundle.entry` array, one consumer per worker latched before the first push, each worker appends its resource and amends its own parent slot (the `FF_Ingestor.cpp` step-5 shape) |
+| `json_fhir` | `dispatch_apply_f` per resource, independent `nlohmann` DOMs merged serially, then one `dump()` |
+| `hl7v2` | serial |
+| `google_fhir` | serial |
+
+`--serial-build` forces all four to one thread. The run banner states which
+configuration produced a given run, and **every Test 1 row carries `cpu_ns`**
+(`getrusage`, all threads), so `cpu_ns / duration_ns` is the average number of
+cores the stage occupied. A wall-clock table alone cannot separate "this arm is
+efficient" from "this arm used more cores".
+
+### Measured result — 18 cores buy 1.8×
+
+64 MB corpus, 4,203 resources, `-c opt`, Apple M5 Pro (6 P + 12 E). Correctness
+is not in question: `validate_FFHR_stream` returns 0, zero null entries, and
+element parity is exact against the other three arms at every corpus size.
+
+| configuration, 18 workers | wall | user CPU | sys CPU |
+|---|---|---|---|
+| one resource per queue task | 17.0 ms | 13.7 ms | 190 ms |
+| 64 resources per task | 4.80 ms | 6.3 ms | 56 ms |
+| 64 per task, arena pre-faulted | 1.40 ms | 14.7 ms | 2.5 ms |
+| *single thread, for reference* | *2.29 ms* | *2.29 ms* | *0.01 ms* |
+
+Three independent costs, each isolated by measurement:
+
+1. **Park/wake rate.** `append_obj` on one Synthea resource is **0.545 µs** —
+   the same order as a queue push and as one `__ulock_wait`/`__ulock_wake`
+   pair — so one producer cannot feed 18 consumers and they park continuously.
+   `notify_one` for `notify_all` changed nothing, so it is the rate, not a
+   thundering herd. A queue task is therefore a **range** of resources;
+   break-even is ~9 µs of work per task. Batching never splits a resource
+   across threads — each is still built start-to-finish by one worker.
+2. **First-touch page faults.** `Memory::create` reserves without committing,
+   so N threads fault one fresh anonymous mapping and serialize on the kernel
+   VM lock.
+3. **Efficiency-core spillover — the one that mattered.** The pool defaulted to
+   `hardware_concurrency()`. On one fixed bundle, arena pre-faulted:
+
+   | workers | wall | user CPU | speedup |
+   |---|---|---|---|
+   | 1 | 2.12 ms | 2.07 ms | 1.00× |
+   | **6** | **1.10 ms** | 4.41 ms | **1.93×** |
+   | 8 | 1.53 ms | 7.91 ms | 1.39× |
+   | 18 | 1.79 ms | 8.05 ms | 1.19× |
+
+   The optimum is exactly the 6 P-cores. Both the engine and this arm now
+   default to `FastFHIR::performance_core_count()`, and Test 1's paired ratio
+   against the JSON arm moved **3.24× → 6.11×** on that change alone.
+
+**The arena write head is not a bottleneck, and an earlier version of this
+section said it was.** Instrumented 2026-09-05: a 64 MB build issues **4,498**
+`claim_space` calls (`append<T>` claims a whole subtree per call), with 0 CAS
+retries at one thread and 318 at eighteen. The residual after the core-count fix
+is 1.93× on 6 cores, and it is memory-bound work rather than lock contention.
+FastFHIR `TASKS.md` CONC-0 (done) and CONC-1/CONC-2 (rejected on this evidence);
+`architecture.md` §7.5.
+
+### Reproducing
+
+Diagnostics are opt-in environment variables on `bench_harness`:
+
+| variable | effect |
+|---|---|
+| `BENCH_FF_THREADS=N` | worker count (default `FastFHIR::performance_core_count()`) |
+| `BENCH_FF_BATCH=N` | resources per queue task (default 64) |
+| `BENCH_FF_MODE=split` | bypass the queue entirely — pre-assigned contiguous ranges, no parking. Isolates queue cost from arena cost |
+| `BENCH_FF_PREFAULT=1` | touch every arena page before the clock starts. **Diagnostic only** — a run with this set is not comparable to one without |
+| `BENCH_FF_TRACE=1` | print per-run `wall / user / sys / cores` for Test 1 |
+
+```bash
+BENCH_FF_TRACE=1 BENCH_FF_THREADS=8 BENCH_FF_BATCH=256 \
+  ./bazel-bin/bench/bench_harness --runs 5 --bundle-targets-mb 64 --bundle-max-mb 64
+```
+
+⚠ The default configuration still puts first-touch page faults inside the
+measured window — that is a real `Memory::create` cost, and moving it outside
+would measure something the consumer does not get. The worker count is the
+engine's own default, not a benchmark-tuned one.
+
+---
+
 ## Setup
 
 ```bash
@@ -319,6 +413,57 @@ repo's `--compilation_mode=opt`.
 
 ---
 
+## Run everything
+
+`scripts/run_benchmark.sh` is the whole pipeline in the one order that works.
+The stages below can each be run by hand — this script is what puts them in
+sequence, checks that each one actually produced its output, and stops at the
+first failure.
+
+```bash
+scripts/run_benchmark.sh            # full run
+scripts/run_benchmark.sh --quick    # reduced ladder, no recovery sweep
+scripts/run_benchmark.sh --help     # all flags
+```
+
+| # | Stage | Command it runs | Produces |
+|---|---|---|---|
+| 1 | build | `bazel build -c opt //bench:bench_harness //bench:bench_test_5` | `bazel-bin/bench/*` |
+| 2 | timing | `bench_harness --results-dir DIR` | `DIR/metrics.csv`, `DIR/provenance.json`, `DIR/run.log` |
+| 3 | artifacts | `bench_harness --dump-artifacts artifacts` | `artifacts/{fastfhir,json,hl7v2,google_fhir}.bin` |
+| 4 | sweep | `scripts/recovery_sweep.py` | `results/recovery_curve.csv`, `results/_crashes.csv` |
+| 5 | figures | `scripts/plot_benchmarks.py` | `DIR/figures/fig*.png`, `summary.md`, `summary.csv` |
+
+The order is not a preference. Stage 3 is an **exclusive mode of the same
+binary** — `main.cpp` returns before the timing study — so it is a second
+invocation rather than a flag on the first. Stage 4 reads what stage 3 wrote,
+and stage 5 reads all of it. Stage 5 must run from the repo root:
+`fig8_recovery` opens `results/recovery_curve.csv` by a hard-coded relative
+path.
+
+Every stage is individually skippable (`--skip-build`, `--skip-timing`,
+`--skip-artifacts`, `--skip-sweep`, `--skip-figures`) so one piece can be
+re-run against existing output. `--with-tests` adds the two Bazel gates from
+[Validate](#validate) after the build. Results land in `results/dev` unless
+`--results-dir` says otherwise.
+
+**`--quick` skips the recovery sweep rather than shortening it.** The sweep's
+damage ladder and trial count are module constants in
+`scripts/recovery_sweep.py`, and the published number is a median over those
+trials — a shortened sweep is a *different* curve, not a cheaper one, and it
+would be indistinguishable from the real thing downstream. Pass `--sweep` to
+run the full sweep under `--quick` anyway. For the same reason the script
+refuses to start a sweep while another one is running: `recovery_sweep.py`
+holds `results/recovery_curve.csv` open for hours, so a second sweep truncates
+the first one's output from under it.
+
+A quick run prints `QUICK RUN — do not cite` on the way out, and stage 2's
+provenance gate still applies: incomplete provenance exits 3 **before** the
+first measurement, so a run that cannot become an artifact fails in seconds
+rather than at the end of the ladder.
+
+---
+
 ## Build
 
 ```bash
@@ -353,6 +498,7 @@ With PostgreSQL persistence:
 | `--bundle-max-mb-explicit` | off | If set, only the specified max is used (no sweep) |
 | `--bundle-targets-mb a,b,c` | 1,2,4,8,16,32,64,256 | Explicit sweep ladder |
 | `--seed N` | 20260825 | Bundle composition seed. `--seed 0` is random — and a random workload cannot become an artifact |
+| `--serial-build` | off | Force every arm's Test 1 construction loop onto one thread. Default is parallel for `fastfhir` and `json_fhir` (`hl7v2` and `google_fhir` are serial either way). Run the ladder both ways to separate per-resource encoding cost from core scaling — see [Concurrent build scaling](#concurrent-build-scaling). `RESULTS_DIR` must differ between the two |
 | `--results-dir DIR` | none | Write the release artifact (`provenance.json`) here. **Refuses, and exits 3, if the provenance record is incomplete** |
 | `--profile STR` | auto | Pin `FASTFHIR_PRODUCTION_PROFILE`. Needed when several CMake caches disagree — see below |
 | `--db connstr` | none | PostgreSQL connection string (`//bench:bench_harness_pg` only) |
@@ -360,14 +506,14 @@ With PostgreSQL persistence:
 ### Output Columns (stdout CSV)
 
 ```text
-arm,test,duration_ns,bytes_in,bytes_out,target_mb,patients_in_bundle
+arm,test,duration_ns,ops,bytes_in,bytes_out,target_mb,patients_in_bundle,cpu_ns
 ```
 
 Example:
 ```
-fastfhir,test_1_serialize,76834,0,232534,1,1
-fastfhir,test_2_random_access,105541,2000,0,72000,1,1
-json_fhir,test_1_serialize,402500,0,105637,1,1
+fastfhir,test_1_serialize,254875,0,0,612312,1,1,254102
+json_fhir,test_1_serialize,1171709,0,0,356672,1,1,4106233
+hl7v2,test_1_serialize,3301792,0,0,407628,1,1,3298144
 ```
 
 `bytes_in` / `bytes_out` are **wire bytes** crossing that stage's boundary, and
@@ -390,6 +536,14 @@ stage reporting 0 bytes out is a defect and the harness warns about it.
 
 `target_mb` is the *requested* corpus size and is not a measurement — do not use
 it as a denominator.
+
+`cpu_ns` is user+sys CPU summed over **every thread in the process** across the
+same window `duration_ns` measures, so `cpu_ns / duration_ns` is the average
+number of cores the stage occupied: 1.0 is serial, 18.0 saturates an 18-core
+host. It exists because a wall-clock number alone cannot distinguish an arm that
+is efficient from one that used more cores, and two of the four arms build in
+parallel — see [Concurrent build scaling](#concurrent-build-scaling). **-1**
+means the stage did not sample it (only `test_1_serialize` does today).
 
 ### Result provenance and the artifact gate
 
@@ -460,6 +614,21 @@ on these paths and will fail the gate for the wrong reason. See
 ---
 
 ## Analyze
+
+`scripts/plot_benchmarks.py` renders the figures — stage 5 of
+[Run everything](#run-everything) calls it, and it is also usable on its own
+against any captured CSV:
+
+```bash
+scripts/plot_benchmarks.py --csv results/dev/metrics.csv \
+                           --results-dir results/dev \
+                           --out results/dev/figures
+```
+
+It needs `--results-dir` to find `provenance.json`: a run whose provenance gate
+failed is stamped **PROVISIONAL — NOT AN ARTIFACT** on every figure. `fig8_recovery`
+additionally reads `results/recovery_curve.csv` (stage 4) and is skipped if that
+file is absent, so run it from the repo root.
 
 Use `notebooks/benchmark_results.ipynb` to read from PostgreSQL.
 

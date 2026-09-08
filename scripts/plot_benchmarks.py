@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -171,6 +172,37 @@ def ordered_arms(df: pd.DataFrame) -> list[str]:
     return known + unknown
 
 
+# Columns that identify one paired observation: every arm ran against the SAME
+# bundle within a replicate, so these keys line the arms up row for row.
+# `replicate`/`run` were added 2026-09-05; older CSVs lack them and fall back to
+# target_mb alone, which pairs at coarser granularity but never mispairs.
+PAIR_KEYS = ["target_mb", "replicate", "run"]
+
+
+def pair_keys(df: pd.DataFrame) -> list[str]:
+    return [k for k in PAIR_KEYS if k in df.columns]
+
+
+def paired_ratios(df: pd.DataFrame, value: str = "duration_ns") -> pd.DataFrame | None:
+    """Per-observation ratio of each arm to fastfhir, paired within a replicate.
+
+    Returns one row per (test, arm, pairing key) with column `ratio`. Callers
+    aggregate with median + IQR; forming the ratio BEFORE aggregating is the
+    whole point, because the workload differs far more between replicates than
+    the engines differ within one.
+    """
+    if "fastfhir" not in set(df["arm"]):
+        return None
+    keys = pair_keys(df)
+    base = (df[df["arm"] == "fastfhir"]
+            .groupby(["test"] + keys, as_index=False)[value].median()
+            .rename(columns={value: "_base"}))
+    merged = df.merge(base, on=["test"] + keys, how="inner")
+    merged = merged[merged["_base"] > 0]
+    merged["ratio"] = merged[value] / merged["_base"]
+    return merged[["test", "arm"] + keys + ["ratio"]]
+
+
 # ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
@@ -263,25 +295,82 @@ def load_provenance(results_dir: Optional[Path], csv_path: Optional[Path]) -> Pr
 # ---------------------------------------------------------------------------
 
 
+CAVEAT_FONT_PT = 6.4
+
+
+def _wrap_to_figure(fig, text: str, font_pt: float, indent: str = "") -> list[str]:
+    """Break `text` into lines that fit the figure's own width.
+
+    Every caveat used to be one unwrapped `fig.text` call. Matplotlib does not
+    clip those, and `savefig(bbox_inches="tight")` grows the canvas to include
+    every artist -- so a 300-character caveat stretched fig8 to 2101 px while
+    the axes occupied the left 60%, and the text ran off past the plot. Wrapping
+    to the figure width is what keeps the image the size of the chart.
+    """
+    # 0.55 em is a good mean advance for this sans stack at small sizes; the
+    # margin subtracted below is the 0.008 left inset plus the same on the right.
+    char_w_in = 0.55 * font_pt / 72.0
+    usable_in = fig.get_size_inches()[0] - 0.30
+    width = max(60, int(usable_in / char_w_in))
+    return textwrap.wrap(text, width=width, subsequent_indent=indent) or [""]
+
+
 def finish(fig, prov: Provenance, caveats: list[str]) -> None:
     """Stamp every figure with provenance, caveats, and artifact status.
 
     This is the enforcement point. A chart leaves here able to say what built it
     and what is wrong with it, or it does not leave.
     """
-    lines = [c for c in caveats if c]
-    y = 0.055 + 0.016 * len(lines)
-    fig.text(0.008, y, prov.stamp(), fontsize=6.4, color=TEXT_MUTED, ha="left", va="bottom")
-    for i, caveat in enumerate(lines):
-        fig.text(
-            0.008,
-            y - 0.017 * (i + 1),
-            f"!  {caveat}",
-            fontsize=6.4,
-            color=WARN,
-            ha="left",
-            va="bottom",
-        )
+    fig_h_in = fig.get_size_inches()[1]
+    line_h = (CAVEAT_FONT_PT * 1.45) / (fig_h_in * 72.0)  # figure fraction
+
+    lines: list[str] = []
+    for caveat in caveats:
+        if caveat:
+            lines.extend(_wrap_to_figure(fig, f"!  {caveat}", CAVEAT_FONT_PT, indent="   "))
+
+    bottom_pad = 0.012
+    block_top = bottom_pad + line_h * (len(lines) + 1)  # + the provenance stamp
+
+    # Draw bottom-up so the block sits on the same baseline however many lines
+    # the wrap produced.
+    for i, line in enumerate(reversed(lines)):
+        fig.text(0.008, bottom_pad + line_h * i, line,
+                 fontsize=CAVEAT_FONT_PT, color=WARN, ha="left", va="bottom")
+    fig.text(0.008, bottom_pad + line_h * len(lines), prov.stamp(),
+             fontsize=CAVEAT_FONT_PT, color=TEXT_MUTED, ha="left", va="bottom")
+
+    # finish() owns the whole bottom region, stacked upward:
+    #     caveats -> provenance -> figure legend -> axes (+ its x label)
+    #
+    # Each layer is MEASURED and the next is placed above it. Assuming instead
+    # produced two collisions: callers size their tight_layout rect for one line
+    # per caveat (wrapping can triple that), the x-axis LABEL hangs below the
+    # axes box rather than inside it, and legend_for() anchors the legend at
+    # figure y=0.0 -- the same coordinate the caveat block occupies.
+    inv = fig.transFigure.inverted()
+
+    # 1. Legend sits directly above the text block.
+    for legend in fig.legends:
+        legend.set_bbox_to_anchor((0.5, block_top + 0.012), transform=fig.transFigure)
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    # 2. Floor for the axes: above the legend if there is one, else above text.
+    floor = block_top + 0.015
+    for legend in fig.legends:
+        floor = max(floor, legend.get_window_extent(renderer).transformed(inv).y1 + 0.015)
+
+    # 3. Lift the axes until nothing they own dips below the floor.
+    #    get_tightbbox includes tick labels and the axis label.
+    lowest = min(
+        (ax.get_tightbbox(renderer).transformed(inv).y0 for ax in fig.axes),
+        default=1.0,
+    )
+    gap = floor - lowest
+    if gap > 0:
+        fig.subplots_adjust(bottom=min(fig.subplotpars.bottom + gap, 0.6))
 
     if not prov.is_artifact:
         fig.text(
@@ -641,22 +730,33 @@ def fig_distribution(df: pd.DataFrame, prov: Provenance, out: Path, exts: list[s
 def fig_speedup(df: pd.DataFrame, prov: Provenance, out: Path, exts: list[str]) -> None:
     """How many times faster FastFHIR is than each alternative, per stage.
 
-    Ratios of medians. Values below 1.0 mean FastFHIR is SLOWER, and those bars
+    MEDIAN OF PAIRED RATIOS, not the ratio of medians. Every arm is handed the
+    identical bundle within a replicate, so the arms are paired and the ratio
+    can be formed per replicate before aggregating. The ratio of medians throws
+    that pairing away, and the workload varies far more than the engines do:
+    measured 2026-09-05, raw duration CV is 70-130% per arm across replicates
+    while the paired json/fastfhir ratio sits at 11.9%. Same headline numbers
+    (3.47x -> 3.51x at 64 MB), 6.6x less spread around them.
+
+    Values below 1.0 mean FastFHIR is SLOWER, and those bars
     are drawn and labelled like any other -- a speedup chart that only shows
     wins is advertising. Test 2 (random access) is FastFHIR's strongest stage;
     the one-time inversion vs simdjson belonged to the retired materialize walk
     (measured cause on record, TASKS.md PA-11 / D4).
     """
     df = with_compact_arm(df)
-    med = df.groupby(["test", "arm"])["duration_ns"].median().unstack()
-    if "fastfhir" not in med.columns:
+    ratios = paired_ratios(df)
+    if ratios is None:
         print("  skip fig6: no fastfhir rows")
         return
+    med = ratios.groupby(["test", "arm"])["ratio"].median().unstack()
+    lo = ratios.groupby(["test", "arm"])["ratio"].quantile(0.25).unstack()
+    hi = ratios.groupby(["test", "arm"])["ratio"].quantile(0.75).unstack()
     others = [a for a in ordered_arms(df) if a != "fastfhir" and a in med.columns]
     stages = [(k, t) for k, t in STAGES if k in med.index]
 
     fig, ax = plt.subplots(figsize=(10, 5.0))
-    fig.suptitle("FastFHIR speedup vs each alternative (median duration ratio)",
+    fig.suptitle("FastFHIR speedup vs each alternative (median of paired ratios, IQR)",
                  fontsize=12, y=0.985, x=0.008, ha="left", color=TEXT_PRIMARY)
 
     # Lollipops anchored at 1.0, not bars from the axis floor: on a log scale a
@@ -668,10 +768,15 @@ def fig_speedup(df: pd.DataFrame, prov: Provenance, out: Path, exts: list[str]) 
     xs = np.arange(len(stages))
     for ai, arm in enumerate(others):
         offset = (ai - (len(others) - 1) / 2) * width
-        vals = [med.loc[k, arm] / med.loc[k, "fastfhir"] for k, _ in stages]
-        for x, v in zip(xs + offset, vals):
+        vals = [med.loc[k, arm] for k, _ in stages]
+        iqr = [(lo.loc[k, arm], hi.loc[k, arm]) for k, _ in stages]
+        for x, v, (q1, q3) in zip(xs + offset, vals, iqr):
             ax.plot([x, x], [1.0, v], color=arm_color(arm), lw=2, solid_capstyle="round",
                     zorder=2)
+            # IQR of the per-replicate ratios. A speedup number without its
+            # spread cannot be told apart from one measured on a single sample.
+            ax.plot([x, x], [q1, q3], color=arm_color(arm), lw=5, alpha=0.30,
+                    solid_capstyle="butt", zorder=2)
             ax.plot([x], [v], marker="o", ms=7, color=arm_color(arm), mec=SURFACE, mew=1.6,
                     zorder=3)
             ax.annotate(f"{v:.2f}×", xy=(x, v), xytext=(0, 8 if v >= 1 else -13),
@@ -800,11 +905,16 @@ def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
         sub = rc[rc["format"] == fmt]
         if sub.empty:
             continue
+        # Median + IQR over REPLICATES -- the same statistic and the same word
+        # bench 1-4 uses (fig_speedup, bench/main.cpp). The band was min/max
+        # until 2026-09-05, which a single crashed replicate (scored 0%) drags
+        # to the axis floor and makes the band report the worst sample rather
+        # than the spread.
         g = sub.groupby("density_pct")["recovered_pct"]
         xs = g.median().index.to_numpy()
         med = g.median().to_numpy()
-        lo = g.min().to_numpy()
-        hi = g.max().to_numpy()
+        lo = g.quantile(0.25).to_numpy()
+        hi = g.quantile(0.75).to_numpy()
         ax.fill_between(xs, lo, hi, color=colors[fmt], alpha=0.14, lw=0)
         ax.plot(xs, med, color=colors[fmt], lw=2, marker="o",
                 ms=4, mec=SURFACE, mew=1.2, label=units[fmt])
@@ -815,6 +925,7 @@ def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
     ax.set_xscale("log")
     ax.set_xlabel("structural positions corrupted (%) — k bits over each format's own syntactic surface")
     ax.set_ylabel("recovered units with intact data (%) — correct / baseline")
+    # (band = IQR over replicates)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.legend(loc="lower left", ncol=1, frameon=False, labelcolor=TEXT_SECONDARY, fontsize=8)
@@ -832,8 +943,9 @@ def fig_recovery(prov: Provenance, out: Path, exts: list[str]) -> None:
         "every | ^ & ~ \\ byte; protobuf TLV record headers.",
         "Density axis: k flips is normalized per format (bits / structural positions).",
         "Units are the formats' own atoms: block refs (FastFHIR), entries (JSON), TLV records "
-        "(protobuf), segments (HL7v2) -- each content-hashed at that granularity. 20 trials per "
-        "point; band = min..max; k=0 not plotted.",
+        "(protobuf), segments (HL7v2) -- each content-hashed at that granularity. 20 replicates "
+        "per point; line = median, band = IQR; a replicate that crashed the driver scores 0%; "
+        "k=0 not plotted.",
     ])
     save(fig, out / "fig8_recovery", exts)
 

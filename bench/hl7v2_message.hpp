@@ -92,13 +92,24 @@ struct PidSegment {
 struct ObxSegment {
   int set_id = 1;
   std::string value_type = "ST";
-  std::string observation_id;
+  std::string observation_id;   // OBX-3: the LOINC code identifying the test
+  std::string sub_id;           // OBX-4: which Observation resource this row is
   std::string value;
   std::string units;
 
+  // OBX-4 (Observation Sub-ID) carries the FHIR Observation.id.
+  //
+  // It was empty, so a reader had to recover the row's owner from its ORDINAL
+  // position -- OBX-1 indexing into the observations in message order. That
+  // makes attribution global: one damaged observation id shifts every later
+  // OBX onto the wrong resource, and the values do not go missing, they move.
+  // Measured at 64 flips, that produced 571 changed leaves -- units migrating
+  // between results ("g/dL" -> "mmol/L", "%" -> "g/dL"), which is the worst
+  // failure mode a clinical format has. Naming the owner in the row makes the
+  // damage local: a corrupted OBX-4 loses that row and nothing else.
   std::string serialize() const {
     return std::string("OBX|") + std::to_string(set_id) + "|" + value_type + "|" +
-           observation_id + "||" + value + "|" + units;
+           observation_id + "|" + sub_id + "|" + value + "|" + units;
   }
 };
 

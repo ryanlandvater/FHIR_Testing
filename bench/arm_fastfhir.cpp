@@ -1,9 +1,16 @@
 #include "harness.hpp"
 
+
 #include <FF_Bundle.hpp>
+#include <FF_Concurrency.hpp>
 #include <FF_Compactor.hpp>
 
 #include <algorithm>
+#include "FF_Queue.hpp"
+#include <cstdlib>
+#include <atomic>
+#include <thread>
+#include <string_view>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <execution>
@@ -33,42 +40,112 @@ namespace bench
       return fixture.observation;
     }
 
-#if defined(__APPLE__)
-    struct EntryBuildContext
+    // Parallel Bundle construction, in the shape the engine actually uses
+    // (src/FF_Ingestor.cpp step 5): pre-allocate the Bundle's inline entry
+    // array, hand every worker a FIFO::Queue consumer, and have each worker
+    // append its resource and then amend the parent slot with the finished
+    // child's offset. No worker allocates the array and no two workers touch
+    // the same slot, so the only shared mutable state is the arena write head.
+    //
+    // The previous dispatch_apply form is gone. It measured the same thing but
+    // could not vary the worker count, which is the axis this arm exists to
+    // show.
+    enum class BuildPool : std::uint8_t
     {
-      FastFHIR::Builder *builder;
-      const std::vector<BundlePatient> *bundle;
-      std::vector<BundleentryData> *entries;
+      RUNNING,
+      COMPLETE,
+      FAULTED
     };
 
-    struct ObservationBuildContext
+    // Park/notify, copied from the ingestor's pool rather than spin-yielding:
+    // a spinning worker burns CPU that process_cpu_ns() then reports as work.
+    inline void park_for_task(std::atomic<BuildPool> &status, std::atomic<std::uint32_t> &waiters)
     {
-      FastFHIR::Builder *builder;
-      const std::vector<const ObservationData *> *observations;
-      std::vector<BundleentryData> *entries;
+      waiters.fetch_add(1, std::memory_order_release);
+      if (status.load(std::memory_order_acquire) == BuildPool::RUNNING)
+        status.wait(BuildPool::RUNNING);
+      waiters.fetch_sub(1, std::memory_order_release);
+    }
+
+    inline void notify_parked(std::atomic<BuildPool> &status, std::atomic<std::uint32_t> &waiters)
+    {
+      if (waiters.load(std::memory_order_acquire))
+        status.notify_all();
+    }
+
+    struct FfBuildItem
+    {
+      const PatientData *patient = nullptr;
+      const ObservationData *observation = nullptr;
     };
 
-    static inline void build_bundle_entry(void *raw_context, std::size_t idx)
+    // A task is a RANGE, not one resource.
+    //
+    // append_obj on one POCO costs about 1 us -- the same order as pushing a
+    // task and as one park/wake round trip. At one resource per task the pool
+    // therefore spends its time going to sleep and waking up: measured on the
+    // 64 MB corpus at 18 workers, 3.2 ms of USER work carried 180 ms of SYS
+    // time, and wall time was 4.4x WORSE than a single thread. notify_one in
+    // place of notify_all did not change it, so the cost is the park/wake rate
+    // itself rather than a thundering herd.
+    //
+    // The ingestor gets away with one entry per task because its task is a full
+    // simdjson parse plus store -- tens of microseconds -- which amortizes the
+    // same protocol. This arm's task is the store alone, so it batches.
+    struct FfBuildTask
     {
-      auto *context = static_cast<EntryBuildContext *>(raw_context);
-      const auto &item = (*context->bundle)[idx];
-      auto patient_handle = context->builder->append_obj(PatientData{});
-      // This item's interned URLs, for the extension converters (which every
-      // arm reaches -- v2's ZFX passthrough serializes JSON too).
-      const assign::detail::ScopedUrlTable urls(item.url_table);
-      assign::assign_patient(item.patient, patient_handle);
-      (*context->entries)[idx] = BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
+      std::uint32_t begin = 0;
+      std::uint32_t end = 0;
+    };
+
+    // Resources per queued task. BENCH_FF_BATCH sweeps it.
+    inline std::uint32_t ff_batch_size()
+    {
+      static const std::uint32_t n = []() -> std::uint32_t {
+        if (const char *env = std::getenv("BENCH_FF_BATCH"))
+        {
+          const long v = std::strtol(env, nullptr, 10);
+          if (v > 0) return static_cast<std::uint32_t>(v);
+        }
+        return 64;
+      }();
+      return n;
     }
 
-    static inline void build_observation_entry(void *raw_context, std::size_t idx)
+    using FfBuildQueue = FIFO::Queue<FfBuildTask, 256>;
+
+    // BENCH_FF_THREADS sweeps the worker count without a rebuild -- the whole
+    // point of the exercise is the curve across it. Unset means the engine's
+    // own default, FastFHIR::performance_core_count(), so the arm measures the
+    // configuration a consumer actually gets rather than a benchmark-only one.
+    inline unsigned int ff_worker_threads()
     {
-      auto *context = static_cast<ObservationBuildContext *>(raw_context);
-      const auto &observation = *(*context->observations)[idx];
-      auto observation_handle = context->builder->append_obj(ObservationData{});
-      assign::assign_observation(observation, observation_handle);
-      (*context->entries)[idx] = BundleentryData{.resource = static_cast<ResourceReference>(observation_handle)};
+      static const unsigned int n = []() -> unsigned int {
+        if (const char *env = std::getenv("BENCH_FF_THREADS"))
+        {
+          const long v = std::strtol(env, nullptr, 10);
+          if (v > 0) return static_cast<unsigned int>(v);
+        }
+        return FastFHIR::performance_core_count();
+      }();
+      return n;
     }
-#endif
+
+    // Append one resource and amend the parent entry slot with its offset.
+    // Shared by the serial and parallel paths so they write identical bytes.
+    inline void ff_build_one(FastFHIR::Builder &builder,
+                             FastFHIR::Reflective::ObjectHandle &entry_array,
+                             const FfBuildItem &item,
+                             std::uint32_t idx)
+    {
+      FastFHIR::Reflective::ObjectHandle child =
+          item.patient ? builder.append_obj(*item.patient)
+                       : builder.append_obj(*item.observation);
+      FastFHIR::Reflective::MutableEntry slot = entry_array[idx];
+      FastFHIR::Reflective::MutableEntry resource_slot =
+          slot[FastFHIR::Fields::BUNDLE_ENTRY::RESOURCE];
+      resource_slot = child;
+    }
 
   } // namespace
 
@@ -119,97 +196,174 @@ namespace bench
     const FastFHIR::FF_Stream stream = make_stream(payload_memory, FHIR_VERSION_R5);
     FastFHIR::Builder &builder = *stream;
 
+    // BENCH_FF_PREFAULT: touch one byte per page of the arena BEFORE the clock
+    // starts. Memory::create only reserves; every page is first-touched during
+    // the build, and N threads first-touching one fresh anonymous mapping
+    // serialize on the kernel's VM lock. Pre-faulting moves that cost outside
+    // the measured window, which says how much of the parallel sys time it is.
+    // Diagnostic only -- a run with this set is not comparable to one without.
+    if (std::getenv("BENCH_FF_PREFAULT"))
+    {
+      volatile std::uint8_t sink = 0;
+      std::uint8_t *base = const_cast<std::uint8_t *>(payload_memory.base());
+      const std::size_t page = 16384;  // Apple silicon
+      for (std::size_t off = 0; off < arena_hint; off += page)
+        sink = static_cast<volatile std::uint8_t &>(base[off]) = 0;
+      (void)sink;
+    }
+
+    std::int64_t trace_user0 = 0, trace_sys0 = 0;
+    const bool trace = std::getenv("BENCH_FF_TRACE") != nullptr;
+    if (trace) bench::process_cpu_split_ns(trace_user0, trace_sys0);
+
     Timer test1_timer;
     test1_timer.start();
 
+    // Task list first: patients then observations, the entry order the other
+    // arms use.
+    std::vector<FfBuildItem> items;
+    items.reserve(fixture.bundle.size() + total_observation_count);
+    for (const auto &item : fixture.bundle)
+      items.push_back(FfBuildItem{&item.patient, nullptr});
+    for (const auto &item : fixture.bundle)
+      for (const auto &observation : item.observations)
+        items.push_back(FfBuildItem{nullptr, &observation});
+
+    // Pre-allocate the inline entry array (FF_Ingestor.cpp step 2): N
+    // default-constructed BundleentryData means append_obj lays down
+    // [FF_ARRAY header | entry[0] | entry[1] | ...] as one contiguous region,
+    // and every worker below patches inside its own already-allocated slot.
     BundleData bundle{};
     bundle.type = FF_BundleType::Collection;
+    bundle.entry = std::vector<BundleentryData>(items.size());
 
-    std::vector<BundleentryData> entries(fixture.bundle.size());
-    // #if defined(__APPLE__)
-    //   EntryBuildContext context{&builder, &fixture.bundle, &entries};
-    //   dispatch_apply_f(entries.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
-    //                    build_bundle_entry);
-    // #elif defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
-    //   std::transform(
-    //       std::execution::par_unseq,
-    //       fixture.bundle.begin(),
-    //       fixture.bundle.end(),
-    //       entries.begin(),
-    //       [&builder](const BundlePatient& item) -> BundleentryData {
-    //         auto patient_handle = builder.append_obj(PatientData{});
-    //         assign::assign_patient(item.patient, patient_handle);
-    //         return BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
-    //       });
-    // #else
-    std::transform(
-        fixture.bundle.begin(),
-        fixture.bundle.end(),
-        entries.begin(),
-        [&builder](const BundlePatient &item) -> BundleentryData
-        {
-          auto patient_handle = builder.append_obj(item.patient);
-          return BundleentryData{.resource = static_cast<ResourceReference>(patient_handle)};
-        });
-    // #endif
-    std::vector<const ObservationData *> observation_ptrs;
-    observation_ptrs.reserve(total_observation_count);
-    for (const auto &item : fixture.bundle)
+    FastFHIR::Reflective::ObjectHandle root_handle = builder.append_obj(bundle);
+    FastFHIR::Reflective::ObjectHandle entry_array =
+        root_handle[FastFHIR::Fields::BUNDLE::ENTRY];
+
+    const unsigned int worker_count = bench::g_serial_build ? 1u : ff_worker_threads();
+
+    if (worker_count <= 1)
     {
-      for (const auto &observation : item.observations)
+      for (std::uint32_t idx = 0; idx < items.size(); ++idx)
+        ff_build_one(builder, entry_array, items[idx], idx);
+    }
+    else if (const char *mode = std::getenv("BENCH_FF_MODE");
+             mode && std::string_view(mode) == "split")
+    {
+      // Diagnostic mode: no queue, no parking. Each worker takes a contiguous
+      // pre-assigned range, so the ONLY shared mutable state left is the arena
+      // write head and the pages it hands out. If sys time collapses here, the
+      // kernel time the queue mode burns is park/notify; if it does not, it is
+      // page faults on the sparse VMA.
+      std::vector<std::thread> workers;
+      workers.reserve(worker_count);
+      const std::size_t n = items.size();
+      for (unsigned int w = 0; w < worker_count; ++w)
       {
-        observation_ptrs.push_back(&observation);
+        const std::size_t begin = (n * w) / worker_count;
+        const std::size_t end = (n * (w + 1)) / worker_count;
+        workers.emplace_back([&builder, &entry_array, &items, begin, end]()
+                             {
+          for (std::size_t idx = begin; idx < end; ++idx)
+            ff_build_one(builder, entry_array, items[idx], static_cast<std::uint32_t>(idx)); });
       }
+      for (auto &worker : workers)
+        worker.join();
     }
-
-    std::vector<BundleentryData> observation_entries(observation_ptrs.size());
-    // #if defined(__APPLE__)
-    //   ObservationBuildContext observation_context{&builder, &observation_ptrs, &observation_entries};
-    //   dispatch_apply_f(observation_entries.size(),
-    //                    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-    //                    &observation_context,
-    //                    build_observation_entry);
-    // #elif defined(__cpp_lib_execution) && (__cpp_lib_execution >= 201603L)
-    //   std::transform(
-    //       std::execution::par_unseq,
-    //       observation_ptrs.begin(),
-    //       observation_ptrs.end(),
-    //       observation_entries.begin(),
-    //       [&builder](const ObservationData* observation) -> BundleentryData {
-    //         auto observation_handle = builder.append_obj(ObservationData{});
-    //         assign::assign_observation(*observation, observation_handle);
-    //         return BundleentryData{.resource = static_cast<ResourceReference>(observation_handle)};
-    //       });
-    // #else
-    std::transform(
-        observation_ptrs.begin(),
-        observation_ptrs.end(),
-        observation_entries.begin(),
-        [&builder](const ObservationData *observation) -> BundleentryData
-        {
-          auto observation_handle = builder.append_obj(*observation);
-          return BundleentryData{.resource = static_cast<ResourceReference>(observation_handle)};
-        });
-    // #endif
-
-    bundle.entry = std::move(entries);
-    if (!observation_entries.empty())
+    else
     {
-      bundle.entry.insert(bundle.entry.end(),
-                          std::make_move_iterator(observation_entries.begin()),
-                          std::make_move_iterator(observation_entries.end()));
+      FfBuildQueue task_queue;
+      std::atomic<BuildPool> status{BuildPool::RUNNING};
+      std::atomic<std::uint32_t> waiters{0};
+      std::atomic<bool> faulted{false};
+
+      // Consumers are latched HERE, before the first push, on this thread.
+      // get_consumer() pins the queue's current head node; a consumer created
+      // inside the worker body can start mid-stream and silently lose every
+      // entry retired before it ran (FF_Queue.hpp; TASKS.md AR-3).
+      std::vector<FfBuildQueue::Consumer> consumers;
+      consumers.reserve(worker_count);
+      for (unsigned int i = 0; i < worker_count; ++i)
+        consumers.emplace_back(task_queue.get_consumer());
+
+      std::vector<std::thread> workers;
+      workers.reserve(worker_count);
+      for (unsigned int i = 0; i < worker_count; ++i)
+      {
+        workers.emplace_back([&builder, &entry_array, &items, &status, &waiters, &faulted,
+                              consumer = std::move(consumers[i])]() mutable
+                             {
+          FfBuildTask task;
+          for (;;)
+          {
+            if (status.load(std::memory_order_acquire) == BuildPool::FAULTED) break;
+            if (consumer.pop(task))
+            {
+              try
+              {
+                for (std::uint32_t idx = task.begin; idx < task.end; ++idx)
+                  ff_build_one(builder, entry_array, items[idx], idx);
+              }
+              catch (...)
+              {
+                faulted.store(true, std::memory_order_release);
+                status.store(BuildPool::FAULTED, std::memory_order_release);
+                status.notify_all();
+                break;
+              }
+              continue;
+            }
+            if (status.load(std::memory_order_acquire) == BuildPool::COMPLETE) break;
+            park_for_task(status, waiters);
+          } });
+      }
+
+      {
+        auto injector = task_queue.get_injector();
+        const std::uint32_t batch = ff_batch_size();
+        const std::uint32_t n = static_cast<std::uint32_t>(items.size());
+        for (std::uint32_t begin = 0; begin < n; begin += batch)
+        {
+          injector.push(FfBuildTask{begin, std::min(begin + batch, n)});
+          notify_parked(status, waiters);
+        }
+      }
+      status.store(BuildPool::COMPLETE, std::memory_order_release);
+      status.notify_all();
+
+      for (auto &worker : workers)
+        worker.join();
+
+      if (faulted.load(std::memory_order_acquire))
+        throw std::runtime_error("fastfhir arm: concurrent bundle build faulted");
     }
 
-    // The sealed Bundle's own entry count, like the JSON arm's.
+    // The sealed Bundle's own entry count, like the JSON arm's. The Bundle was
+    // appended before the workers ran, so root_handle IS the root -- appending
+    // it a second time here would write a whole duplicate Bundle whose entry
+    // slots are the unpatched originals.
     const std::int64_t test1_entries = static_cast<std::int64_t>(bundle.entry.size());
-    const auto root = builder.append_obj(bundle);
-    (void)seal_stream(stream, root, "fastfhir arm bundle");
+    (void)seal_stream(stream, root_handle, "fastfhir arm bundle");
     const std::int64_t test1_ns = test1_timer.stop_ns();
+    const std::int64_t test1_cpu_ns = test1_timer.cpu_ns();
+    if (trace)
+    {
+      std::int64_t u1 = 0, s1 = 0;
+      bench::process_cpu_split_ns(u1, s1);
+      std::fprintf(stderr,
+                   "[cpu] fastfhir test_1 workers=%u wall=%.3fms user=%.3fms sys=%.3fms "
+                   "cores=%.2f\n",
+                   worker_count, test1_ns / 1e6, (u1 - trace_user0) / 1e6,
+                   (s1 - trace_sys0) / 1e6,
+                   test1_cpu_ns > 0 ? (double)test1_cpu_ns / (double)test1_ns : 0.0);
+    }
     // Wire size is read AFTER the clock stops -- nothing goes between the last
     // real operation and stop_ns() (notes.md section 6).
     const std::int64_t test1_bytes = static_cast<std::int64_t>(payload_memory.view().size());
-    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, 0, test1_bytes,
-                           /*ops=*/0, /*entries=*/test1_entries});
+    out.metrics.push_back({"fastfhir", Stage::Test1Serialize, test1_ns, /*bytes_in=*/0,
+                           test1_bytes, /*ops=*/0, /*entries=*/test1_entries,
+                           /*cpu_ns=*/test1_cpu_ns});
     // --dump-artifacts input (see main.cpp): the sealed wire bytes.
     {
       const auto v = payload_memory.view();
@@ -217,11 +371,9 @@ namespace bench
       // Leaves actually present in what this arm just wrote -- measured from
       // the OUTPUT, not from the fixture, so an arm that dropped fields reports
       // fewer. After the clock stops, like the byte count above.
-      if (bench::g_count_elements) {
-        const std::vector<uint8_t> __w(v.data(), v.data() + v.size());
-        out.test1_elements =
-            static_cast<std::int64_t>(bench::test_5::BENCH_ARM_NS::calc_stream_hash(__w).units.size());
-      }
+      if (bench::g_count_elements)
+        out.test1_elements = bench::test_5::BENCH_ARM_NS::count_output_elements(
+            reinterpret_cast<const char *>(v.data()), v.size());
     }
 
     if (std::getenv("BENCH_VALIDATE"))

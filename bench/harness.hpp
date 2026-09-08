@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -96,6 +98,15 @@ struct MetricEvent {
   // 0 means "not applicable to this stage", never "handled none": a stage that
   // processes resources and reports 0 fails the gate in main().
   std::int64_t entries = 0;
+
+  // CPU nanoseconds (user+sys, summed over every thread in the process) burned
+  // inside the same window duration_ns measures. cpu_ns / duration_ns is the
+  // average number of cores busy: 1.0 is a serial stage, 18.0 saturates this
+  // host. Without it a wall-clock table cannot distinguish "this arm is
+  // efficient" from "this arm used more cores", and those are different claims.
+  //
+  // -1 means the stage did not sample it.
+  std::int64_t cpu_ns = -1;
 };
 
 struct ArmRunResult {
@@ -128,9 +139,60 @@ struct ArmRunResult {
 // Set by the harness for the first run of each size only; see test1_elements.
 inline bool g_count_elements = false;
 
+// --serial-build: force every arm's Test 1 construction loop onto one thread.
+//
+// Two arms build their per-resource representation with dispatch_apply on
+// macOS -- FastFHIR through Builder::append_obj (lock-free claim_space) and
+// json_fhir through independent nlohmann DOMs merged afterwards. Default is
+// parallel for both: each arm runs at its best, which is the comparison the
+// timing table claims to make.
+//
+// The flag exists because the two runs answer different questions. Parallel vs
+// parallel is the format comparison; serial vs serial isolates per-resource
+// encoding cost from thread count. Running the same corpus both ways is what
+// separates "FastFHIR is a faster encoder" from "FastFHIR scales with cores",
+// and one number cannot say both.
+//
+// hl7v2 and google_fhir are serial in every configuration, so this flag does
+// not reach them.
+inline bool g_serial_build = false;
+
+// Process-wide CPU time (user+sys over ALL threads). getrusage(RUSAGE_SELF)
+// aggregates every thread, which is exactly the quantity that reveals whether a
+// parallel stage actually occupied the cores it dispatched to.
+inline std::int64_t process_cpu_ns() {
+  struct rusage ru {};
+  if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
+  const auto to_ns = [](const struct timeval& tv) -> std::int64_t {
+    return static_cast<std::int64_t>(tv.tv_sec) * 1000000000LL +
+           static_cast<std::int64_t>(tv.tv_usec) * 1000LL;
+  };
+  return to_ns(ru.ru_utime) + to_ns(ru.ru_stime);
+}
+
+// user/sys split of the same counters. A parallel stage that inflates USER
+// time is spinning (a CAS retry loop); one that inflates SYS time is churning
+// on park/wake syscalls. The totals cannot tell those apart, and the fix is
+// different for each.
+inline void process_cpu_split_ns(std::int64_t& user_ns, std::int64_t& sys_ns) {
+  struct rusage ru {};
+  if (getrusage(RUSAGE_SELF, &ru) != 0) { user_ns = sys_ns = -1; return; }
+  const auto to_ns = [](const struct timeval& tv) -> std::int64_t {
+    return static_cast<std::int64_t>(tv.tv_sec) * 1000000000LL +
+           static_cast<std::int64_t>(tv.tv_usec) * 1000LL;
+  };
+  user_ns = to_ns(ru.ru_utime);
+  sys_ns = to_ns(ru.ru_stime);
+}
+
 class Timer {
  public:
-  void start() { begin_ = std::chrono::steady_clock::now(); }
+  void start() { begin_ = std::chrono::steady_clock::now(); cpu_begin_ = process_cpu_ns(); }
+  // CPU nanoseconds since start(). Read it in the same breath as stop_ns().
+  std::int64_t cpu_ns() const {
+    const std::int64_t now = process_cpu_ns();
+    return (now < 0 || cpu_begin_ < 0) ? -1 : now - cpu_begin_;
+  }
   std::int64_t stop_ns() const {
     const auto end = std::chrono::steady_clock::now();
     const auto elapsed_ns =
@@ -143,6 +205,7 @@ class Timer {
 
  private:
   std::chrono::steady_clock::time_point begin_{};
+  std::int64_t cpu_begin_ = -1;
 };
 
 inline std::string to_string(Stage s) {

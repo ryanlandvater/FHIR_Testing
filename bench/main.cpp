@@ -2,6 +2,8 @@
 // Supports macOS (all 4 arms) and Windows (FFHR + JSON arms).
 // Platform differences gated by __APPLE__ and HAVE_GOOGLE_FHIR macros.
 
+#include <thread>
+#include <FF_Concurrency.hpp>
 #include "harness.hpp"
 #include "poco_leaves.hpp"
 #include "poco_set.hpp"
@@ -123,9 +125,21 @@ int main(int argc, char **argv)
   const std::vector<std::string_view> args(argv, argv + argc);
 
   // Defaults
-  int iterations = 1;
+  // TWO AXES, NAMED THE SAME WAY IN BOTH BENCHMARKS (scripts/recovery_sweep.py
+  // uses REPLICATES/`replicate` for its damage draws).
+  //
+  //   replicate = one independent draw of the randomized INPUT. Here that is a
+  //               bundle composition; in bench 5 it is a damage pattern.
+  //   run       = one timed repetition over a replicate whose input is FIXED.
+  //
+  // They were previously collapsed into one loop that drew a fresh bundle every
+  // iteration, so run-to-run spread was workload variance and measurement noise
+  // added together and neither could be reported. Measured on the 2026-09-05
+  // corpus: raw duration CV 70-130% per arm, because the fill loop needs
+  // anywhere from 9 to 22 Synthea patients to reach the same nominal 64 MB.
+  int num_runs = 3;
   int warmup_iterations = 1;
-  int num_runs = 10;
+  int num_replicates = 20;
   int64_t bundle_max_mb = 0;
   bool bundle_max_mb_explicit = false;
   int64_t fastfhir_vma_mb = 0;
@@ -155,7 +169,13 @@ int main(int argc, char **argv)
   {
     if (args[i] == "--iterations" && i + 1 < args.size())
     {
-      iterations = std::max(1, std::atoi(args[i + 1].data()));
+      // Deprecated alias: it nested a second fresh-bundle loop inside --runs,
+      // which is the confound the replicate/run split removes. Folded onto
+      // --runs so old invocations still mean "measure more times".
+      num_runs = std::max(1, std::atoi(args[i + 1].data()));
+      std::cerr << "[warn] --iterations is deprecated; treating it as --runs "
+                   "(timed repetitions per replicate). Use --replicates for "
+                   "distinct bundle draws.\n";
     }
     else if (args[i] == "--warmup-iterations" && i + 1 < args.size())
     {
@@ -163,7 +183,15 @@ int main(int argc, char **argv)
     }
     else if (args[i] == "--runs" && i + 1 < args.size())
     {
+      // NOTE: this changed meaning on 2026-09-05. It used to be the number of
+      // bundle draws; it is now timed repetitions over one fixed bundle. Use
+      // --replicates for the old axis. The banner prints both so an old script
+      // cannot be misread as the old semantics.
       num_runs = std::max(1, std::atoi(args[i + 1].data()));
+    }
+    else if (args[i] == "--replicates" && i + 1 < args.size())
+    {
+      num_replicates = std::max(1, std::atoi(args[i + 1].data()));
     }
     else if (args[i] == "--bundle-max-mb" && i + 1 < args.size())
     {
@@ -195,6 +223,14 @@ int main(int argc, char **argv)
     else if (args[i] == "--seed" && i + 1 < args.size())
     {
       rng_seed = static_cast<unsigned int>(std::strtoul(args[i + 1].data(), nullptr, 10));
+    }
+    else if (args[i] == "--serial-build")
+    {
+      // One thread for every arm's Test 1 construction loop. See
+      // harness.hpp g_serial_build: the default (parallel) run compares
+      // formats at their best; this run compares per-resource encoding cost
+      // with thread count held at one.
+      bench::g_serial_build = true;
     }
     else if (args[i] == "--bundle-targets-mb" && i + 1 < args.size())
     {
@@ -266,7 +302,25 @@ int main(int argc, char **argv)
     std::cerr << "No patient JSON files found in " << synthea_dir << ".\n";
     return 1;
   }
-  std::cerr << "Loaded " << all_patients.size() << " patients.\n\n";
+  std::cerr << "Loaded " << all_patients.size() << " patients.\n";
+  // Which configuration produced these numbers. Two arms build in parallel by
+  // default and two never do, so a timing table read without this line cannot
+  // be placed on either curve.
+  // Which configuration produced these numbers, and how many cores it was
+  // allowed. A timing table read without this line cannot be placed on either
+  // curve. The cpu_ns column carries the measured answer per row; this is the
+  // requested configuration.
+  std::cerr << "Test 1 construction: "
+            << (bench::g_serial_build
+                    ? "SERIAL (--serial-build) -- every arm one thread"
+                    : "PARALLEL -- fastfhir builds through FIFO::Queue workers, json_fhir"
+                      " dispatches per resource; hl7v2 + google_fhir are serial either way")
+            << "\n  hardware_concurrency=" << std::thread::hardware_concurrency()
+            << ", performance cores=" << FastFHIR::performance_core_count()
+            << " (the pool default)";
+  if (const char *t = std::getenv("BENCH_FF_THREADS"))
+    std::cerr << ", BENCH_FF_THREADS=" << t;
+  std::cerr << "\n\n";
 
   std::mt19937 rng(rng_seed != 0 ? rng_seed : std::random_device{}());
   std::cerr << "Bundle composition seed: "
@@ -295,10 +349,33 @@ int main(int argc, char **argv)
 #if defined(HAVE_GOOGLE_FHIR)
     const auto gf = bench::run_google_fhir_bundle(bundle);
 #endif
+    // REPORT WHAT WAS WRITTEN, NOT WHAT WAS INTENDED.
+    //
+    // This printed "wrote <name> (N bytes)" from bytes.size() without ever
+    // testing the stream. An artifacts directory that does not exist makes the
+    // ofstream fail to open, the write a no-op, and the message a lie -- the
+    // run reports four artifacts and produces none, and every downstream stage
+    // then reads whatever stale files were there before.
+    //
+    // Loud, not silent: a corruption sweep run against artifacts that were
+    // never written measures the previous run.
     auto write = [&](const char *name, const std::string &bytes)
     {
-      std::ofstream ofs(std::string(artifacts_dir) + "/" + name, std::ios::binary);
+      const std::string path = std::string(artifacts_dir) + "/" + name;
+      std::ofstream ofs(path, std::ios::binary);
+      if (!ofs)
+      {
+        std::cerr << "[artifacts] FAILED to open " << path
+                  << " -- does the directory exist?\n";
+        std::exit(4);
+      }
       ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+      ofs.flush();
+      if (!ofs)
+      {
+        std::cerr << "[artifacts] FAILED writing " << path << "\n";
+        std::exit(4);
+      }
       std::cerr << "[artifacts] wrote " << name << " (" << bytes.size() << " bytes)\n";
     };
     write("fastfhir.bin", ff.test1_payload);
@@ -397,7 +474,8 @@ int main(int argc, char **argv)
   }
   std::cerr << "\n";
 
-  std::cout << "arm,test,duration_ns,ops,bytes_in,bytes_out,target_mb,patients_in_bundle\n"
+  std::cout << "arm,test,duration_ns,ops,bytes_in,bytes_out,target_mb,patients_in_bundle,cpu_ns,"
+               "replicate,run\n"
             << std::flush;
 
   // -----------------------------------------------------------------------
@@ -539,7 +617,8 @@ int main(int argc, char **argv)
 #endif
 
   // Emit CSV regardless of DB availability
-  auto emit_metric = [&](const bench::MetricEvent &m, int64_t target_mb, int64_t n_patients)
+  auto emit_metric = [&](const bench::MetricEvent &m, int64_t target_mb, int64_t n_patients,
+                         int replicate, int run_index)
   {
     // A serialize stage that produced no wire bytes did not serialize anything.
     // 0 is reserved for "not applicable to this stage" (harness.hpp), so this
@@ -551,7 +630,8 @@ int main(int argc, char **argv)
     }
     std::cout << m.arm << "," << bench::to_string(m.stage) << "," << m.duration_ns
               << "," << m.ops << "," << m.bytes_in << "," << m.bytes_out
-              << "," << target_mb << "," << n_patients << "\n"
+              << "," << target_mb << "," << n_patients << "," << m.cpu_ns
+              << "," << replicate << "," << run_index << "\n"
               << std::flush;
   };
 
@@ -563,41 +643,58 @@ int main(int argc, char **argv)
   for (const int64_t target_bytes : target_sizes_bytes)
   {
     const int64_t target_mb = target_bytes / (1024 * 1024);
-    std::cerr << "=== " << target_mb << " MB (" << num_runs << " runs, "
-              << warmup_iterations << " warmups) ===\n";
+    std::cerr << "=== " << target_mb << " MB (" << num_replicates
+              << " replicates x " << num_runs << " runs, " << warmup_iterations
+              << " warmups) ===\n";
 
-    for (int sample_run = 0; sample_run < num_runs; ++sample_run)
+    for (int replicate = 0; replicate < num_replicates; ++replicate)
     {
-      for (int iter = 0; iter < iterations; ++iter)
+      // ONE bundle per replicate, drawn from a seed derived from
+      // (base seed, target size, replicate index) rather than from a single
+      // stream shared by the whole sweep. Two consequences, both load-bearing:
+      //
+      //  - Replicate r at a given size is the SAME bundle regardless of
+      //    --runs, --replicates, or which sizes ran before it. Under the old
+      //    single-stream RNG, changing --runs changed every bundle drawn
+      //    afterwards, so two invocations were not comparable at all.
+      //  - The bundle is fixed for the whole replicate, so the run loop below
+      //    measures the engine and nothing else.
+      std::seed_seq seq{static_cast<uint32_t>(rng_seed),
+                        static_cast<uint32_t>(target_bytes & 0xFFFFFFFF),
+                        static_cast<uint32_t>((target_bytes >> 32) & 0xFFFFFFFF),
+                        static_cast<uint32_t>(replicate)};
+      std::mt19937 rep_rng(seq);
+
+      bench::BundleBenchFixture bundle{};
+      bundle.target_size_bytes = target_bytes;
+      bundle.fastfhir_vma_bytes = fastfhir_vma_mb > 0 ? fastfhir_vma_mb * 1024 * 1024 : 0;
+
+      int64_t accumulated = 0;
+      while (accumulated < target_bytes)
       {
-        // Build a fresh random bundle
-        bench::BundleBenchFixture bundle{};
-        bundle.target_size_bytes = target_bytes;
-        bundle.fastfhir_vma_bytes = fastfhir_vma_mb > 0 ? fastfhir_vma_mb * 1024 * 1024 : 0;
+        const auto &p = all_patients[patient_dist(rep_rng)];
+        bundle.bundle.push_back(bench::clone_bundle_patient(p.patient));
+        accumulated += p.patient.memory.size();
+      }
+      bundle.actual_ingested_bytes = accumulated;
+      const int64_t n_patients = static_cast<int64_t>(bundle.bundle.size());
 
-        int64_t accumulated = 0;
-        while (accumulated < target_bytes)
-        {
-          const auto &p = all_patients[patient_dist(rng)];
-          bundle.bundle.push_back(bench::clone_bundle_patient(p.patient));
-          accumulated += p.patient.memory.size();
-        }
-        bundle.actual_ingested_bytes = accumulated;
-        const int64_t n_patients = static_cast<int64_t>(bundle.bundle.size());
+      if (replicate == 0)
+      {
+        std::cerr << "  Typical bundle: " << n_patients << " patients, "
+                  << (accumulated / (1024 * 1024)) << " MB ingested FFHR\n";
+      }
 
-        if (sample_run == 0 && iter == 0)
-        {
-          std::cerr << "  Typical bundle: " << n_patients << " patients, "
-                    << (accumulated / (1024 * 1024)) << " MB ingested FFHR\n";
-        }
+      // Warmup once per replicate, not once per run: the run loop below is
+      // repeated measurement of an already-warm fixture.
+      warmup_arms(bundle, warmup_iterations);
 
+      for (int run_index = 0; run_index < num_runs; ++run_index)
+      {
         // Element counting re-walks each arm's whole output, so ask for it
         // once per bundle size rather than on every timed run. It happens after
         // each stage's clock stops and so cannot affect a measurement.
-        bench::g_count_elements = (sample_run == 0 && iter == 0);
-
-        // Warmup (unmeasured)
-        warmup_arms(bundle, warmup_iterations);
+        bench::g_count_elements = (replicate == 0 && run_index == 0);
 
         // Timed runs — all available arms
         const auto ff = bench::run_fastfhir_bundle(bundle);
@@ -811,7 +908,7 @@ int main(int argc, char **argv)
         {
           for (const auto &m : metrics)
           {
-            emit_metric(m, target_mb, n_patients);
+            emit_metric(m, target_mb, n_patients, replicate, run_index);
             insert_metric(m, target_mb, n_patients);
           }
         };

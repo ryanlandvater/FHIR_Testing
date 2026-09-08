@@ -2719,6 +2719,8 @@ inline namespace BENCH_ARM_NS {
     inline void assign_observation_id(const ObservationData &src, HL7v2Sink &dst)
     {
       hl7_mark_if_string(dst, "observation.id", src.id);
+      // OBX-4: name the owner in the row, not by position.
+      dst.current_obx.sub_id = std::string(src.id);
     }
 #endif
 
